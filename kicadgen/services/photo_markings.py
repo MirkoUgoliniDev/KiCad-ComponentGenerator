@@ -18,6 +18,7 @@ same shape rules as the inventory (MARKING_RULES).
 """
 from __future__ import annotations
 
+import hashlib
 import math
 
 from .ai_diagnostics import CallCancelled
@@ -149,7 +150,7 @@ def _crop(photo, component, length_mm, width_mm):
 
 
 def read_markings(photo, components, length_mm, width_mm, model, call, log,
-                  cache_dir=None, announce=None):
+                  cache_dir=None, announce=None, prompt=None):
     """@brief Re-read, on enlarged crops, the markings of the bodies that carry one.
 
     @param photo Calibrated BGR crop of the board.
@@ -161,6 +162,12 @@ def read_markings(photo, components, length_mm, width_mm, model, call, log,
     @param log Progress callback.
     @param cache_dir Optional content-addressed cache folder.
     @param announce Optional phase callback (tool, detail).
+    @param prompt Profile field 'marking_prompt'; None or blank sends PROMPT.
+        The cache key is the whole request (photo_grounding.cached_call), so
+        an edited prompt never replays an answer cached for another text, and
+        every marking set records the SHA-256 of the prompt sent
+        (`_marking_prompt_sha256`) beside PROMPT_VERSION, which only versions
+        the schema and the factory text.
     @return Number of markings replaced by a better reading.
     @note Only bodies whose inventory marking is not empty are sent: a body
         with no printed text costs nothing. A new reading replaces the old one
@@ -216,7 +223,12 @@ def read_markings(photo, components, length_mm, width_mm, model, call, log,
         log(tx("Lettura delle sigle: una richiesta a pagamento con {n} ritagli dei soli corpi "
                "con una scritta, a {native:.1f} px/mm invece dei {seen:.1f} visti "
                "dall'inventario.", n=len(expected), native=native, seen=seen))
-    kwargs = dict(model=model, system_prompt=PROMPT, content_blocks=content,
+    # The profile's text (blank or missing: the factory PROMPT).
+    # prompt_catalog.effective_text: a default-equal text sends the default's bytes (V4-5).
+    from .prompt_catalog import effective_text
+    system_prompt = effective_text('marking_prompt', {'marking_prompt': prompt})
+    prompt_sha256 = hashlib.sha256(system_prompt.encode()).hexdigest()
+    kwargs = dict(model=model, system_prompt=system_prompt, content_blocks=content,
                   tool=reading_tool(), max_tokens=4000, has_pdf=False)
     try:
         data = cached_call(call, kwargs, cache_dir, tx("Lettura delle sigle"), log,
@@ -255,8 +267,10 @@ def read_markings(photo, components, length_mm, width_mm, model, call, log,
         component['marking_confidence'] = confidence
         component['_marking_source'] = 'dedicated_crop_reading'
         component['_marking_prompt_version'] = PROMPT_VERSION
+        component['_marking_prompt_sha256'] = prompt_sha256
     write_stage_audit(cache_dir, 'marking-reading', dict(
-        version=PROMPT_VERSION, model=model, expected_ids=expected, response=data,
+        version=PROMPT_VERSION, prompt_sha256=prompt_sha256, model=model,
+        expected_ids=expected, response=data,
         replaced=replaced,
         notice='Literal markings read by a vision model: evidence, not verified identity'), log)
     log(tx("Lettura delle sigle: {replaced} sigle migliorate su {n} corpi con una scritta.",

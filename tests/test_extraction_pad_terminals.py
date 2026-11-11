@@ -36,12 +36,24 @@ def _answer(*pads, unit="mm", value_sources=None):
     return answer
 
 
-def _params(answer, dedicated_holes=None):
-    """The validated result of a single-part answer; `dedicated_holes` as apply_dedicated_pads leaves them."""
+def _params(answer, dedicated_holes=None, dedicated_leads=None):
+    """The validated result of a single-part answer.
+
+    `dedicated_holes` and `dedicated_leads` as apply_dedicated_pads leaves
+    them: the printed holes and the terminals an independent dedicated
+    reading transcribed.
+    """
     data = ext.single_answer_to_data(answer)
     if dedicated_holes is not None:
         data["_dedicated_holes"] = dedicated_holes
+    if dedicated_leads is not None:
+        data["_dedicated_leads"] = dedicated_leads
     return ext._params_from_tool_arguments(data)
+
+
+def _second_reading(lead, *numbers):
+    """The same terminal transcribed by the dedicated reading for the pads `numbers`."""
+    return {number: {"lead": dict(lead), "rounding_mm": 0.05, "text": ""} for number in numbers}
 
 
 def _pins(params):
@@ -69,10 +81,16 @@ def test_a_printed_hole_is_kept_as_read_and_its_land_follows_it():
 
 
 def test_a_hole_not_printed_is_derived_from_the_read_terminal():
-    """Negative twin: the same model value 1.3, NOT declared printed, gives way to the terminal."""
+    """Negative twin: the same model value 1.3, NOT declared printed, gives way to the terminal.
+
+    CONTRACT CHANGED (user, 2026-11-11, round 6 (b)): a terminal is «read»
+    when the dedicated reading transcribed the same one, given here; read
+    by the main answer alone it is «estimated» (test_extraction_review_round6).
+    """
     params = _params(_answer(_pad("1", 0.0, drill_mm=1.3, lead=ROUND_06,
                                   value_sources={"drill_mm": "estimated", "lead": "read"}),
-                             _pad("2", 5.0, lead=ROUND_06, value_sources={"lead": "read"})))
+                             _pad("2", 5.0, lead=ROUND_06, value_sources={"lead": "read"})),
+                     dedicated_leads=_second_reading(ROUND_06, "1", "2"))
     drill, pad = tht_estimates.estimated_round_pad(ROUND_06)
     for pin in _pins(params).values():
         assert (pin["drill_mm"], pin["pad_length_mm"], pin["pad_width_mm"]) == (drill, pad, pad)
@@ -92,9 +110,11 @@ def test_an_estimated_terminal_gives_estimated_values():
 
 def test_a_printed_land_is_kept_around_a_derived_hole():
     flat = {"shape": "flat", "width_mm": 1.0, "thickness_mm": 0.4}
+    # The terminal is read twice (round 6 (b), 2026-11-11): that is what makes the hole «derived».
     params = _params(_answer(_pad("1", 0.0, pad_length_mm=2.4, pad_width_mm=1.6, shape="oval", lead=flat,
                                   value_sources={"pad_size": "read", "lead": "read"}),
-                             _pad("2", 5.0, lead=flat, value_sources={"lead": "read"})))
+                             _pad("2", 5.0, lead=flat, value_sources={"lead": "read"})),
+                     dedicated_leads=_second_reading(flat, "1", "2"))
     one, two = _pins(params)["1"], _pins(params)["2"]
     assert (one["pad_length_mm"], one["pad_width_mm"], one["shape"]) == (2.4, 1.6, "oval")
     assert one["sources"]["pad_size"] == "read" and one["sources"]["drill_mm"] == "derived"

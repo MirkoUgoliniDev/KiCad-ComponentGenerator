@@ -49,6 +49,9 @@ from .openrouter import (DEFAULT_MODEL, OpenRouterError, ToolArgumentsError, api
                          check_credit, reset_usage, usage_totals)
 from .edge_notches import EdgeCount
 from .messages import end_sentence, tx
+# The registry imports no owning module at load time, so no import cycle.
+from .prompt_catalog import effective_text
+from .prompt_catalog import sending as prompt_sending
 
 MAX_FILES = 5
 
@@ -1226,9 +1229,13 @@ def read_pin_numbering(documents, *, rows, cols, model, call, prompt=None,
             f"La griglia dei pin ha {int(rows)} file (righe) e {int(cols)} posizioni per fila "
             f"(colonne) a passo costante. Riporta la posizione di ogni numero di pin stampato "
             f"nel disegno, come testo e come appare (1, 11, A1, EP), e chiama lo strumento.")})
-        data = call(model=model, system_prompt=prompt or DEFAULT_PIN_NUMBERING_PROMPT,
-                    content_blocks=blocks, tool=_pin_numbering_tool(),
-                    max_tokens=max_tokens, has_pdf=False)
+        # The profile text, or the default's bytes when it is the default
+        # (V4-5); the request declares the field it sends (V4-6).
+        sent = effective_text("numbering_prompt", {"numbering_prompt": prompt})
+        with prompt_sending({"numbering_prompt": sent}):
+            data = call(model=model, system_prompt=sent,
+                        content_blocks=blocks, tool=_pin_numbering_tool(),
+                        max_tokens=max_tokens, has_pdf=False)
     except ExtractionCancelled:
         raise
     except (OpenRouterError, ToolArgumentsError, ExtractionError) as exc:
@@ -1310,7 +1317,13 @@ DEFAULT_PAD_POSITIONS_PROMPT = (
     "non si riconosce dalla vista del pinout, non includerlo. FORI STAMPATI: se il disegno "
     "stampa il diametro dei fori (richiamo come \"3-Ø1.2\" o \"Ø1.3+0.1\"), riportalo in "
     "printed_holes coi numeri dei fori a cui si riferisce e il testo com'e' stampato; un foro "
-    "il cui diametro non e' stampato non va stimato. Rispondi SOLO chiamando lo strumento."
+    "il cui diametro non e' stampato non va stimato. TERMINALI QUOTATI: se il disegno quota la "
+    "SEZIONE dei terminali che entrano nei fori (reofori, pin, lamelle: un diametro come "
+    "\"Ø0.6\", oppure larghezza per spessore come \"1.0x0.4\"), riportala in printed_terminals "
+    "coi numeri dei fori a cui si riferisce: shape \"round\" con diameter, oppure shape "
+    "\"flat\" con width e thickness, e il testo com'e' stampato. E' il terminale, NON il foro; "
+    "un terminale la cui sezione non e' quotata resta fuori, non va stimato. "
+    "Rispondi SOLO chiamando lo strumento."
 )
 
 #: Default model of the dedicated pad-position reading (profile field
@@ -1430,6 +1443,31 @@ _PAD_POSITIONS_TOOL = {
                                     "description": "Solo per un'asola stampata: la sua lunghezza."},
                     "text": {"type": "string", "description": "Il richiamo com'e' stampato."},
                 }, "required": ["pads", "diameter"]},
+            },
+            # Second, independent transcription of the per-pad terminal
+            # (user, 2026-11-11: the main answer alone declared the terminals
+            # of a relay wrong and «read», and the holes were derived from
+            # them). The same shape as `lead` of the main schema, flat fields
+            # so that the strict conversion stays lossless.
+            "printed_terminals": {
+                "type": "array",
+                "description": ("SEZIONE dei terminali (reofori, pin, lamelle) QUOTATA nel disegno, "
+                                "nell'unita' di drawing_unit: una voce per quota, coi numeri dei "
+                                "fori in cui entrano quei terminali. NON e' il foro. Solo cio' che "
+                                "e' stampato: nessun terminale stimato."),
+                "items": {"type": "object", "properties": {
+                    "pads": {"type": "string",
+                             "description": "Numeri dei fori di questi terminali, separati da virgola."},
+                    "shape": {"type": "string", "enum": ["round", "flat"],
+                              "description": "round: terminale tondo; flat: lamella."},
+                    "diameter": {"type": "number", "exclusiveMinimum": 0,
+                                 "description": "Solo per round: il diametro quotato del terminale."},
+                    "width": {"type": "number", "exclusiveMinimum": 0,
+                              "description": "Solo per flat: la larghezza quotata della lamella."},
+                    "thickness": {"type": "number", "exclusiveMinimum": 0,
+                                  "description": "Solo per flat: lo spessore quotato della lamella."},
+                    "text": {"type": "string", "description": "La quota com'e' stampata."},
+                }, "required": ["pads", "shape"]},
             },
             "notes": {"type": "string"},
         },
@@ -2263,9 +2301,13 @@ def read_pad_positions(documents, *, model, call, prompt=None, progress=None,
         blocks.append({"type": "text", "text": (
             "Trascrivi le catene di quote dei fori o delle piazzole numerate del disegno e chiama "
             "lo strumento.")})
-        data = call(model=model, system_prompt=prompt or DEFAULT_PAD_POSITIONS_PROMPT,
-                    content_blocks=blocks, tool=_pad_positions_tool(),
-                    max_tokens=PAD_POSITIONS_MAX_TOKENS, has_pdf=False)
+        # The profile text, or the default's bytes when it is the default
+        # (V4-5); the request declares the field it sends (V4-6).
+        sent = effective_text("pad_positions_prompt", {"pad_positions_prompt": prompt})
+        with prompt_sending({"pad_positions_prompt": sent}):
+            data = call(model=model, system_prompt=sent,
+                        content_blocks=blocks, tool=_pad_positions_tool(),
+                        max_tokens=PAD_POSITIONS_MAX_TOKENS, has_pdf=False)
     except ExtractionCancelled:
         raise
     except (OpenRouterError, ToolArgumentsError, ExtractionError) as exc:
@@ -2274,6 +2316,8 @@ def read_pad_positions(documents, *, model, call, prompt=None, progress=None,
         return {"view": "unknown", "pads": {}, "notes": "", "failed": str(exc)}
     if not isinstance(data, dict):
         return {"view": "unknown", "pads": {}, "notes": "", "discarded": tx("risposta non strutturata")}
+    # The program's working state is never taken from the model (review V3-5).
+    data = without_private_keys(data)
     view = data.get("contacts_view")
     view = view if view in ("top", "bottom", "unknown") else "unknown"
     factor = _declared_unit_factor(data)
@@ -2287,7 +2331,89 @@ def read_pad_positions(documents, *, model, call, prompt=None, progress=None,
     solved = pads_from_chains(data.get("chains"), factor, data.get("midpoints"), pad_sizes)
     notes = data.get("notes")
     return dict(solved, view=view, notes=notes if isinstance(notes, str) else "",
-                holes=printed_holes(data.get("printed_holes"), factor))
+                holes=printed_holes(data.get("printed_holes"), factor),
+                leads=printed_terminals(data.get("printed_terminals"), factor))
+
+
+def without_private_keys(answer):
+    """@brief Return a model answer without the keys the program reserves for its own state.
+
+    The extractor keeps its working state in the answer dictionary under
+    keys that begin with «_» (`_dedicated_leads`, `_dedicated_holes`,
+    `_pin_map_conflict`, a pin's `_hole_rounding_mm`, a side's
+    `_contact_style_evidence`, ...). No tool schema declares such a field,
+    so one in a model answer can only be an injection that would pass for a
+    conclusion of the program (review V3-5, 2026-11-11): it is dropped at
+    every depth, in objects inside lists too.
+
+    @param answer The answer as the provider returned it, any type.
+    @return A copy with every «_»-prefixed key of every object removed; a
+        value that is neither an object nor a list is returned as it is.
+    """
+    if isinstance(answer, dict):
+        return {key: without_private_keys(value) for key, value in answer.items()
+                if not (isinstance(key, str) and key.startswith("_"))}
+    if isinstance(answer, list):
+        return [without_private_keys(value) for value in answer]
+    return answer
+
+
+def printed_terminals(entries, factor: float) -> dict:
+    """@brief The terminal sections a dedicated pad reading transcribed, per pad, in mm.
+
+    @param entries `printed_terminals` of the report_pad_positions answer:
+        per printed quote the pad numbers it names ("pads", comma-separated),
+        the shape ("round" with `diameter`, "flat" with `width` and
+        `thickness`) and the text as printed.
+    @param factor Drawing unit to millimetres.
+    @return {pad number: {"lead": {"shape": "round", "diameter_mm": d} or
+        {"shape": "flat", "width_mm": w, "thickness_mm": t}, "rounding_mm": r,
+        "text": t}}, the lead in the contract of `core.tht_estimates`, r the
+        coarsest rounding of its transcribed sizes (`_printed_hole_value`).
+        A malformed entry (no pad, an unknown shape, a size of that shape
+        missing or not a finite number > 0) is left out; a pad named by two
+        entries with different terminals keeps neither, with "conflict":
+        True -- the reading contradicts itself.
+    @note Transcriptions only, the second reading of a pad's terminal
+        (`_confirmed_lead_word`): nothing here is estimated or derived.
+    """
+    fields = {"round": (("diameter", "diameter_mm"),),
+              "flat": (("width", "width_mm"), ("thickness", "thickness_mm"))}
+    leads = {}
+    for entry in entries if isinstance(entries, list) else ():
+        # Review V3-3 (2026-11-11): a shape sent as a list or an object is
+        # unhashable and made the membership test raise; only a string can
+        # name a shape. Pads are named by a string (or a bare number).
+        shape = entry.get("shape") if isinstance(entry, dict) else None
+        pads = entry.get("pads") if isinstance(entry, dict) else None
+        if not isinstance(shape, str) or shape not in fields:
+            continue
+        if isinstance(pads, bool) or not isinstance(pads, (str, int)):
+            continue
+        text = str(entry.get("text") or "").strip()
+        lead, rounding = {"shape": shape}, 0.0
+        for given, key in fields[shape]:
+            size = _optional_number(entry.get(given), positive=True)
+            size_mm, size_rounding = ((None, None) if size is None
+                                      else _printed_hole_value(text, size, factor))
+            # Review V3-4: a finite size in the drawing unit may overflow
+            # once converted (1e308 inches); a size must stay finite and > 0
+            # in millimetres too.
+            if size_mm is None or not math.isfinite(size_mm) or size_mm <= 0:
+                lead = None
+                break
+            lead[key] = round(size_mm, 6)
+            rounding = max(rounding, size_rounding)
+        if lead is None:
+            continue
+        value = {"lead": lead, "rounding_mm": rounding, "text": text}
+        for number in _chain_stop_names(pads):
+            previous = leads.get(number)
+            if previous is None:
+                leads[number] = value
+            elif previous.get("lead") != lead:
+                leads[number] = {"conflict": True}
+    return leads
 
 
 def printed_holes(entries, factor: float) -> dict:
@@ -2677,9 +2803,13 @@ def read_body_dimensions(documents, *, model, call, prompt=None, progress=None,
         blocks.append({"type": "text", "text": (
             "Trascrivi le quote stampate dell'ingombro del corpo del componente e chiama lo "
             "strumento.")})
-        data = call(model=model, system_prompt=prompt or DEFAULT_BODY_DIMENSIONS_PROMPT,
-                    content_blocks=blocks, tool=_body_dimensions_tool(),
-                    max_tokens=PAD_POSITIONS_MAX_TOKENS, has_pdf=False)
+        # The profile text, or the default's bytes when it is the default
+        # (V4-5); the request declares the field it sends (V4-6).
+        sent = effective_text("body_dimensions_prompt", {"body_dimensions_prompt": prompt})
+        with prompt_sending({"body_dimensions_prompt": sent}):
+            data = call(model=model, system_prompt=sent,
+                        content_blocks=blocks, tool=_body_dimensions_tool(),
+                        max_tokens=PAD_POSITIONS_MAX_TOKENS, has_pdf=False)
     except ExtractionCancelled:
         raise
     except (OpenRouterError, ToolArgumentsError, ExtractionError) as exc:
@@ -3767,11 +3897,21 @@ def _pad_block_remedy(pins) -> str:
               "posizioni dei pad.")
 
 
+#: Key of a pad-layout candidate that no reading gave as it stands: the
+#: layout the drawn holes confirm where they contradict two agreeing readings
+#: (`_refuse_contradicted_agreement`). It appears in the option value and in
+#: the payload's `source` of a "pad_layout" question, like a reading's key.
+HOLES_SOURCE = "holes"
+
+
 def _reading_source(key: str) -> str:
     """The name of one reading in the messages."""
     return {"main": tx("coordinate della risposta principale"),
             "chains": tx("catene di quote della risposta principale"),
-            "dedicated": tx("lettura dedicata")}[key]
+            "dedicated": tx("lettura dedicata"),
+            # Not a reading: a layout the drawn holes confirm, offered beside
+            # the readings they contradict (`_hole_backed_layouts`).
+            HOLES_SOURCE: tx("disposizione confermata dai fori disegnati")}[key]
 
 
 def _hole_verdicts(readings, holes) -> str:
@@ -4006,7 +4146,8 @@ def _layout_digest(pads: dict) -> str:
 
 
 def _candidate_payload(data: dict, keys, pads: dict, spans: dict, centred: bool, view,
-                       factor: float, exchange: Optional[dict] = None) -> dict:
+                       factor: float, exchange: Optional[dict] = None,
+                       main_frame: Optional[bool] = None) -> dict:
     """What a chosen pad-layout candidate writes: the placement the automatic paths would write.
 
     One writer for every path (review 2026-11-10, A4: a layout chosen by the
@@ -4032,18 +4173,24 @@ def _candidate_payload(data: dict, keys, pads: dict, spans: dict, centred: bool,
     @param spans,centred The reading's outline spans (`_write_chain_pads`).
     @param view The view a reading of `keys` declares, or None.
     @param exchange The "exchange_body" entry of the candidate, or None.
+    @param main_frame None (default) applies the rule above to `keys`; True
+        says `pads` are already in the main answer's frame and are copied
+        with its declared origin, False that they are a chain layout to be
+        placed by `_write_chain_pads` -- for a layout that is no reading's
+        (`HOLES_SOURCE`) and is given in the frame of the reading it varies.
     @return {"source", "pins" (mm, the frame of `origin`), "origin", "view",
         "notes" (the lines the writer added: estimated axes, drawn outline)}
         plus "exchange_body" when given; JSON-able.
     """
     geometry = data["package_geometry"]
     chains = [key for key in keys if key != "main"]
-    keeps_main = "main" in keys and (not chains or geometry.get("origin") == "body_center")
+    keeps_main = ("main" in keys and (not chains or geometry.get("origin") == "body_center")
+                  if main_frame is None else bool(main_frame))
     notes = []
     if keeps_main:
         source, placed, origin = "main", dict(pads), geometry.get("origin") or "custom"
     else:
-        source = chains[0]
+        source = chains[0] if chains else keys[0]
         # A scratch answer: only what the writer reads (body sizes, measurer).
         scratch_geometry = {key: value for key, value in geometry.items() if key != "pins"}
         if exchange:
@@ -4084,10 +4231,15 @@ def _write_candidate(data: dict, pins: list, payload: dict, factor: float) -> No
     if isinstance(exchange, dict) and not data.get("_body_axes_measured"):
         _exchange_body_sizes(data, exchange["measured_mm"], exchange["evidence"])
     positions = {p["number"]: (p["x_mm"], p["y_mm"]) for p in payload["pins"]}
+    # A coordinate estimated from the drawing's pixels keeps its provenance
+    # (MEASURED_PIXELS_SOURCE), as when `_settle_by_measure` writes it.
+    measured = {p["number"]: p["source"] for p in payload["pins"] if p.get("source")}
     for pin in pins:
         if pin.get("number") in positions:
             x, y = positions[pin["number"]]
             pin["x_mm"], pin["y_mm"] = round(x / factor, 4), round(y / factor, 4)
+            if pin["number"] in measured:
+                pin["source"] = measured[pin["number"]]
     geometry["origin"] = payload.get("origin") or "custom"
     geometry["needs_review"] = True
     for line in payload.get("notes") or ():
@@ -4097,7 +4249,7 @@ def _write_candidate(data: dict, pins: list, payload: dict, factor: float) -> No
 
 
 def _block_or_ask(data: dict, pins: list, readings: list, holes, factor: float, message: str,
-                  progress, remark: str = "") -> None:
+                  progress, remark: str = "", extras=(), contradicted: bool = False) -> None:
     """Ask which complete layout is right when there are at least two, else block.
 
     `readings` are the (key, pads, spans, centred) tuples at hand; only the
@@ -4109,6 +4261,23 @@ def _block_or_ask(data: dict, pins: list, readings: list, holes, factor: float, 
     is lifted and the main pads stay with needs_review until the answer; a
     saved answer (data["_answers"]) is applied at once. With fewer, the
     hard block stands (`_block`): no single fact of the user's can close it.
+
+    `extras` are layouts the drawn holes CONFIRM and no reading gave
+    (`_hole_backed_layouts`), each one more option under HOLES_SOURCE with
+    its own label. With one of them on offer the readings' layout is offered
+    BESIDE it even when the holes refute it, its option saying what the
+    holes said: the choice is then between what two readings agree on and
+    what the drawing shows, never between wrong answers only (the reason of
+    audit A1 below), and the user arbitrates instead of the program adopting
+    either (user, 2026-11-11).
+
+    `contradicted` (round 7, `_refuse_contradicted_agreement`): the readings
+    AGREE and the drawn holes do not confirm their layout. The witness is
+    imperfect, so its refusal neither excludes that layout nor blocks: the
+    layout is always offered, with what the holes said about it, and ONE
+    option is enough for the question (the user confirms the agreed layout
+    after checking the drawing, or goes back). Only pads sharing a number
+    still block, since no chosen layout could be written back.
     """
     listed = [_pad_number_text(pin.get("number")) for pin in pins if isinstance(pin, dict)]
     numbers = set(listed)
@@ -4117,6 +4286,8 @@ def _block_or_ask(data: dict, pins: list, readings: list, holes, factor: float, 
     # Pads sharing a number collapse into one entry of every layout: a
     # chosen candidate could not be written back pad by pad.
     candidates_allowed = len(listed) == len(numbers)
+    extras = [extra for extra in extras
+              if candidates_allowed and set(extra["pads"]) == numbers and extra["pads"]]
     refuted = []
     for key, pads, spans, centred in readings:
         if not candidates_allowed or set(pads) != numbers or not pads:
@@ -4126,7 +4297,7 @@ def _block_or_ask(data: dict, pins: list, readings: list, holes, factor: float, 
         # offering it would replace the block with a choice between wrong
         # answers, remembered in the project (generality audit 2026-11-05,
         # A1). An unverifiable or «distorted» verdict refutes nothing.
-        if _losing_verdict(holes(pads), pads, ("no_match",)):
+        if not extras and not contradicted and _losing_verdict(holes(pads), pads, ("no_match",)):
             refuted.append(key)
             continue
         twin = next((entry for entry in distinct
@@ -4134,9 +4305,29 @@ def _block_or_ask(data: dict, pins: list, readings: list, holes, factor: float, 
                     None)
         if twin is not None:
             twin[0].append(key)
+            if (twin[0][0] == "main" and len(twin[0]) == 2
+                    and data["package_geometry"].get("origin") != "body_center"):
+                # The main coordinates and a chain reading are one layout:
+                # without a body-centre frame declared by the answer,
+                # `_candidate_payload` places the CHAIN reading, so the
+                # option carries that reading's sums and edge quotes -- the
+                # layout an agreement writes (`apply_dedicated_pads`), not
+                # the main coordinates with no edge quote. With a declared
+                # frame the main pads stay, in their own frame.
+                twin[1:] = [pads, spans or {}, bool(centred)]
             continue
-        distinct.append(([key], pads, spans or {}, bool(centred)))
-    if len(distinct) < 2:
+        distinct.append([[key], pads, spans or {}, bool(centred)])
+    # {index in `distinct`: the hole-backed layout it is}, for the labels and
+    # the payloads below; a hole-backed layout equal to a reading's is that
+    # reading's option (it cannot happen for a contradicted agreement).
+    backed = {}
+    for extra in extras:
+        if any(not _offset_disagreements(entry[1], extra["pads"], sorted(numbers), tolerance)
+               for entry in distinct):
+            continue
+        backed[len(distinct)] = extra
+        distinct.append([[HOLES_SOURCE], extra["pads"], extra["spans"], extra["centred"]])
+    if len(distinct) < (1 if contradicted else 2):
         if refuted:
             remark = remark + " " + tx("Disposizioni escluse dalla domanda perche' smentite dai fori "
                                        "disegnati: {sources}.",
@@ -4144,12 +4335,27 @@ def _block_or_ask(data: dict, pins: list, readings: list, holes, factor: float, 
         _block(data, message + remark, progress)
         return
     options, candidates = [], {}
-    for keys, pads, spans, centred in distinct:
+    for index, (keys, pads, spans, centred) in enumerate(distinct):
         value = "+".join(keys) + ":" + _layout_digest(pads)
         view = next((holes.views.get(key) for key in keys if holes.views.get(key) in ("top", "bottom")),
                     None)
-        options.append({"label": tx("{sources}: {pads}", sources=", ".join(_reading_source(k) for k in keys),
-                                    pads=_pad_summary(pads)), "value": value})
+        extra = backed.get(index)
+        if extra is not None:
+            # A layout the holes confirm: its option says where it comes
+            # from and which pad differs from the readings.
+            label = tx("{sources} -- {evidence} -- {pads}", sources=_reading_source(HOLES_SOURCE),
+                       evidence=extra["label"], pads=_pad_summary(pads))
+        elif backed or contradicted:
+            # Beside a hole-backed layout, or when the holes did not confirm
+            # an agreement, every reading's option carries what the holes
+            # said about it.
+            label = tx("{sources} ({holes}): {pads}",
+                       sources=", ".join(_reading_source(k) for k in keys),
+                       holes=_hole_text(holes(pads)), pads=_pad_summary(pads))
+        else:
+            label = tx("{sources}: {pads}", sources=", ".join(_reading_source(k) for k in keys),
+                       pads=_pad_summary(pads))
+        options.append({"label": label, "value": value})
         exchange = None
         if (getattr(holes(pads), "body_exchanged", False)
                 and not getattr(holes, "axes_adopted", True)):
@@ -4159,11 +4365,33 @@ def _block_or_ask(data: dict, pins: list, readings: list, holes, factor: float, 
             # the body is placed with the sizes so exchanged.
             exchange = {"measured_mm": [holes.body[1], holes.body[0]],
                         "evidence": _hole_text(holes(pads))}
-        candidates[value] = _candidate_payload(data, keys, pads, spans, centred, view, factor,
-                                               exchange)
-    chosen = _ask(data, "pad_layout", tx(
-        "Posizioni dei pad: {message} Quale disposizione corrisponde al disegno?",
-        message=message), options, _question_evidence(data), candidates)
+        if extra is None:
+            candidates[value] = _candidate_payload(data, keys, pads, spans, centred, view, factor,
+                                                   exchange)
+            continue
+        # The holes say where, never from which side: no view goes with it.
+        payload = _candidate_payload(data, keys, pads, spans, centred, None, factor, exchange,
+                                     main_frame=extra["main_frame"])
+        payload["source"] = HOLES_SOURCE
+        if extra["pixels"]:
+            for entry in payload["pins"]:
+                if entry["number"] == extra["moved"]:
+                    entry["source"] = MEASURED_PIXELS_SOURCE
+        candidates[value] = payload
+    if len(distinct) == 1:
+        # Only with `contradicted`: one layout to confirm, not a choice. The
+        # message already opens with «Posizioni dei pad NON confermate»
+        # (`_refuse_contradicted_agreement`): no second «Posizioni dei pad:»
+        # in front of it (round 7b, F4).
+        text = tx("{message} Confermare la disposizione letta dopo averla controllata sul "
+                  "disegno?", message=message)
+    elif contradicted:
+        # The same message, the same reason not to repeat its opening words.
+        text = tx("{message} Quale disposizione corrisponde al disegno?", message=message)
+    else:
+        text = tx("Posizioni dei pad: {message} Quale disposizione corrisponde al disegno?",
+                  message=message)
+    chosen = _ask(data, "pad_layout", text, options, _question_evidence(data), candidates)
     if chosen is not None:
         _write_candidate(data, pins, candidates[chosen], factor)
         if "exchange_body" not in candidates[chosen]:
@@ -4179,9 +4407,14 @@ def _block_or_ask(data: dict, pins: list, readings: list, holes, factor: float, 
         return
     data.pop("_pin_map_conflict", None)
     data["package_geometry"]["needs_review"] = True
-    data["_numbering_note"] = message + remark + " " + tx(
-        "La scelta fra le {count} disposizioni lette e' chiesta all'utente; fino alla risposta "
-        "restano le coordinate della risposta principale, da verificare.", count=len(distinct))
+    if len(distinct) == 1:
+        asked = tx("La conferma della disposizione letta e' chiesta all'utente; fino alla "
+                   "risposta restano le coordinate della risposta principale, da verificare.")
+    else:
+        asked = tx("La scelta fra le {count} disposizioni lette e' chiesta all'utente; fino alla "
+                   "risposta restano le coordinate della risposta principale, da verificare.",
+                   count=len(distinct))
+    data["_numbering_note"] = message + remark + " " + asked
     if progress:
         progress(data["_numbering_note"])
 
@@ -4305,9 +4538,72 @@ def _settle_by_measure(data: dict, pins: list, readings: list, holes, factor: fl
         (combined witnesses, mirror) and the scale check, and only the axis
         on which the moved pad missed its hole is replaced (D-C).
     """
+    numbers = {_pad_number_text(pin.get("number")) for pin in pins if isinstance(pin, dict)}
+    found = _measured_layout_of(readings, holes, numbers)
+    if found is None:
+        return None
+    key, spans, centred, result, positions = found
+    _align_body_axes(data, holes, positions, progress)
+    if key == "main":
+        # The main answer's own frame and origin: only the coordinates change.
+        for pin in pins:
+            x, y = positions[pin["number"]]
+            pin["x_mm"], pin["y_mm"] = round(x / factor, 4), round(y / factor, 4)
+    else:
+        # The reading's chains were wrong somewhere (a pad had to be moved):
+        # an outline quote in them may hang on the wrong pad, so the body is
+        # not placed by it (estimated, _write_chain_pads step 3).
+        _write_chain_pads(data, pins, {"pads": positions, "centred": False,
+                                       "spans": {"x": None, "y": None, "edges": {}}}, factor)
+    for pin in pins:
+        if pin.get("number") == str(result.moved):
+            pin["source"] = MEASURED_PIXELS_SOURCE
+    declared = {v for v in holes.views.values() if v in ("top", "bottom")}
+    if len(declared) == 1:
+        view = next(iter(declared))
+        _adopt_view(data, view, tx("tutte le letture che la dichiarano"))
+    else:
+        view = "unknown"
+        _withdraw_view(data, tx("nessuna lettura confermata dai fori la dichiara"))
+    _settle(data, tx("Posizioni dei pad misurate sui fori disegnati in {image} (scarto massimo "
+                     "{error:.2f} mm, tolleranza {tolerance:.2f} mm), numeri dalla {source} "
+                     "({why}).", image=result.image, error=result.max_error_mm,
+                     tolerance=result.tolerance_mm, source=_reading_source(key), why=why)
+            + _moved_pad_text(result, positions)
+            + " " + tx("I fori danno le posizioni, non i numeri dei pad ne' la vista "
+                       "dichiarata ({view}): controllarli sul disegno.", view=view)
+            + remark, progress)
+    return key
+
+
+def _moved_pad_text(result, positions: dict) -> str:
+    """The sentence naming the pad a measure moved onto the only free hole, where it was read and where it went."""
+    return tx(" Il pad {pad} letto in ({x:.2f}, {y:.2f}) mm non cadeva su un foro: spostato "
+              "sull'unico foro libero, in ({nx:.2f}, {ny:.2f}) mm; la coordinata corretta e' "
+              "STIMATA dai pixel del disegno, da verificare.", pad=result.moved,
+              x=result.moved_from_mm[0], y=result.moved_from_mm[1],
+              nx=positions[str(result.moved)][0], ny=positions[str(result.moved)][1])
+
+
+def _measured_layout_of(readings: list, holes, numbers: set):
+    """The one layout MEASURED on the drawn holes with a reading's numbers, or None.
+
+    The deduction of `_settle_by_measure`, without writing anything: shared
+    with `_hole_backed_layouts`, which only OFFERS the layout.
+
+    @param readings [(key, pads, spans, centred)] at hand.
+    @param holes The `_HoleVerdicts` of the confrontation.
+    @param numbers The answer's pad numbers: only a reading with exactly
+        these is measured.
+    @return (key, spans, centred, result, positions): the reading whose
+        numbers were used, its spans, the drawing_holes.MeasuredLayout and
+        the completed layout {number: (x, y)} mm in that reading's frame;
+        None when nothing is measured, the readings measure differently, or
+        the completed layout fails what any chosen reading must pass (see
+        the notes of `_settle_by_measure`).
+    """
     if holes.measure is None or holes.views_differ:
         return None
-    numbers = {_pad_number_text(pin.get("number")) for pin in pins if isinstance(pin, dict)}
     measured = []
     for key, pads, spans, centred in readings:
         if set(pads) != numbers:
@@ -4359,41 +4655,326 @@ def _settle_by_measure(data: dict, pins: list, readings: list, holes, factor: fl
            for k, other, _s, _c in readings if k != key) or any(
             _scale_ratio(positions, other) is not None for other in holes.discarded):
         return None
-    _align_body_axes(data, holes, positions, progress)
-    if key == "main":
-        # The main answer's own frame and origin: only the coordinates change.
-        for pin in pins:
-            x, y = positions[pin["number"]]
-            pin["x_mm"], pin["y_mm"] = round(x / factor, 4), round(y / factor, 4)
-    else:
-        # The reading's chains were wrong somewhere (a pad had to be moved):
-        # an outline quote in them may hang on the wrong pad, so the body is
-        # not placed by it (estimated, _write_chain_pads step 3).
-        _write_chain_pads(data, pins, {"pads": positions, "centred": False,
-                                       "spans": {"x": None, "y": None, "edges": {}}}, factor)
-    for pin in pins:
-        if pin.get("number") == str(result.moved):
-            pin["source"] = MEASURED_PIXELS_SOURCE
-    declared = {v for v in holes.views.values() if v in ("top", "bottom")}
-    if len(declared) == 1:
-        view = next(iter(declared))
-        _adopt_view(data, view, tx("tutte le letture che la dichiarano"))
-    else:
-        view = "unknown"
-        _withdraw_view(data, tx("nessuna lettura confermata dai fori la dichiara"))
-    moved = tx(" Il pad {pad} letto in ({x:.2f}, {y:.2f}) mm non cadeva su un foro: spostato "
-               "sull'unico foro libero, in ({nx:.2f}, {ny:.2f}) mm; la coordinata corretta e' "
-               "STIMATA dai pixel del disegno, da verificare.", pad=result.moved,
-               x=result.moved_from_mm[0], y=result.moved_from_mm[1],
-               nx=positions[str(result.moved)][0], ny=positions[str(result.moved)][1])
-    _settle(data, tx("Posizioni dei pad misurate sui fori disegnati in {image} (scarto massimo "
-                     "{error:.2f} mm, tolleranza {tolerance:.2f} mm), numeri dalla {source} "
-                     "({why}).", image=result.image, error=result.max_error_mm,
-                     tolerance=result.tolerance_mm, source=_reading_source(key), why=why)
-            + moved + " " + tx("I fori danno le posizioni, non i numeri dei pad ne' la vista "
-                               "dichiarata ({view}): controllarli sul disegno.", view=view)
-            + remark, progress)
-    return key
+    return key, spans, centred, result, positions
+
+
+def _holes_alone_confirm(verdict) -> bool:
+    """Whether the DRAWN HOLES confirmed a layout on a page that could show its scale.
+
+    A confirmation of the drawing itself -- not a library footprint, not a
+    conflict of the two witnesses -- whose pads could show a stretch of the
+    page and showed none (`scale_observable`, drawing_holes): the only kind
+    that proves the page is drawn to scale with the quotes of the layout.
+    """
+    return (_holes_confirm(verdict) and not isinstance(verdict, _WitnessConflict)
+            and getattr(verdict, "source", None) != "library"
+            and getattr(verdict, "scale_observable", None) is True)
+
+
+def _pads_the_holes_single_out(pads: dict, holes) -> list:
+    """The pads without which the rest of a layout is confirmed by the drawn holes, undistorted.
+
+    @param pads A layout the holes did NOT confirm, {number: (x, y)} mm.
+    @param holes The `_HoleVerdicts` of the confrontation.
+    @return Pad numbers, in pad order: for each, the layout WITHOUT that pad
+        is confirmed by the drawing on a page that could show its scale
+        (`_holes_alone_confirm`). Empty when no such pad exists.
+    @note NOT A PROOF OF SCALE (review V3-1, 2026-11-11): the stretch a fit
+        may show (drawing_holes._allowed_stretch) grows as pads are removed,
+        so on a stretched page a subset of correct pads passes where the
+        whole set does not. Used only to NAME the pads of a «no_match»
+        contradiction (which stands on its own) and to try the chain
+        reading's unattributed stops; never to turn «distorted» into a
+        contradiction (`_agreement_contradicted` asks the witness's own
+        `misplaced_pad` for that).
+    """
+    singled = []
+    for number in sorted(pads, key=_pad_number_key):
+        rest = {other: xy for other, xy in pads.items() if other != number}
+        if _holes_alone_confirm(holes(rest)):
+            singled.append(number)
+    return singled
+
+
+def _agreement_contradicted(pads: dict, holes):
+    """Whether the drawn holes contradict, OBSERVABLY, a layout that two readings agree on.
+
+    Two models reading one drawing can make the same mistake (user,
+    2026-11-11: both put a pad in the column of its neighbours, 2 mm off the
+    hole drawn for it, and the footprint was generated on their agreement).
+    The holes are evidence independent of both, but an imperfect one: a
+    contradiction they can stand behind keeps the agreement from confirming
+    and puts the layout to the user (round 7). ONE rule for every place where an
+    agreement would confirm (`apply_dedicated_pads`, `_resolve_chain_candidate`
+    and, through them, the partial re-read).
+
+    @param pads The layout the readings agree on, in the frame the witness checks.
+    @param holes The `_HoleVerdicts` of the confrontation.
+    @return None when nothing contradicts it: confirmed, not checked,
+        unverifiable (no drawing, a photo, too few circles, a page the fit
+        cannot judge) or refused only for the body's scale; otherwise
+        {"verdict", "singled", "misplaced", "fitted", "stretch"}:
+        - an observable «no_match» (`_losing_verdict`: a pad lands where no
+          hole is, on pads that could have shown a page not to scale), with
+          or without a decisive fit ("fitted", see the round 7b note);
+        - «distorted» with a fit stretch ("stretch") beyond
+          drawing_holes.HYPOTHESIS_TOL_SPAN and no single pad named (round
+          7b, F2);
+        - «distorted», when the witness names the ONE pad no stretch of the
+          page explains (`misplaced_pad`, drawing_holes._single_misplaced:
+          the whole layout is not an affine image of its holes at the
+          per-hole tolerance, and without that pad the others -- enough to
+          show a stretch -- fit with no stretch at all). Without that proof
+          «distorted» contradicts nothing: mechanical drawings are often not
+          drawn to scale with their own quotes, and two agreeing
+          transcriptions of the printed quotes are then right (the reason it
+          has been a warning since 2026-10-31); the warning stays. Several
+          candidate pads, or a layout an affine map fits, are a page that
+          may be stretched: warning.
+        "singled" lists that pad for «distorted», the pads of
+        `_pads_the_holes_single_out` for «no_match» (used only to try the
+        chain reading's unattributed stops, never written in a message);
+        "misplaced" is the witness's `misplaced_pad` when it is a pad of the
+        layout, else None.
+    @note Review V3-1 (2026-11-11): «distorted» used to be proven by
+        `_pads_the_holes_single_out`, unsound for it: the stretch a fit may
+        show grows as pads are removed (drawing_holes._allowed_stretch), so
+        on a page stretched 3.5-7 % a subset of CORRECT pads passed where the
+        whole set did not, and correct layouts were blocked.
+    @note «body_scale» is not a contradiction of the PADS: the body sizes
+        compared are the main answer's claim, and the body reading that
+        follows judges them.
+    @note Review V4-2 (2026-11-11): a «no_match» counts only with a DECISIVE
+        fit (`max_error_mm` not None): some assignment of the pads to drawn
+        circles was fitted and refused. Without one the witness found no
+        fit at all -- stray circles touching the rings can hide every hole
+        from the search -- and that measures nothing about the layout: the
+        agreement stands with the warning note it had before round 6.
+        SUPERSEDED by round 7b (2026-11-11, F1): that made a regression
+        against 1266fb7, which refused such an agreement -- three WRONG
+        readings on pages crowded with stray circles were confirmed with a
+        warning. Since a contradiction now costs a question and never a
+        block, a «no_match» without a fit goes to the question too, with a
+        text that claims only what was measured: the holes do not coincide
+        with the layout and confirm no other ("fitted" False).
+    @note Round 7b (2026-11-11, F2): a «distorted» verdict without a named
+        pad contradicts the agreement when the stretch of its fit exceeds
+        HYPOTHESIS_TOL_SPAN -- a pitch read 7 % wrong by both readings fits
+        the holes only that way. Fragile at the border, declared: a WRONG
+        reading whose error is just under the span (about 5-6 %) still
+        passes with the warning, exactly as on 1266fb7, and a page truly
+        drawn more than 6 % off its quotes now costs a question.
+    @note Decision of round 7 (coordinator, 2026-11-11): a contradiction is
+        never a hard block nor a silent adoption; `_refuse_contradicted_agreement`
+        turns it into the "pad_layout" question. "misplaced" carries the
+        witness's own `misplaced_pad` (or None), the only pad the message
+        may name.
+    """
+    verdict = holes(pads)
+    if getattr(verdict, "status", None) != "not_confirmed" or isinstance(verdict, _WitnessConflict):
+        return None
+    reason = getattr(verdict, "reason", None)
+    named = getattr(verdict, "misplaced_pad", None)
+    misplaced = named if named is not None and named in pads else None
+    if _losing_verdict(verdict, pads, ("no_match",)):
+        # Round 7b (F1): with or without a decisive fit. "fitted" records
+        # which: without one the witness found no assignment at all, and
+        # the text says only that (`_contradiction_text`).
+        fitted = _optional_number(getattr(verdict, "max_error_mm", None)) is not None
+        return {"verdict": verdict, "singled": _pads_the_holes_single_out(pads, holes),
+                "misplaced": misplaced, "fitted": fitted, "stretch": None}
+    if reason == "distorted":
+        # Review V3-1 (2026-11-11): the proof is the witness's own, on the
+        # circles of this very fit (drawing_holes._single_misplaced): no
+        # affine map of the whole layout reaches its holes within the
+        # per-hole tolerance, and ONE pad's removal leaves a layout that fits
+        # with no stretch at all. A subset confirmed under the stretch
+        # allowance proved nothing: that allowance grows as pads are removed.
+        if misplaced is not None:
+            return {"verdict": verdict, "singled": [misplaced], "misplaced": misplaced,
+                    "fitted": True, "stretch": None}
+        # Round 7b (F2): no single pad, but a stretch larger than the one
+        # the hole search itself attributes to a page not to scale
+        # (HYPOTHESIS_TOL_SPAN): a whole axis read wrong by that much and a
+        # page drawn that far off its quotes look the same to the witness,
+        # so the user decides. Below that span the warning stays: two
+        # agreeing transcriptions on a page not drawn to scale are the
+        # legitimate case (commit 65aee39).
+        stretch = _optional_number(getattr(verdict, "stretch_ratio", None))
+        if stretch is not None and stretch > _page_stretch_span():
+            return {"verdict": verdict, "singled": [], "misplaced": None, "fitted": True,
+                    "stretch": stretch}
+    return None
+
+
+def _page_stretch_span() -> float:
+    """The stretch ratio the hole search attributes to a page not to scale (drawing_holes.HYPOTHESIS_TOL_SPAN)."""
+    from .drawing_holes import HYPOTHESIS_TOL_SPAN
+    return float(HYPOTHESIS_TOL_SPAN)
+
+
+def _contradiction_text(contradiction: dict, alternatives: bool = False) -> str:
+    """Why an agreement is not confirmed, for the question: only what the witness measured.
+
+    Decision of round 7 (2026-11-11): the witness cannot be perfect
+    (perspective, stray circles, page stretch), so the text never claims
+    what it cannot prove -- no «the page is to scale», no «that pad is not
+    where the readings put it». It says the drawn holes do not confirm the
+    layout, with the witness's own reason, and names a pad only when the
+    witness itself singled one out (`misplaced_pad`).
+
+    @param contradiction Result of `_agreement_contradicted`.
+    @param alternatives Whether a layout the holes confirm is offered beside
+        the readings' (`_hole_backed_layouts`): without one, a «no_match»
+        with no fit at all is said as such -- the holes coincide with this
+        layout and confirm no other (round 7b, F1); with one, that would be
+        false and the general sentence is used.
+    """
+    verdict = contradiction["verdict"]
+    image = getattr(verdict, "image", None) or "?"
+    if contradiction.get("fitted") is False and not alternatives:
+        return tx("le due letture concordano, ma i fori disegnati in {image} non coincidono con "
+                  "questa disposizione e non ne confermano nessun'altra", image=image)
+    stretch = contradiction.get("stretch")
+    if stretch is not None:
+        # Round 7b (F2): the measured stretch and the span it exceeds.
+        return tx("le due letture concordano, ma i fori disegnati in {image} coincidono con questa "
+                  "disposizione solo stirando il disegno del {stretch:.1f}%, oltre il {span:.0f}% "
+                  "che il controllo attribuisce a una pagina non in scala", image=image,
+                  stretch=100.0 * stretch, span=100.0 * _page_stretch_span())
+    text = tx("le due letture concordano, ma i fori disegnati non confermano questa "
+              "disposizione ({holes})", holes=_hole_text(verdict))
+    misplaced = contradiction.get("misplaced")
+    if misplaced is not None:
+        text += "; " + tx("il pad {pad} e' il piu' lontano dai fori", pad=misplaced)
+    return text
+
+
+def _hole_backed_layouts(readings: list, holes, numbers: set, contradiction: dict,
+                         references=None, declared_frame=None) -> list:
+    """Layouts the drawn holes CONFIRM where they contradict the layout two readings agree on.
+
+    Offered as candidates of the "pad_layout" question beside the readings'
+    layout (`_block_or_ask(extras=)`), never written: the holes verify
+    geometry, not numbering, and the numbers of these layouts are the
+    readings'. Two sources, both checked by the witness:
+    1. the MEASURE (`_measured_layout_of`): every pad but one on its hole,
+       that one moved onto the only free hole. Its coordinate is estimated
+       from the pixels and carries MEASURED_PIXELS_SOURCE;
+    2. a printed quote the chain reading transcribed and attributed to NO
+       pad (`references`: a "ref:" stop, a datum line), when the holes single
+       out exactly one pad: that pad is tried on the unattributed stop, on
+       each axis the stop has, and kept when the holes then confirm the
+       whole layout (`_holes_alone_confirm`) and choose it alone
+       (`_pick_by_holes`: its mirror image must not fit as well). Every
+       other quote of the reading is kept, so its edge quotes still place
+       the body; the coordinate is a printed quote, not a pixel estimate.
+    Layouts with the same signed offsets are one; two different ones from
+    source 2 are an ambiguity and none is offered.
+
+    @param readings [(key, pads, spans, centred)] of the agreeing readings,
+        "dedicated" (the chain reading, whose frame `references` share) and
+        the others.
+    @param numbers The answer's pad numbers.
+    @param contradiction Result of `_agreement_contradicted`.
+    @param references {label: (x or None, y or None)} mm of the chain
+        reading, its frame; None or empty for none.
+    @param declared_frame The main answer's pads (mm) when the answer
+        DECLARES its body-centre frame, else None: a layout of source 2 is
+        then given in that frame, as an agreement keeps it.
+    @return [{"pads", "spans", "centred", "main_frame", "label", "moved",
+        "pixels"}]: the layout in the frame named by `main_frame` (True: the
+        main answer's; False: a chain reading's, with its spans), the text
+        saying where it comes from, the pad that differs from the readings
+        and whether its coordinate was estimated from the pixels.
+    """
+    layouts = []
+    measured = _measured_layout_of(readings, holes, numbers)
+    if measured is not None:
+        key, _spans, _centred, result, positions = measured
+        layouts.append({
+            "pads": positions, "main_frame": key == "main", "moved": str(result.moved),
+            "pixels": True, "centred": False,
+            # As `_settle_by_measure`: a reading that needed a pad moved may
+            # hang an outline quote on the wrong pad, so the body is not
+            # placed by its edge quotes.
+            "spans": {"x": None, "y": None, "edges": {}},
+            "label": tx("posizioni misurate sui fori disegnati in {image} (scarto massimo "
+                        "{error:.2f} mm, tolleranza {tolerance:.2f} mm), numeri dalla {source}.",
+                        image=result.image, error=result.max_error_mm,
+                        tolerance=result.tolerance_mm, source=_reading_source(key))
+            + _moved_pad_text(result, positions)})
+    chain = next(((pads, spans, centred) for key, pads, spans, centred in readings
+                  if key == "dedicated" and set(pads) == numbers), None)
+    singled = contradiction["singled"]
+    if chain is not None and len(singled) == 1 and not holes.views_differ and not layouts:
+        pads, spans, centred = chain
+        pad = singled[0]
+        variants = []
+        for label, stop in sorted((references or {}).items()):
+            x, y = stop
+            moves = [(x, pads[pad][1])] if x is not None else []
+            moves += [(pads[pad][0], y)] if y is not None else []
+            moves += [(x, y)] if x is not None and y is not None else []
+            for position in moves:
+                variant = dict(pads, **{pad: position})
+                if not _holes_alone_confirm(holes(variant)):
+                    continue
+                if any(not _offset_disagreements(variant, other, sorted(numbers),
+                                                 PAD_READING_TOLERANCE_MM)
+                       for _label, other in variants):
+                    continue
+                variants.append((label, variant))
+        if len(variants) == 1 and _pick_by_holes([(HOLES_SOURCE, variants[0][1])], holes):
+            label, variant = variants[0]
+            in_main = declared_frame is not None and set(declared_frame) == numbers
+            if in_main:
+                # The answer declares its body-centre frame, which an
+                # agreement keeps: the same move, applied to the main pads.
+                shift = (variant[pad][0] - pads[pad][0], variant[pad][1] - pads[pad][1])
+                variant = dict(declared_frame, **{pad: (declared_frame[pad][0] + shift[0],
+                                                        declared_frame[pad][1] + shift[1])})
+            layouts.append({
+                "pads": variant, "main_frame": in_main, "moved": pad, "pixels": False,
+                "spans": spans or {}, "centred": bool(centred),
+                "label": tx("pad {pad} sulla quota stampata che la lettura dedicata non ha "
+                            "attribuito a nessun pad («{label}»): {holes}", pad=pad, label=label,
+                            holes=_hole_text(holes(variant)))})
+    return layouts
+
+
+def _refuse_contradicted_agreement(data: dict, pins: list, readings: list, holes, factor: float,
+                                   progress, remark: str, contradiction: dict, references=None,
+                                   prefix: str = "") -> None:
+    """Refuse to confirm a layout two readings agree on and the drawn holes contradict: always ask.
+
+    Nothing is written on the strength of the agreement and nothing on the
+    strength of the holes alone (user, 2026-11-11). Decision of round 7
+    (coordinator, 2026-11-11): the drawn-hole witness cannot be perfect --
+    perspective, stray circles touching the rings and page stretch produced
+    false blocks or false confirmations in three successive rounds -- so the
+    outcome is ALWAYS the "pad_layout" question, never a hard block: the
+    readings' layout is offered, with what the holes said about it, and
+    beside it the layout the holes confirm (`_hole_backed_layouts`) when one
+    exists. The only block left is structural: pads sharing a number, which
+    no chosen layout could be written back to (`_block_or_ask`).
+
+    @param readings [(key, pads, spans, centred)] of the readings at hand.
+    @param contradiction Result of `_agreement_contradicted`.
+    @param references The chain reading's unattributed stops, its frame.
+    @param prefix Text put before the message (the main answer's own
+        conflict, when it had one).
+    """
+    numbers = {_pad_number_text(pin.get("number")) for pin in pins if isinstance(pin, dict)}
+    declared_frame = None
+    if data["package_geometry"].get("origin") == "body_center":
+        declared_frame = next((pads for key, pads, _s, _c in readings if key == "main"), None)
+    extras = _hole_backed_layouts(readings, holes, numbers, contradiction, references,
+                                  declared_frame)
+    why = _contradiction_text(contradiction, alternatives=bool(extras))
+    _block_or_ask(data, pins, readings, holes, factor,
+                  prefix + tx("Posizioni dei pad NON confermate ({why}).", why=why), progress,
+                  remark, extras=extras, contradicted=True)
 
 
 def _adopt_view(data: dict, view, source=None) -> None:
@@ -4501,6 +5082,23 @@ def _resolve_chain_candidate(data: dict, pins: list, main: dict, reading: dict,
     if not views_differ:
         readings.append(("dedicated", dedicated, spans, _centred(spans, exchanged)))
     tolerance = _reading_tolerance(factor)
+    # The layout two of the three readings agree on, if any: the drawn holes
+    # may contradict it as they may any agreement (`_agreement_contradicted`).
+    agreed = None
+    if complete and not _offset_disagreements(candidate["pads"], dedicated, numbers, tolerance):
+        agreed = candidate["pads"]
+    elif (complete and dedicated_closed
+          and not _offset_disagreements(main, dedicated, numbers, tolerance)):
+        agreed = main
+    contradiction = _agreement_contradicted(agreed, holes) if agreed is not None else None
+    if contradiction is not None:
+        # Two readings that agree and the drawing that says otherwise: the
+        # agreement confirms nothing here either; the main answer's own
+        # conflict stays in the message.
+        _refuse_contradicted_agreement(
+            data, pins, readings, holes, factor, progress, remark, contradiction,
+            reading.get("references"), prefix=data["_pin_map_conflict"] + " ")
+        return
     if complete and not _offset_disagreements(candidate["pads"], dedicated, numbers, tolerance):
         _align_body_axes(data, holes, candidate["pads"], progress)
         _write_chain_pads(data, pins, candidate, factor)
@@ -4589,8 +5187,10 @@ def _withdraw_dedicated_holes(data: dict) -> None:
     A reading whose chains do not add up misread at least one quote: its
     hole callouts are no independent transcription either, so
     `_resolve_pad_terminals` must not take a hole from it, nor count it as
-    the second reading of a printed hole.
+    the second reading of a printed hole. The terminal sections it
+    transcribed go the same way: they confirm no terminal.
     """
+    data.pop("_dedicated_leads", None)
     holes = data.pop("_dedicated_holes", None)
     if holes:
         data["notes"] = (str(data.get("notes") or "") + "\n" + tx(
@@ -4662,12 +5262,16 @@ def apply_dedicated_pads(data: dict, reading: Optional[dict], progress=None,
         GEOMETRY only: two pad numbers exchanged on the same positions pass
         it, so it never decides between such readings, and a note asks to
         check the numbering of the reading it chose. When the two readings
-        agree but the holes REFUTE them (an observable «no_match»,
-        `_losing_verdict`), they are NOT written (review 2026-11-04, H6:
-        two readings wrong the same way passed with a warning): the measure
-        on the drawn holes decides, else the question or the block. A
-        «distorted» or «body_scale» verdict is no refutation (the page may
-        not be to scale): the readings stand with a warning.
+        agree but the holes CONTRADICT them observably
+        (`_agreement_contradicted`: an observable «no_match», or «distorted»
+        on a page the other pads prove to scale), they are NOT written
+        (review 2026-11-04, H6: two readings wrong the same way passed with
+        a warning; user, 2026-11-11: a «distorted» pad passed the same way):
+        a layout the holes confirm is OFFERED beside the readings' one in
+        the "pad_layout" question, never adopted, else the block
+        (`_refuse_contradicted_agreement`). A «distorted» verdict on a page
+        nothing proves to scale, and «body_scale», are no contradiction (the
+        page may not be to scale): the readings stand with a warning.
     @note Body axes (user, 2026-11-10): the witness is given the body as
         (body_length_mm along X, body_width_mm along Y) of the MAIN answer.
         That order is a printed fact only when an edge-to-edge chain of the
@@ -4716,6 +5320,12 @@ def apply_dedicated_pads(data: dict, reading: Optional[dict], progress=None,
         # only when the dedicated reading ran, so «it saw no callout» and
         # «it did not run» stay apart.
         data["_dedicated_holes"] = dict(reading.get("holes") or {})
+        if not same_model:
+            # The terminal sections it transcribed, the SECOND reading of a
+            # pad's terminal (`_confirmed_lead_word`). One model reading
+            # twice is one reading (H6): its terminals confirm nothing, so
+            # the key is left out exactly as when the reading did not run.
+            data["_dedicated_leads"] = dict(reading.get("leads") or {})
     factor = _declared_unit_factor(data)
     if factor is None:
         # The main answer's coordinates have no declared unit: nothing can
@@ -4874,15 +5484,14 @@ def apply_dedicated_pads(data: dict, reading: Optional[dict], progress=None,
                     "sola lettura, senza conferma indipendente"), remark)
                 return
             verdict = holes(main)
-            if _losing_verdict(verdict, main, ("no_match",)):
-                # The drawn holes refute what both readings say: never
-                # written on the strength of their agreement (H6).
-                why = tx("le due letture concordano ma i fori disegnati le smentiscono ({holes})",
-                         holes=_hole_text(verdict))
-                if _settle_by_measure(data, pins, readings, holes, factor, progress, why, remark):
-                    return
-                _block_or_ask(data, pins, readings, holes, factor, tx(
-                    "Posizioni dei pad NON confermate ({why}).", why=why), progress, remark)
+            contradiction = _agreement_contradicted(main, holes)
+            if contradiction is not None:
+                # The drawn holes contradict what both readings say: never
+                # written on the strength of their agreement (H6), and a
+                # layout the holes confirm is offered, not adopted (user,
+                # 2026-11-11).
+                _refuse_contradicted_agreement(data, pins, readings, holes, factor, progress,
+                                               remark, contradiction, reading.get("references"))
                 return
             note = tx("Posizioni dei pad confermate dalla lettura dedicata ({count} pad, "
                       "scostamenti entro {tolerance} mm).", count=len(common),
@@ -6281,10 +6890,16 @@ def apply_answers(params: ExtractedParams, answers: dict) -> ExtractedParams:
 
             positions = {str(p.get("number")): (p.get("x_mm"), p.get("y_mm"))
                          for p in payload.get("pins") or () if isinstance(p, dict)}
+            # A coordinate the candidate estimated from the drawing's pixels
+            # keeps that provenance on its pad (`_write_candidate` does the same).
+            measured = {str(p.get("number")): p["source"] for p in payload.get("pins") or ()
+                        if isinstance(p, dict) and isinstance(p.get("source"), str)}
             for pin in target.get("pins") or ():
                 number = _pad_number_text(pin.get("number")) if isinstance(pin, dict) else ""
                 if number in positions and None not in positions[number]:
                     pin["x_mm"], pin["y_mm"] = positions[number]
+                    if number in measured:
+                        pin["source"] = measured[number]
             target["origin"] = payload.get("origin") or "custom"
             target["needs_review"] = True
             if payload.get("view") in ("top", "bottom"):
@@ -6408,17 +7023,33 @@ def _reread_documents(documents) -> list:
             and path.suffix.lower() != ".pdf"]
 
 
+#: Top-level «_» keys of the stored main answer (ExtractedParams.raw_main)
+#: that are NOT injected state: `single_answer_to_data` derives them from the
+#: model's answer before raw_main is copied (a grid numbered by convention,
+#: the spacings a grid lacks), and a partial re-read needs them as the full
+#: analysis did. Every other «_» key of a stored answer is dropped (V4-7).
+_RAW_MAIN_DERIVED_KEYS = ("_numbers_by_convention", "_grid_missing")
+
+
 def _reread_start(stored: dict, progress) -> dict:
-    """A working copy of the stored main answer, sanitised as `_validate_main_response` does."""
+    """A working copy of the stored main answer, sanitised as `_validate_main_response` does.
+
+    The stored answer comes from a project file: it may be one saved before
+    the main call dropped the «_» keys of the model's answer (review V3-5),
+    or a file edited by hand. Every «_» key is the program's working state,
+    so it is dropped at every depth (`without_private_keys`, review V4-7,
+    2026-11-11) -- marks of an earlier confrontation included -- except the
+    top-level keys `single_answer_to_data` itself derives from the model's
+    answer (`_RAW_MAIN_DERIVED_KEYS`), which the stored main shape carries.
+    """
     if not isinstance(stored, dict):
         raise ExtractionError(tx("Risposta AI non strutturata."))
-    data = copy.deepcopy(stored)
-    for key in list(data):
-        # Marks of an earlier confrontation are not part of the answer.
-        if key in ("_questions", "_candidates", "_body_conflict", "_view_source",
-                   "_program_sources", "_canonical", "_canonical_notes", "_raw_main"):
-            data.pop(key, None)
-    data["_raw_main"] = copy.deepcopy(stored)
+    clean = without_private_keys(stored)
+    for key in _RAW_MAIN_DERIVED_KEYS:
+        if key in stored:
+            clean[key] = copy.deepcopy(stored[key])
+    data = copy.deepcopy(clean)
+    data["_raw_main"] = copy.deepcopy(clean)
     _sanitise_printed_quotes(data, progress)
     for key in ("body_length_mm", "body_width_mm", "body_height_mm"):
         data[key] = _optional_number(data.get(key), positive=True)
@@ -6426,7 +7057,8 @@ def _reread_start(stored: dict, progress) -> dict:
 
 
 def reread_body_height(stored: dict, documents, *, model: str, call, progress=None,
-                       answers: Optional[dict] = None, same_model: bool = False) -> ExtractedParams:
+                       answers: Optional[dict] = None, same_model: bool = False,
+                       prompts: Optional[dict] = None) -> ExtractedParams:
     """@brief Re-run ONLY the dedicated body-quote reading on a stored main answer (no main paid call).
 
     @param stored The main answer as kept in the result (`ExtractedParams.raw_main`):
@@ -6442,6 +7074,9 @@ def reread_body_height(stored: dict, documents, *, model: str, call, progress=No
     @param same_model True when `model` is the model that gave `stored`:
         its list and the stored main list are one witness
         (`apply_dedicated_body(same_model=)`).
+    @param prompts The profile's prompt texts ({field: text}, see
+        `extract_pin_header_params`); the reading sends
+        'body_dimensions_prompt', its default when missing or blank.
     @return A new ExtractedParams built from the stored answer with the body
         quotes confronted by `apply_dedicated_body` (one paid call, no
         tie-break: the GUI runs this when the user asks a re-reading of the
@@ -6468,7 +7103,8 @@ def reread_body_height(stored: dict, documents, *, model: str, call, progress=No
     if progress:
         progress(tx("Rilettura delle quote del corpo su {names} con {model}.",
                     names=", ".join(path.name for path in images), model=model))
-    reading = read_body_dimensions(images, model=model, call=call, progress=progress)
+    reading = read_body_dimensions(images, model=model, call=call, progress=progress,
+                                   prompt=effective_text("body_dimensions_prompt", prompts))
     before = _note_lines(data.get("notes"))
     apply_dedicated_body(data, reading, progress, tie_break=None, same_model=same_model)
     # The notes of this scope are the ones the body confrontation wrote (E5).
@@ -6491,7 +7127,8 @@ def reread_body_height(stored: dict, documents, *, model: str, call, progress=No
 
 def reread_pad_positions(stored: dict, documents, *, model: str, call, progress=None,
                          answers: Optional[dict] = None, library=None,
-                         same_model: bool = False) -> ExtractedParams:
+                         same_model: bool = False,
+                         prompts: Optional[dict] = None) -> ExtractedParams:
     """@brief Re-run ONLY the dedicated pad-position reading on a stored main answer (no main paid call).
 
     @param stored The main answer as kept in the result (`ExtractedParams.raw_main`),
@@ -6508,6 +7145,9 @@ def reread_pad_positions(stored: dict, documents, *, model: str, call, progress=
         (`_library_witness`), one more geometry witness; None or empty for none.
     @param same_model True when `model` is the model that gave `stored`
         (an agreement is then one reading, see `apply_dedicated_pads`).
+    @param prompts The profile's prompt texts ({field: text}, see
+        `extract_pin_header_params`); the reading sends
+        'pad_positions_prompt', its default when missing or blank.
     @return A new ExtractedParams: the pads confronted by `apply_dedicated_pads`
         with the drawn holes as witness, the side asked by
         `_require_declared_view` when still unknown, everything else as
@@ -6535,6 +7175,7 @@ def reread_pad_positions(stored: dict, documents, *, model: str, call, progress=
                     names=", ".join(path.name for path in images), model=model))
     factor = _declared_unit_factor(data)
     reading = read_pad_positions(images, model=model, call=call, progress=progress,
+                                 prompt=effective_text("pad_positions_prompt", prompts),
                                  pad_sizes=_pad_sizes_mm(data["package_geometry"].get("pins"), factor))
 
     def view_of():
@@ -8484,12 +9125,34 @@ def photo_document_indices(doc_paths, document_roles) -> Optional[list[int]]:
     return [index for index, name in enumerate(names) if PHOTO_ROLE in roles[name]] or [-1]
 
 
-def _role_description(keys) -> str:
-    """How one file and its declared roles are introduced to the model."""
+def role_instructions(prompts=None) -> dict:
+    """@brief The model-facing instruction of every document role, from the profile or the code.
+
+    @param prompts Mapping profile field -> text (prompt_catalog.profile_prompts),
+        or None. The field of a role is «role_prompt_<role>».
+    @return {role key: instruction} for every key of _ROLE_PROMPTS: the
+        profile's text when it is not blank, else the second item of
+        _ROLE_PROMPTS (the factory text).
+    @note Only the INSTRUCTION is a profile prompt; the role NAME (first item
+        of _ROLE_PROMPTS) is the label the user reads in the documents card
+        and stays in the code, so the model and the user keep reading the
+        same words.
+    """
+    return {key: effective_text(f"role_prompt_{key}", prompts) for key in _ROLE_PROMPTS}
+
+
+def _role_description(keys, instructions=None) -> str:
+    """How one file and its declared roles are introduced to the model.
+
+    `instructions` maps a role key to its instruction (`role_instructions`);
+    None, or a key missing from it, uses the factory text of _ROLE_PROMPTS.
+    """
+    instructions = instructions or {}
     names = " + ".join(_ROLE_PROMPTS[key][0] for key in keys)
     lead = "RUOLO DICHIARATO DALL’UTENTE" if len(keys) == 1 else "RUOLI DICHIARATI DALL’UTENTE"
     lines = [f"{lead}: {names}."]
-    lines += [f"- {_ROLE_PROMPTS[key][0]}: {_ROLE_PROMPTS[key][1]}" for key in keys]
+    lines += [f"- {_ROLE_PROMPTS[key][0]}: {instructions.get(key) or _ROLE_PROMPTS[key][1]}"
+              for key in keys]
     if len(keys) > 1:
         lines.append("Lo stesso file vale per tutti questi ruoli: leggi da ogni parte del "
                      "documento le informazioni del ruolo corrispondente.")
@@ -8604,6 +9267,7 @@ def extract_pin_header_params(
     pad_model: Optional[str] = None,
     part_number: Optional[str] = None,
     answers: Optional[dict] = None,
+    prompts: Optional[dict] = None,
 ) -> ExtractedParams:
     """@brief Extract dimensions and pinout, optionally using local YOLO photo proposals.
 
@@ -8675,6 +9339,18 @@ def extract_pin_header_params(
         A doubt whose key is known is settled with the saved answer during
         the extraction and asked no more; the key names the candidates, so a
         different doubt is asked afresh.
+    @param prompts The profile's prompt texts, {profile field: text}
+        (prompt_catalog.profile_prompts of ProfileStore.resolve), or None.
+        Read here for the prompts that have no parameter of their own:
+        'pad_positions_prompt', 'body_dimensions_prompt',
+        'contact_style_prompt', the six 'role_prompt_<role>' and, through the
+        photo inventory, 'mechanical_evidence_prompt', the three
+        'inventory_*' prompts and 'marking_prompt'. A missing or blank text
+        sends the registry default (prompt_catalog.effective_text). When not
+        None, every request of the run also goes through
+        prompt_catalog.SentPromptLog, which writes one log line per prompt
+        sent (title, status, digest; never the text). None sends the
+        defaults and writes no such line.
 
     @param cancel Optional cancellation channel: a threading.Event (or any
         object with is_set()) or a zero-argument callable returning True when
@@ -8774,6 +9450,11 @@ def extract_pin_header_params(
 
     diagnostic_call = make_logged_call(call_tool, progress, log_prompt=True,
                                        cancel=check_cancel if cancelled is not None else None)
+    if prompts is not None:
+        # One log line per profile prompt the run really sends (status and
+        # digest, never the text): user request of 2026-11-11, point 4.
+        from .prompt_catalog import SentPromptLog
+        diagnostic_call = SentPromptLog(prompts, progress).wrap(diagnostic_call)
     if len(doc_paths) > MAX_FILES:
         raise ExtractionError(tx("Troppi file selezionati (max {MAX_FILES} per chiamata).", MAX_FILES=MAX_FILES))
     # Legacy strings and lists alike become tuples of roles, checked before
@@ -8829,10 +9510,13 @@ def extract_pin_header_params(
         # the paid call, and with which declared role.
         progress(_files_sent_message(doc_paths, document_roles))
     content_blocks = []
+    # The role instructions of the profile (fields 'role_prompt_<role>'),
+    # blank or missing ones replaced by the factory texts.
+    roles_text = role_instructions(prompts)
     for index, path in enumerate(doc_paths):
         description = f"FILE {index}: {path.name}"
         if document_roles is not None:
-            description += "\n" + _role_description(document_roles[path.name])
+            description += "\n" + _role_description(document_roles[path.name], roles_text)
         content_blocks.append({"type": "text", "text": description})
         content_blocks.append(_file_to_content_block(path, model or DEFAULT_MODEL))
     if component_family == CASTELLATED_FAMILY and document_roles is not None:
@@ -8911,15 +9595,23 @@ def extract_pin_header_params(
         """
         blocks = content_blocks if correction is None else [
             *content_blocks, {"type": "text", "text": correction}]
-        answer = diagnostic_call(
-            model=model or DEFAULT_MODEL,
-            system_prompt=system_prompt or (DEFAULT_SINGLE_SYSTEM_PROMPT if single_part
-                                            else _SYSTEM_PROMPT),
-            content_blocks=blocks,
-            tool=_single_component_tool() if single_part else _openai_tool(),
-            max_tokens=16384,
-            has_pdf=has_pdf,
-        )
+        # The profile field of the main prompt; a text equal to its default
+        # apart from blanks and line ends sends the default's bytes (V4-5),
+        # and the request declares the field it sends (V4-6).
+        main_field = "system_prompt_single" if single_part else "system_prompt"
+        sent = effective_text(main_field, {main_field: system_prompt})
+        with prompt_sending({main_field: sent}):
+            answer = diagnostic_call(
+                model=model or DEFAULT_MODEL,
+                system_prompt=sent,
+                content_blocks=blocks,
+                tool=_single_component_tool() if single_part else _openai_tool(),
+                max_tokens=16384,
+                has_pdf=has_pdf,
+            )
+        # Keys beginning with «_» are the program's working state; the
+        # model must not be able to set them (review V3-5).
+        answer = without_private_keys(answer)
         return single_answer_to_data(answer) if single_part else answer
     try:
         try:
@@ -8987,7 +9679,10 @@ def extract_pin_header_params(
                                            "pad_model_requested": (pad_model or "").strip(),
                                            "library": _library_witness(
                                                part_number, component_family, progress),
-                                           "answers": answers})
+                                           "answers": answers,
+                                           # Profile texts of the dedicated pad and
+                                           # body readings (None: defaults).
+                                           "prompts": prompts})
     except ExtractionCancelled:
         raise
     except ExtractionError as exc:
@@ -9002,7 +9697,8 @@ def extract_pin_header_params(
 
     check_cancel()
     _recheck_missing_contact_styles(data, content_blocks, diagnostic_call, model,
-                                   has_pdf, progress)
+                                   has_pdf, progress,
+                                   prompt=(prompts or {}).get("contact_style_prompt"))
     check_cancel()
     if progress:
         progress(
@@ -9025,15 +9721,37 @@ def extract_pin_header_params(
         yolo_settings=yolo_settings,
         recount_contacts=lambda disagreements: _recount_sides_from_photo(
             data, disagreements, content_blocks, diagnostic_call, model, system_prompt,
-            has_pdf, progress))
+            has_pdf, progress),
+        prompts=prompts)
+
+
+#: System prompt of the optional contact-style recheck of a castellated board
+#: (`_recheck_missing_contact_styles`, tool observe_contact_styles). Lifted out
+#: of the function on 2026-11-11 (step P2, byte for byte: a test compares it
+#: with the text of the previous commit) so that it is a profile prompt
+#: ('contact_style_prompt', schema 9) the user sees and edits.
+CONTACT_STYLE_PROMPT = (
+    "Inspect only physical contact construction in the supplied photographs or drawings. "
+    "Return edge names in canonical TOP VIEW (not the underside), matching the supplied sides. "
+    "A half hole is a metallized opening cut by the board edge. A through hole is a "
+    "complete enclosed plated hole with board material between it and the edge. "
+    "Both can exist at the same contact. For each feature use true only if clearly visible; "
+    "false only if its absence is clearly visible; otherwise null. If the edge is obscured, "
+    "orientation uncertain, or contacts on that side differ, use null and low confidence. "
+    "Do not infer style from component family, pin count, pad colour or previous defaults. "
+    "Give high confidence only for clear evidence; cite the document and visible feature. "
+    "Do not change counts, pitch, numbering or dimensions."
+)
 
 
 def _recheck_missing_contact_styles(data, content_blocks, diagnostic_call, model,
-                                   has_pdf=False, progress=None):
+                                   has_pdf=False, progress=None, prompt=None):
     """One optional visual check; uncertain edges still require manual choice.
 
     Only missing styles can change. Counts, geometry, numbering and already
     observed styles are preserved. Replies use canonical top-view edge names.
+    `prompt` is the profile's system prompt of the check (field
+    'contact_style_prompt'); None or blank sends CONTACT_STYLE_PROMPT.
     """
     if data.get("layout") != "castellated":
         return
@@ -9065,25 +9783,19 @@ def _recheck_missing_contact_styles(data, content_blocks, diagnostic_call, model
                 "properties": properties, "required": list(properties),
                 "additionalProperties": False}}}, "required": ["sides"],
             "additionalProperties": False}}}
-    prompt = (
-        "Inspect only physical contact construction in the supplied photographs or drawings. "
-        "Return edge names in canonical TOP VIEW (not the underside), matching the supplied sides. "
-        "A half hole is a metallized opening cut by the board edge. A through hole is a "
-        "complete enclosed plated hole with board material between it and the edge. "
-        "Both can exist at the same contact. For each feature use true only if clearly visible; "
-        "false only if its absence is clearly visible; otherwise null. If the edge is obscured, "
-        "orientation uncertain, or contacts on that side differ, use null and low confidence. "
-        "Do not infer style from component family, pin count, pad colour or previous defaults. "
-        "Give high confidence only for clear evidence; cite the document and visible feature. "
-        "Do not change counts, pitch, numbering or dimensions."
-    )
+    # The profile's text (field 'contact_style_prompt'); missing or blank
+    # sends the factory text CONTACT_STYLE_PROMPT.
+    # The profile text, or the default's bytes when blank or equal to the
+    # default (V4-5); the request declares the field it sends (V4-6).
+    prompt = effective_text("contact_style_prompt", {"contact_style_prompt": prompt})
     blocks = list(content_blocks) + [{"type": "text", "text":
         "Target sides in top view: " + repr(list(missing.values())) +
         ". Only return observe_contact_styles observations for these sides."}]
     try:
-        reply = diagnostic_call(model=model or DEFAULT_MODEL, system_prompt=prompt,
-                                content_blocks=blocks, tool=tool, max_tokens=1800,
-                                has_pdf=has_pdf)
+        with prompt_sending({"contact_style_prompt": prompt}):
+            reply = diagnostic_call(model=model or DEFAULT_MODEL, system_prompt=prompt,
+                                    content_blocks=blocks, tool=tool, max_tokens=1800,
+                                    has_pdf=has_pdf)
     except OpenRouterError:
         if progress:
             progress(tx("Ricontrollo tipo di contatto non riuscito: resta la scelta manuale."))
@@ -9926,8 +10638,11 @@ def _validate_main_response(data, content_blocks, diagnostic_call, model, system
         if progress:
             progress(tx("Lettura dedicata delle posizioni dei pad su {names} con {model}.",
                         names=", ".join(p.name for p in documents), model=reader))
+        # The profile's texts of the two dedicated readings (blank: defaults).
+        pad_prompt = effective_text("pad_positions_prompt", numbering.get("prompts"))
+        body_prompt = effective_text("body_dimensions_prompt", numbering.get("prompts"))
         reading = read_pad_positions(
-            documents, model=reader, call=diagnostic_call, progress=progress,
+            documents, model=reader, call=diagnostic_call, progress=progress, prompt=pad_prompt,
             pad_sizes=_pad_sizes_mm(data["package_geometry"].get("pins"),
                                     _declared_unit_factor(data)))
 
@@ -9981,10 +10696,11 @@ def _validate_main_response(data, content_blocks, diagnostic_call, model, system
                             "riquadri ingranditi con {model}.",
                             names=", ".join(p.name for p in documents), model=reader))
             return read_body_dimensions(documents, model=reader, call=diagnostic_call,
-                                        progress=progress, enlarged=True)
+                                        prompt=body_prompt, progress=progress, enlarged=True)
 
         apply_dedicated_body(data, read_body_dimensions(documents, model=reader, call=diagnostic_call,
-                                                        progress=progress), progress, tie_break=tie_break)
+                                                        prompt=body_prompt, progress=progress),
+                             progress, tie_break=tie_break)
     elif (numbering and _has_explicit_pads(data)
             and numbering.get("component_family") in SINGLE_COMPONENT_FAMILIES):
         # No drawing image to read the positions from (only a PDF, or no
@@ -10041,11 +10757,14 @@ def _extract_photo_stage(data, doc_paths, *, progress, announce, check_cancel, d
                          yolo_confidence, yolo_settings,
                          recount_contacts=None, crop_prompt=None,
                          crop_model=None, cancelled=None,
-                         smd_model_path=None) -> ExtractedParams:
+                         smd_model_path=None, prompts=None) -> ExtractedParams:
     """Optional photo inventory and final assembly of a validated main answer.
 
     `cancelled` is the zero-argument cancellation predicate of extract_params
     (None: no cancellation channel); the SMD network polls it between crops.
+    `prompts` is the profile's {field: text} of extract_pin_header_params,
+    forwarded to extract_inventory only when given (None: the defaults, and
+    an inventory function that predates the keyword keeps working).
     """
     # The photo needs a separate pass: in the global extraction the model
     # must also read dimensions, pinout and layout, and tends to sacrifice the
@@ -10103,6 +10822,7 @@ def _extract_photo_stage(data, doc_paths, *, progress, announce, check_cancel, d
                    else {}),
                 **({'smd_model_path': smd_model_path}
                    if photo_detector == 'yolo_smd' and smd_model_path is not None else {}),
+                **({'prompts': prompts} if prompts is not None else {}),
             )
         except ReviewCancelled as exc:
             # A cancellation is not an inventory failure: continuing here
@@ -10486,7 +11206,8 @@ def _pads_with_the_fields_read(package_geometry, notes: list):
             continue
         clean = {}
         for key, value in pin.items():
-            if key in _PAD_READ_SCALAR_KEYS or key in _PAD_OBJECT_KEYS or key == "_hole_rounding_mm":
+            if (key in _PAD_READ_SCALAR_KEYS or key in _PAD_OBJECT_KEYS
+                    or key in ("_hole_rounding_mm", "_lead_rounding_mm")):
                 clean[key] = value
             elif key in _PAD_TEXT_KEYS:
                 text = value if value is None else _pad_text(value)
@@ -12157,8 +12878,10 @@ def _record_pad_hole_precision(data: dict, factor: float, notes: list) -> None:
     Each pad with a `drill_mm` gets `_hole_rounding_mm` (mm, from
     `_printed_hole_value` with its own `hole_callout`); a drill transcribed
     as nominal plus tolerance is brought to the printed nominal, and `notes`
-    (the canonical notes) says so. `_resolve_one_pad` consumes the mark; it
-    never reaches the validated geometry.
+    (the canonical notes) says so. A pad with a `lead` gets
+    `_lead_rounding_mm` (mm, the coarsest rounding of its transcribed
+    sizes). `_resolve_one_pad` consumes both marks; they never reach the
+    validated geometry.
     """
     geometry = data.get("package_geometry")
     pins = geometry.get("pins") if isinstance(geometry, dict) else None
@@ -12166,6 +12889,16 @@ def _record_pad_hole_precision(data: dict, factor: float, notes: list) -> None:
     for pin in pins if isinstance(pins, list) else ():
         if not isinstance(pin, dict):
             continue
+        lead = pin.get("lead")
+        sizes = [size for key in _LEAD_LENGTH_KEYS
+                 if (size := _optional_number(lead.get(key), positive=True)) is not None
+                 ] if isinstance(lead, dict) else []
+        if sizes:
+            # The terminal's transcription has its own last digit, known
+            # only here: the margin within which a second reading of it
+            # agrees (`_confirmed_lead_word`).
+            pin["_lead_rounding_mm"] = max(_printed_hole_value(None, size, factor)[1]
+                                           for size in sizes)
         drill = _optional_number(pin.get("drill_mm"), positive=True)
         if drill is None:
             continue
@@ -12344,7 +13077,11 @@ def _resolve_pad_terminals(package_geometry, data: dict, notes: list, *, lift: b
       drill): hole and ROUND pad from `core.tht_estimates.estimated_round_pad`,
       sources "derived" when the terminal was read (or derived) and
       "estimated" otherwise; a printed land (`value_sources.pad_size`
-      "read") is kept with its shape. An estimated round hole too loose
+      "read") is kept with its shape. A terminal is «read» only when TWO
+      independent readings transcribed the same one for the pad
+      (`_confirmed_lead_word`, user 2026-11-11): read once, or read
+      differently by the two, it is "estimated" and so are the hole and
+      the land derived from it. An estimated round hole too loose
       across a flat lead is named (`_round_hole_loose_on_blade`, review G5).
     - no terminal, a model drill: the model's values stay, marked
       "estimated", and the note says so.
@@ -12369,7 +13106,9 @@ def _resolve_pad_terminals(package_geometry, data: dict, notes: list, *, lift: b
     @param data The canonical answer: its `value_sources` (answer level),
         `lead_diameter_mm` and `_dedicated_holes` (the printed holes of the
         dedicated reading, set by apply_dedicated_pads only when that
-        reading ran and the drawing did not contradict it).
+        reading ran and the drawing did not contradict it) and
+        `_dedicated_leads` (the terminals it transcribed, set only when it
+        was also made by another model than the main answer).
     @param notes Receives one line per kind of outcome.
     @param lift False keeps step 2 off (a castellated module: its explicit
         pads are optional data and were never judged against the lead).
@@ -12392,6 +13131,11 @@ def _resolve_pad_terminals(package_geometry, data: dict, notes: list, *, lift: b
     geometry = copy.deepcopy(package_geometry)
     top = data.get("value_sources") if isinstance(data.get("value_sources"), dict) else {}
     dedicated = data.get("_dedicated_holes") if isinstance(data.get("_dedicated_holes"), dict) else None
+    # The terminals an INDEPENDENT dedicated reading transcribed; None when
+    # there is none (it did not run, the same model made it, the drawing
+    # contradicted it, an answer saved before it existed).
+    dedicated_leads = (data.get("_dedicated_leads")
+                       if isinstance(data.get("_dedicated_leads"), dict) else None)
     pins = [pin for pin in geometry["pins"] if isinstance(pin, dict)]
     # One drill on every holed pad: the answer-level words and the one
     # part-level lead may stand for all of them. Different drills mean
@@ -12407,7 +13151,7 @@ def _resolve_pad_terminals(package_geometry, data: dict, notes: list, *, lift: b
         "unfounded", "withheld", "part_lead", "lead_withheld", "slot_unoriented", "loose_blade",
         "land_capped", "land_model", "slot_turned", "thin_ring", "lead_contradicted",
         "lead_lifted", "widened", "part_narrow", "part_protected", "part_lifted", "part_widened",
-        "zero_hole")}
+        "zero_hole", "lead_once", "lead_disagree")}
     # The lands the program wrote, {id(pin): (pin, the land it replaced)}:
     # the only ones `_keep_derived_lands_apart` may take back or reduce.
     derived: dict = {}
@@ -12423,7 +13167,8 @@ def _resolve_pad_terminals(package_geometry, data: dict, notes: list, *, lift: b
                 drill_word = None
                 found["withheld"].append(_pad_number_text(pin.get("number")) or "?")
         fallback = {"drill_mm": drill_word, "pad_size": _pad_word(top, "pad_diameter_mm")}
-        _resolve_one_pad(pin, fallback, dedicated, found, part_lead, uniform, derived)
+        _resolve_one_pad(pin, fallback, dedicated, found, part_lead, uniform, derived,
+                         dedicated_leads)
     if lift:
         _judge_holes_against_leads(pins, part_lead, _part_lead_word(data, part_lead), found, derived)
     # {id(pin): reason} of the pads no rule could settle (steps 3 and 4).
@@ -12482,6 +13227,16 @@ def _resolve_pad_terminals(package_geometry, data: dict, notes: list, *, lift: b
     if found["unfounded"]:
         notes.append(tx("Pad {pads}: ne' foro stampato ne' terminale dichiarato: foro e piazzola "
                         "sono quelli del modello, STIMATI.", pads=", ".join(found["unfounded"])))
+    if found["lead_disagree"]:
+        notes.append(tx("ATTENZIONE terminale letto diversamente dalle due letture: {details}. "
+                        "Nessuno dei due valori e' adottato come letto: per la stima resta quello "
+                        "della risposta principale, da verificare sul disegno.",
+                        details="; ".join(found["lead_disagree"])))
+    if found["lead_once"]:
+        notes.append(tx("Pad {pads}: terminale letto una sola volta, senza una seconda lettura "
+                        "indipendente che lo confermi: considerato STIMATO, come il foro e la "
+                        "piazzola che il programma ne ricava. Da verificare sul disegno.",
+                        pads=_bounded_pad_list(found["lead_once"])))
     if found["lead_contradicted"]:
         notes.append(tx("ATTENZIONE pad {numbers}: il terminale dichiarato non passa nel foro letto "
                         "dal disegno. Foro non modificato: terminale o foro letti male, da "
@@ -12703,20 +13458,101 @@ def _is_zero(value) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and value == 0
 
 
+def _same_lead(lead: dict, rounding_mm: float, other: dict) -> bool:
+    """Whether a pad's terminal is the terminal `other` the dedicated reading transcribed for it.
+
+    Same shape; a round lead compares its diameter, a flat one its two
+    sides as an UNORDERED pair (which side a reading calls width is its own
+    choice, as `core.tht_estimates.lead_passes` tries both). Two
+    transcriptions agree by the rule of the printed holes
+    (`_same_printed_hole`): within the coarser of their two roundings, never
+    wider than the coarsest printed precision of any unit, or by the
+    conversion noise alone.
+    """
+    theirs = other.get("lead") if isinstance(other, dict) else None
+    if not isinstance(theirs, dict) or theirs.get("shape") != lead.get("shape"):
+        return False
+    first = sorted(value for key, value in lead.items() if key != "shape")
+    second = sorted(value for key, value in theirs.items() if key != "shape")
+    margin = min(max(float(rounding_mm or 0.0), float(other.get("rounding_mm") or 0.0)),
+                 max(CHAIN_QUOTE_ROUNDING_MM.values()))
+    return len(first) == len(second) and all(
+        abs(a - b) <= _PRINTED_HOLE_TOLERANCE_MM or abs(a - b) < margin
+        for a, b in zip(first, second))
+
+
+def _lead_text_mm(lead: dict) -> str:
+    """A terminal for the notes: «Ø0.60 mm» or «1.00 x 0.40 mm» for a blade."""
+    if lead.get("shape") == "round":
+        return f"Ø{lead['diameter_mm']:.2f} mm"
+    return f"{lead['width_mm']:.2f} x {lead['thickness_mm']:.2f} mm"
+
+
+def _confirmed_lead_word(lead: dict, word: str, rounding_mm: float, dedicated_leads, number: str,
+                         found: dict) -> str:
+    """The provenance of a pad's terminal once the second reading has been heard.
+
+    A terminal read ONCE is not a measure (user, 2026-11-11: one answer
+    declared the terminals of a relay wrong and «read», and the program
+    derived holes and lands from them as from a measure). The dedicated pad
+    reading transcribes the terminal sections too (`printed_terminals`):
+    - both readings give the same terminal for this pad (`_same_lead`): the
+      declared word stands;
+    - the dedicated reading gives ANOTHER terminal, or two of its own that
+      differ: "estimated", both values named (`found["lead_disagree"]`);
+      the main value stays for the estimate, never an average;
+    - only the main answer gives it -- the dedicated reading did not
+      transcribe it, did not run, was made by the same model or was
+      contradicted by the drawing (`dedicated_leads` None), as in every
+      answer saved before the second transcription existed: "estimated",
+      the pad named as read once (`found["lead_once"]`).
+    A terminal the model itself declared "estimated" stays so, unnamed: it
+    was never passed off as read. Structural, not tuned: the rule looks at
+    who transcribed the terminal, never at its size or at the part.
+
+    @param lead The pad's terminal, validated, mm.
+    @param word The provenance declared for it ("read", "derived", "estimated").
+    @param rounding_mm Rounding of the main transcription (`_lead_rounding_mm`).
+    @param dedicated_leads `printed_terminals` of the dedicated reading, or
+        None when there is no independent second reading.
+    @param number The pad's number.
+    @param found Outcome lists of `_resolve_pad_terminals`.
+    @return The word the pad's `sources.lead` gets; the hole and the land
+        derived from the terminal follow it (`_resolve_one_pad`).
+    """
+    if word == "estimated":
+        return word
+    other = _dedicated_hole(dedicated_leads, number)
+    if isinstance(other, dict) and other.get("lead") is not None and _same_lead(lead, rounding_mm, other):
+        return word
+    if isinstance(other, dict) and (other.get("lead") is not None or other.get("conflict")):
+        seen = (_lead_text_mm(other["lead"]) if other.get("lead") is not None
+                else tx("due valori diversi"))
+        found["lead_disagree"].append(tx("pad {pad}: risposta principale {main}, lettura dedicata "
+                                         "{dedicated}", pad=number or "?", main=_lead_text_mm(lead),
+                                         dedicated=seen))
+    elif (number or "?") not in found["lead_once"]:
+        found["lead_once"].append(number or "?")
+    return "estimated"
+
+
 def _resolve_one_pad(pin: dict, fallback: dict, dedicated, found: dict, part_lead=None,
-                     lead_on_model_drill: bool = True, derived: Optional[dict] = None) -> None:
+                     lead_on_model_drill: bool = True, derived: Optional[dict] = None,
+                     dedicated_leads=None) -> None:
     """Apply step 1 of `_resolve_pad_terminals` to one pin dict, in place; `found` collects the pads per outcome.
 
     `part_lead` is `_part_lead(data)`; `lead_on_model_drill` False keeps it
     off a pad that carries a model drill (mixed drills); `derived` receives
     {id(pin): (pin, the land the program replaced)} for every land the
-    program wrote.
+    program wrote; `dedicated_leads` are the terminals the dedicated reading
+    transcribed (`_confirmed_lead_word`), None without an independent one.
     """
     number = _pad_number_text(pin.get("number"))
     raw = pin.pop("value_sources", None)
     raw = raw if isinstance(raw, dict) else {}
     pin.pop("hole_callout", None)
     rounding = _optional_number(pin.pop("_hole_rounding_mm", None), positive=True) or 0.0
+    lead_rounding = _optional_number(pin.pop("_lead_rounding_mm", None), positive=True) or 0.0
     raw_lead = pin.pop("lead", None)
     if isinstance(raw_lead, dict) and all(value is None for value in raw_lead.values()):
         # An empty lead, or one with every field null (how a strict-mode
@@ -12759,6 +13595,11 @@ def _resolve_one_pad(pin: dict, fallback: dict, dedicated, found: dict, part_lea
             lead = None
             found["lead_dropped"].append(number or "?")
     lead_word = (_pad_word(raw, "lead") or "estimated") if lead else None
+    if lead is not None:
+        # A terminal read once is not a measure: the word the model declares
+        # stands only when the dedicated reading transcribed the same one.
+        lead_word = _confirmed_lead_word(lead, lead_word, lead_rounding, dedicated_leads, number,
+                                         found)
     # A land is printed when the pad says so, or, for a pad that says
     # nothing, when the answer says its pad size was read.
     size_word = _pad_word(raw, "pad_size") or fallback["pad_size"] or "estimated"
@@ -12823,6 +13664,11 @@ def _resolve_one_pad(pin: dict, fallback: dict, dedicated, found: dict, part_lea
                 # The part-level lead stands for a pad that declares none of
                 # its own (review E1): the same rule, its own provenance.
                 terminal, terminal_word = part_lead
+                # One declaration for the whole part is one reading too: on
+                # this pad it stands as declared only when the dedicated
+                # reading transcribed the same terminal for it.
+                terminal_word = _confirmed_lead_word(terminal, terminal_word, 0.0,
+                                                     dedicated_leads, number, found)
                 lead, lead_word = terminal, terminal_word
                 found["part_lead"].append(number)
             if terminal is not None:

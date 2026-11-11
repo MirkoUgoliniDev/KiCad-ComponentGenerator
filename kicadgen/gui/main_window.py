@@ -61,7 +61,7 @@ from ..core.footprint_layers import (COPPER_COLOURS as _ZONE_COPPER_COLOURS, LAY
 from ..core import object_snap as _object_snap
 from ..core.package_geometry import (DOUBT_BODY_OVER_LANDS, DOUBT_BODY_PADS, PackageGeometry,
                                      package_from_mapping)
-from ..services import component_types, recent_projects
+from ..services import component_types, prompt_catalog, recent_projects
 from ..services.analysis_profiles import ProfileStore, ProfileError
 from ..services.i18n import DEFAULT_TRANSLATIONS, I18n, ITEM_SOURCE_ROLE, LANGUAGES
 from ..services.document_roles import DocumentSet, MANIFEST, SUFFIXES
@@ -260,6 +260,10 @@ PROJECT_AUTOSAVE_MS = 2000
 #: in the table. It is a declared attribute of the chosen type, not the part
 #: name: it holds for any component of that family.
 _SINGLE_COMPONENT_FAMILIES = ("single_tht", "single_smd")
+
+#: A SHA-256 hex digest as stored in a project file (`generated_block_sha256`);
+#: anything else read from a hand-edited file is ignored.
+_SHA256_HEX = re.compile(r"[0-9a-fA-F]{64}")
 _BODY_OVERRIDE_UNSET = object()
 _PROJECT_KIND_BOARD = "board_module"
 _PROJECT_KIND_SINGLE = "single_component"
@@ -2808,6 +2812,11 @@ class MainWindow(QMainWindow):
             and borders) is known only once the window exists on screen.
         """
         super().showEvent(event)
+        if not getattr(self, "_prompt_notice_scheduled", False):
+            # Once per program start, when the window is on screen (step P2 of
+            # 2026-11-11): custom or outdated prompts of the active profile.
+            self._prompt_notice_scheduled = True
+            self._schedule_prompt_notice()
         if getattr(self, "_centred_once", False):
             return
         self._centred_once = True
@@ -2909,7 +2918,9 @@ class MainWindow(QMainWindow):
             if dialog.changed:
                 current = self.profile_store.get_type(self._profile_key())
                 changed_instructions = previous != current
-                self._reload_profile_types(update_prompt=changed_instructions)
+                self._reload_profile_types(
+                    update_prompt=changed_instructions,
+                    previous_instructions=(previous or {}).get("instructions"))
                 self._append_log(tx("Tipologie e profili AI aggiornati nel database SQLite."))
         except (ProfileError, sqlite3.Error, OSError) as exc:
             QMessageBox.warning(self, self.i18n.text('Database profili'), str(exc))
@@ -2917,9 +2928,25 @@ class MainWindow(QMainWindow):
             if dialog is not None:
                 dialog.deleteLater()
 
-    def _reload_profile_types(self, *, update_prompt=True):
+    def _reload_profile_types(self, *, update_prompt=True, previous_instructions=None):
+        """@brief Reload the type list after the profile dialog, keeping the open project's block when edited.
+
+        @param update_prompt True when the selected type's instructions
+            changed in the dialog: its generated block may be refreshed.
+        @param previous_instructions The selected type's instructions BEFORE
+            the dialog, a text the program may have written into the block
+            (used for a project saved without the block's digest).
+        @note Round 7b (F6, 2026-11-11): the refresh follows the rule of a
+            project open (`component_types.refresh_block` with the stored
+            `written_digest`): a block the program wrote takes the new text,
+            a block the user edited stays as it is and the log says so. It
+            used to be rewritten by `apply_block` whatever it held.
+        """
         combo = self.combo_component_type
         original_prompt = self.field_component_prompt.toPlainText()
+        # Put back with the prompt below: the block kept is the one whose
+        # provenance this digest records (review V5-1).
+        original_digest = getattr(self, "_generated_block_digest", None)
         selected = combo.currentData() or ''
         rows = self.profile_store.list_types()
         blocked = combo.blockSignals(True)
@@ -2935,12 +2962,258 @@ class MainWindow(QMainWindow):
         self._on_component_type_changed()
         if not update_prompt and index >= 0:
             self.field_component_prompt.setPlainText(original_prompt)
+            self._generated_block_digest = original_digest
+        elif index >= 0 and component_types.BLOCK_START in original_prompt:
+            # The block that was there decides, not the text just written.
+            row = self.profile_store.get_type(selected)
+            selected_type = (component_types.ComponentType(selected, row['label'], row['instructions'])
+                             if row else None)
+            known_texts = [r.get("instructions") for r in self.profile_store.list_types(True)]
+            if isinstance(previous_instructions, str):
+                known_texts.append(previous_instructions)
+            _refreshed, outcome = component_types.refresh_block(
+                original_prompt, selected_type, known_texts, written_digest=original_digest)
+            if outcome == component_types.BLOCK_EDITED:
+                self.field_component_prompt.setPlainText(original_prompt)
+                self._generated_block_digest = original_digest
+                if selected_type is not None:
+                    self._append_log(tx(
+                        "Il progetto conserva le istruzioni della tipologia modificate a mano; il "
+                        "testo predefinito attuale di «{label}» e' diverso. Per riprenderlo: "
+                        "scegliere un'altra tipologia e poi di nuovo questa (il blocco generato "
+                        "viene riscritto).",
+                        label=self.i18n.component_type(selected, selected_type.label)))
 
     def _profile_key(self):
         return (self.combo_component_type.currentData() or '') if hasattr(self, 'combo_component_type') else ''
 
     def _profile_values(self):
         return self.profile_store.resolve(self._profile_key())
+
+    def _profile_prompt_texts(self):
+        """@brief The prompt texts of the active profile that the analysis sends from the profile.
+
+        @return {profile field: text} (prompt_catalog.profile_prompts of
+            ProfileStore.resolve: the texts as stored, WITHOUT the image
+            instructions the snapshot appends to the whole-board photo
+            prompts, so their status and digest describe the prompt itself),
+            or None when the profile cannot be read -- the analysis then
+            sends the defaults, as before the fields existed.
+        """
+        try:
+            return prompt_catalog.profile_prompts(self.profile_store.resolve(self._profile_key()))
+        except (ProfileError, sqlite3.Error, OSError):
+            return None
+
+    #: Configuration key of the prompt texts the user chose «Non mostrare più
+    #: per questi testi» for: a list of "field:sha256" strings.
+    _PROMPT_NOTICE_DISMISSED_KEY = "prompt_notice_dismissed"
+
+    def _dismissed_prompt_notices(self) -> set:
+        """@brief The (field, digest) pairs the prompt notice must not name again.
+
+        @return Pairs read from the configuration; a malformed entry is ignored.
+        """
+        pairs = set()
+        stored = self._config.get(self._PROMPT_NOTICE_DISMISSED_KEY)
+        for item in stored if isinstance(stored, list) else ():
+            if isinstance(item, str) and ":" in item:
+                field, digest = item.rsplit(":", 1)
+                pairs.add((field, digest))
+        return pairs
+
+    #: Milliseconds between two looks at a modal window that holds the prompt
+    #: notice back (review V5-5): the notice waits for it to close.
+    _PROMPT_NOTICE_RETRY_MS = 400
+
+    def _schedule_prompt_notice(self) -> None:
+        """@brief Check the active profile's prompts once the event loop runs (start-up, profile switch)."""
+        QTimer.singleShot(0, self._check_prompt_notice)
+
+    @staticmethod
+    def _prompt_fields_not_sent(family: str) -> frozenset:
+        """@brief Profile prompt fields an analysis of a type of `family` never sends.
+
+        @param family `family` column of the active component type ('' for none).
+        @return Fields the prompt notice must not name for that family.
+        @note Derived from the conditions the analysis itself uses, not from
+            type names (review V5-2): the main datasheet prompt is chosen by
+            `_SINGLE_COMPONENT_FAMILIES` where the ExtractWorker is built
+            (`_start_extract_worker`, «system_prompt=...»; the partial
+            re-reads of `_start_reread` exist for single parts and send
+            «system_prompt_single»), so a single part never sends
+            «system_prompt» and any other family never sends
+            «system_prompt_single»; the dedicated pad-position and body-quote
+            readings run only for datasheet_extractor.SINGLE_COMPONENT_FAMILIES
+            (`_validate_main_response`, `reread_pad_positions`,
+            `reread_body_height`). Prompts sent by every family (photo,
+            numbering, roles, ...) are always named: a family that skips a
+            photo stage for lack of a photo still sends them when one is given.
+        """
+        # Local import, as elsewhere in this module: the extractor is heavy.
+        from ..services import datasheet_extractor
+        not_sent = set()
+        if family in _SINGLE_COMPONENT_FAMILIES:
+            not_sent.add("system_prompt")
+        else:
+            not_sent.add("system_prompt_single")
+        if family not in datasheet_extractor.SINGLE_COMPONENT_FAMILIES:
+            not_sent.update(("pad_positions_prompt", "body_dimensions_prompt"))
+        return frozenset(not_sent)
+
+    def _retry_prompt_notice(self) -> None:
+        """Look again after a modal window held the notice back (see `_check_prompt_notice`)."""
+        self._prompt_notice_waiting = False
+        self._check_prompt_notice()
+
+    def _check_prompt_notice(self) -> None:
+        """@brief Show ONE non-blocking notice when the active profile sends custom or outdated prompts.
+
+        @note User request of 2026-11-11 (point 3): a stored prompt that
+            differs from the program default must not be kept in silence.
+            Each text is named once per session: `_prompt_notice_seen` holds
+            the (field, digest) pairs already named, whatever type or profile
+            was active then (review V5-2: the types inherit the global prompts,
+            so a check «once per type» named the same texts again on every
+            type switch and the boxes piled up). Never on an analysis. Only the
+            prompts the active family sends are named
+            (`_prompt_fields_not_sent`). The notice is a non-modal message
+            box: start-up goes on, and the window stays usable while it is
+            open; a second notice reuses the open box (`_show_prompt_notice`).
+            It points to «Profili AI», where «Mostra differenze» and
+            «Ripristina predefinito» are; «Non mostrare più per questi testi»
+            stores the (field, digest) of the texts named, so a deliberate
+            custom text stops nagging while a NEW difference -- another digest
+            -- is named again.
+        @note While another modal window is up the notice waits (review V5-5):
+            it would open under or behind it, and its «Apri la gestione dei
+            profili AI» would stack a second modal. Nothing is marked as seen
+            until the notice is actually shown.
+        """
+        if not self.isVisible():
+            return
+        if QApplication.activeModalWidget() is not None:
+            if not getattr(self, "_prompt_notice_waiting", False):
+                self._prompt_notice_waiting = True
+                QTimer.singleShot(self._PROMPT_NOTICE_RETRY_MS, self._retry_prompt_notice)
+            return
+        key = self._profile_key()
+        try:
+            entries = prompt_catalog.notice_entries(self.profile_store, key,
+                                                    self._dismissed_prompt_notices())
+        except (ProfileError, sqlite3.Error, OSError):
+            return
+        not_sent = self._prompt_fields_not_sent(self._selected_family())
+        seen = self.__dict__.setdefault("_prompt_notice_seen", set())
+        fresh = [row for row in entries
+                 if row["field"] not in not_sent and (row["field"], row["digest"]) not in seen]
+        if not fresh:
+            return
+        seen.update((row["field"], row["digest"]) for row in fresh)
+        self._show_prompt_notice(fresh)
+
+    def _prompt_notice_text(self, entries) -> str:
+        """@brief Body of the prompt notice: one line per prompt, then where to look.
+
+        @param entries Rows of prompt_catalog.notice_entries.
+        @return Translated text.
+        """
+        lines = [tx("Il profilo AI attivo invia prompt diversi dal predefinito di questa "
+                    "versione del programma:")]
+        lines += ["• " + tx("{title}: {status}", title=tx(row["title"]),
+                            status=tx(prompt_catalog.status_label(row["status"])))
+                  for row in entries]
+        lines.append(tx("In «Gestione tipologie e profili AI...» ogni prompt ha «Mostra differenze» e «Ripristina "
+                        "predefinito». Un testo personalizzato di proposito puo' restare com'e'."))
+        return "\n".join(lines)
+
+    def _live_prompt_notice(self):
+        """The prompt notice box while it is open, else None (it deletes itself on close)."""
+        box = getattr(self, "_prompt_notice_box", None)
+        if box is None:
+            return None
+        try:
+            return box if box.isVisible() else None
+        except RuntimeError:
+            # WA_DeleteOnClose already destroyed the C++ object.
+            self._prompt_notice_box = None
+            return None
+
+    def _show_prompt_notice(self, entries) -> None:
+        """@brief Open the non-modal prompt notice for `entries`, or add them to the one already open.
+
+        @param entries Rows of prompt_catalog.notice_entries (with `digest`).
+        @note One box at a time (review V5-2): when a notice is still open,
+            the new rows are added to it and its text rewritten, instead of a
+            second box stacked on the first. «Non mostrare più per questi
+            testi» dismisses every text the box names when it is pressed.
+        """
+        self._append_log(self._prompt_notice_text(entries))
+        box = self._live_prompt_notice()
+        if box is not None:
+            known = {(row["field"], row["digest"]) for row in self._prompt_notice_entries}
+            self._prompt_notice_entries += [row for row in entries
+                                            if (row["field"], row["digest"]) not in known]
+            self._retranslate_prompt_notice()
+            box.raise_()
+            return
+        box = QMessageBox(self)
+        box.setWindowModality(Qt.WindowModality.NonModal)
+        box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        box.setIcon(QMessageBox.Icon.Information)
+        # Real labels at creation (QMessageBox refuses a button without a
+        # title); `_write_prompt_notice_texts` rewrites them on a language change.
+        open_button = box.addButton(self.i18n.text("Apri la gestione dei profili AI"),
+                                    QMessageBox.ButtonRole.ActionRole)
+        dismiss_button = box.addButton(self.i18n.text("Non mostrare più per questi testi"),
+                                       QMessageBox.ButtonRole.ActionRole)
+        close_button = box.addButton(self.i18n.text("Chiudi"), QMessageBox.ButtonRole.RejectRole)
+        self._prompt_notice_box = box
+        self._prompt_notice_buttons = (open_button, dismiss_button, close_button)
+        self._prompt_notice_entries = list(entries)
+
+        def answered(button):
+            """Act on the button pressed; the box closes by itself."""
+            if button is dismiss_button:
+                self._dismiss_prompt_notice(
+                    [f"{row['field']}:{row['digest']}" for row in self._prompt_notice_entries])
+            elif button is open_button:
+                QTimer.singleShot(0, self._edit_profiles)
+        box.buttonClicked.connect(answered)
+        # Title and body in the current language, from one place.
+        self._write_prompt_notice_texts(box)
+        box.show()
+
+    def _retranslate_prompt_notice(self) -> None:
+        """@brief Write the open prompt notice's title, body and buttons in the current language.
+
+        @note Called when the open box is extended and on a language change
+            (review V5-5): the body is composed text (titles and statuses of
+            the prompts), which the generic widget pass cannot translate.
+            Nothing happens when no notice is open.
+        """
+        box = self._live_prompt_notice()
+        if box is not None:
+            self._write_prompt_notice_texts(box)
+
+    def _write_prompt_notice_texts(self, box) -> None:
+        """Title, body (from `_prompt_notice_entries`) and button labels of the notice `box`."""
+        box.setWindowTitle(self.i18n.text("Prompt diversi dal predefinito"))
+        box.setText(self._prompt_notice_text(self._prompt_notice_entries))
+        open_button, dismiss_button, close_button = self._prompt_notice_buttons
+        open_button.setText(self.i18n.text("Apri la gestione dei profili AI"))
+        dismiss_button.setText(self.i18n.text("Non mostrare più per questi testi"))
+        close_button.setText(self.i18n.text("Chiudi"))
+
+    def _dismiss_prompt_notice(self, pairs) -> None:
+        """@brief Remember «Non mostrare più per questi testi» for the given "field:digest" pairs.
+
+        @param pairs Strings "field:sha256" of the texts the notice named.
+        """
+        stored = self._config.get(self._PROMPT_NOTICE_DISMISSED_KEY)
+        known = [item for item in stored if isinstance(item, str)] if isinstance(stored, list) else []
+        self._config[self._PROMPT_NOTICE_DISMISSED_KEY] = known + [p for p in pairs if p not in known]
+        self._save_config_safely()
 
     def _selected_family(self):
         """@brief Family of the selected component type, '' when none.
@@ -3943,6 +4216,9 @@ class MainWindow(QMainWindow):
         self.tabs.setTabText(TAB_KICAD, self.i18n.tr("tab.kicad.name"))
         self.tabs.setTabText(TAB_EXPORTS, self.i18n.tr("tab.exports.name"))
         self.i18n.retranslate_widgets(self)
+        # After the generic pass: the open prompt notice is composed text
+        # (review V5-5), rewritten whole in the new language.
+        self._retranslate_prompt_notice()
         self._realign_form_labels()
         self._refresh_metadata_help_tooltips()
         if hasattr(self, "klc_list"):
@@ -5027,6 +5303,11 @@ class MainWindow(QMainWindow):
                 self.field_component_prompt.toPlainText(), component_type
             )
         )
+        # The block just written is the program's text: its digest goes into
+        # the project (review V5-1), so that a later open tells it apart from
+        # a hand edit whatever the profile database holds by then.
+        self._generated_block_digest = component_types.block_digest(
+            self.field_component_prompt.toPlainText())
 
         # The component type also decides which footprint parameters are used:
         # castellated modules do not fit in a matrix.
@@ -5047,6 +5328,10 @@ class MainWindow(QMainWindow):
         if component_type is not None:
             self._append_log(tx("Tipologia componente: {label}.",
                                 label=self.i18n.component_type(key, component_type.label)))
+        if self.isVisible():
+            # A profile switch: its prompts are checked once (see
+            # _check_prompt_notice); before the first show, showEvent does it.
+            self._schedule_prompt_notice()
 
     def _refresh_type_effect(self) -> None:
         """@brief Offer the header pins choice for boards only, showing the project's value.
@@ -6332,6 +6617,10 @@ class MainWindow(QMainWindow):
             **(accepted_kwargs(ExtractWorker.__init__, answers=dict(self._extraction_answers))
                if self._extraction_answers and accepts_keyword(extract_pin_header_params, "answers")
                else {}),
+            # Every profile prompt without a parameter of its own (pad and body
+            # readings, document roles, inventory, markings, ...): step P2 of
+            # 2026-11-11. Only to a worker that declares the keyword.
+            **accepted_kwargs(ExtractWorker.__init__, prompts=self._profile_prompt_texts()),
         )
         if self._extraction_answers and accepts_keyword(extract_pin_header_params, "answers"):
             # Also as an attribute, for a worker that reads it at run time.
@@ -7438,7 +7727,9 @@ class MainWindow(QMainWindow):
             # The detector name is the one the boxes were born with, recorded in
             # the package, whatever the combo box says now.
             detector=bundle.detector, reviewed=bundle.reviewed,
-            smd_model_path=self._smd_model_option())
+            smd_model_path=self._smd_model_option(),
+            # The inventory and marking prompts of the profile (step P2).
+            **accepted_kwargs(ReconcileWorker.__init__, prompts=self._profile_prompt_texts()))
         self._reconcile_worker.done.connect(self._on_reconciled)
         self._reconcile_worker.error.connect(self._on_extract_error)
         self._reconcile_worker.progress.connect(self._on_ai_progress)
@@ -8744,6 +9035,11 @@ class MainWindow(QMainWindow):
         if getattr(self, "_geometry_doubt_answers", None):
             state["geometry_doubt_answers"] = dict(self._geometry_doubt_answers)
         # Only when some exist: older projects stay byte-identical (H7, M16).
+        if getattr(self, "_generated_block_digest", None):
+            # Provenance of the type block in the notes (review V5-1): the
+            # digest of the text the PROGRAM last wrote there. Only when a
+            # block exists: a project without one stays byte-identical.
+            state["generated_block_sha256"] = self._generated_block_digest
         if getattr(self, "_extraction_answers", None):
             state["extraction_answers"] = dict(self._extraction_answers)
         if getattr(self, "_extraction_questions", None):
@@ -8926,6 +9222,15 @@ class MainWindow(QMainWindow):
             {key: value for key, value in saved_answers.items()
              if isinstance(key, str) and value in self.GEOMETRY_DOUBT_ANSWERS}
             if isinstance(saved_answers, dict) else {})
+        # After the widgets: a type change fired while they were restored
+        # recorded the block IT wrote, not the one saved in the file. The
+        # saved digest is read by `_switch_project` (review V5-1); a project
+        # saved before the key has None and keeps the older rule.
+        saved_block_digest = state.get("generated_block_sha256")
+        self._generated_block_digest = (
+            saved_block_digest.lower()
+            if isinstance(saved_block_digest, str) and _SHA256_HEX.fullmatch(saved_block_digest)
+            else None)
         saved_extraction = state.get("extraction_answers")
         self._extraction_answers = (
             {key: value for key, value in saved_extraction.items() if isinstance(key, str)}
@@ -9130,12 +9435,39 @@ class MainWindow(QMainWindow):
         # stale castellated block in a THT project); a prompt without one is
         # the project's own text, saved as such, and must come back verbatim
         # (contract of test_project_config since 2026-09-24).
+        # A block the user edited is the project's own instruction and is
+        # kept (review V3-2, 2026-11-11): only a block holding a text the
+        # program wrote is brought up to date (component_types.refresh_block).
+        # Provenance: the digest the program stored when it wrote the block
+        # (review V5-1); None for a project saved before it, which keeps the
+        # comparison with the texts the program can have written.
+        saved_digest = getattr(self, "_generated_block_digest", None)
+        restored_prompt = old_prompt
+        outcome = component_types.BLOCK_ABSENT
         if component_types.BLOCK_START in old_prompt:
-            restored_prompt = component_types.apply_block(old_prompt, selected_type)
-        else:
-            restored_prompt = old_prompt
+            known_texts = [row.get("instructions") for row in self.profile_store.list_types(True)]
+            restored_prompt, outcome = component_types.refresh_block(
+                old_prompt, selected_type, known_texts, written_digest=saved_digest)
+            if outcome == component_types.BLOCK_EDITED and selected_type is not None:
+                self._append_log(tx(
+                    "Il progetto conserva le istruzioni della tipologia modificate a mano; il testo "
+                    "predefinito attuale di «{label}» e' diverso. Per riprenderlo: scegliere un'altra "
+                    "tipologia e poi di nuovo questa (il blocco generato viene riscritto).",
+                    label=self.i18n.component_type(selected_key, selected_type.label)))
         prompt_was_normalized = restored_prompt != old_prompt
         self.field_component_prompt.setPlainText(restored_prompt)
+        # The digest that goes on with the project: the block's own when the
+        # program wrote it (now refreshed or already current); the stored one
+        # when the user edited it (it keeps naming the program's last text, so
+        # the edit stays recognised); none without a block.
+        if outcome in (component_types.BLOCK_REFRESHED, component_types.BLOCK_CURRENT):
+            self._generated_block_digest = component_types.block_digest(restored_prompt)
+        elif outcome == component_types.BLOCK_ABSENT:
+            self._generated_block_digest = None
+        # A project saved before the digest existed gets it written once,
+        # so that a later change of the profile's instructions cannot turn
+        # its program-written block into a «hand edit» (review V5-1).
+        digest_was_recorded = self._generated_block_digest != saved_digest
         # Restoring the widgets does not always emit the component type
         # signal. Explicitly updating the dependent groups avoids
         # leaving in the single project the mounting controls of the board
@@ -9175,7 +9507,7 @@ class MainWindow(QMainWindow):
         self._last_saved_project_state = self._project_state_text()
         # A footprint draft left by a crash is offered, never applied.
         self._offer_footprint_recovery()
-        if prompt_was_normalized:
+        if prompt_was_normalized or digest_was_recorded:
             self._save_project_config(force=True)
         # After the name and after the state: the review buttons look at the
         # folder of the project just opened, no longer at the photo of the previous one.
@@ -9213,6 +9545,9 @@ class MainWindow(QMainWindow):
         self._extraction_questions = []
         self._step_deferral = None
         self._stored_main_answer = None
+        # The closed project's block provenance (review V5-1); the open
+        # project's comes back from its file.
+        self._generated_block_digest = None
         # Back from the open project's file (`_apply_project_state`) only.
         self._unread_pads = None
         self._unread_pad_holes = None
@@ -10572,7 +10907,9 @@ class MainWindow(QMainWindow):
             not asked again (the answer is applied); a «back» records
             nothing, so the question comes back next time. The questions
             left open are kept (`_extraction_questions`) so «Rigenera
-            modello STEP» can ask a height question later.
+            modello STEP» can ask a height question later, and every command
+            that writes the footprint a pad-layout question
+            (`_resolve_stored_pad_layout_question`, round 7b).
         @note Every question of the pass ends either answered or open
             (review 2026-11-11, F2-4). An answer given now drops the saved
             answers it contradicts; when one of those had already settled a
@@ -10786,21 +11123,58 @@ class MainWindow(QMainWindow):
             exactly like `_ask_geometry_doubt`. The evidence is shown as the
             dialog's icon pixmap (`_evidence_pixmap`); the dialog itself
             never changes the data: the caller applies the answer.
+        @note The options' descriptions are in the dialog's informative text,
+            one paragraph each («Opzione 1: …»), word-wrapped and selectable;
+            the buttons carry only «Opzione 1», «Opzione 2», … with the
+            description as tooltip (review V5-3, 2026-11-11). A description is
+            as long as the evidence it reports -- a pad layout lists each
+            pad's coordinates, 380 characters on the relay of 17:42 -- and a
+            button neither wraps nor elides: the coordinates that tell the
+            options apart were cut off and the box grew wider than the screen.
+            The buttons stay buttons, so the keyboard choice (Tab, Enter,
+            Esc for «Torna indietro») is unchanged.
         """
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Icon.Question)
         box.setWindowTitle(self.i18n.text("Domanda sull'analisi"))
         box.setText(str(question.get("text") or question.get("key")))
-        box.setInformativeText(self.i18n.text(
-            "Scegli il valore che vedi nel documento: la risposta viene ricordata per questo "
-            "progetto e non richiede una nuova analisi."))
+        options = list(question.get("options") or ())
+        # One paragraph per option, then the instruction; QMessageBox wraps
+        # its labels at word boundaries.
+        paragraphs = [tx("Opzione {number}: {description}", number=number,
+                         description=str(option["label"]))
+                      for number, option in enumerate(options, start=1)]
+        if len(options) == 1:
+            # One option is a confirmation, not a choice of value (round 7b, F4).
+            paragraphs.append(self.i18n.text(
+                "Conferma l'opzione solo dopo averla controllata sul documento: la risposta viene "
+                "ricordata per questo progetto e non richiede una nuova analisi."))
+        else:
+            paragraphs.append(self.i18n.text(
+                "Scegli il valore che vedi nel documento: la risposta viene ricordata per questo "
+                "progetto e non richiede una nuova analisi."))
+        if question.get("field") == "pad_layout":
+            # What «Torna indietro» (back) does to THIS question: true since
+            # `_resolve_stored_pad_layout_question` (round 7b, F3/F4).
+            paragraphs.append(self.i18n.text(
+                "«Torna indietro» lascia la domanda aperta: verrà riproposta prima di scrivere il "
+                "footprint."))
+        box.setInformativeText("\n\n".join(paragraphs))
+        # Plain text whatever the description holds («<» in a value is not markup).
+        box.setTextFormat(Qt.TextFormat.PlainText)
+        # The coordinates can be selected and copied, e.g. to compare them
+        # with the drawing.
+        box.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse
+                                    | Qt.TextInteractionFlag.TextSelectableByKeyboard)
         pixmap = self._evidence_pixmap(question.get("evidence"))
         if pixmap is not None:
             box.setIconPixmap(pixmap)
         buttons = []
-        for option in question.get("options") or ():
-            buttons.append((box.addButton(str(option["label"]), QMessageBox.ButtonRole.AcceptRole),
-                            option["value"]))
+        for number, option in enumerate(options, start=1):
+            button = box.addButton(tx("Opzione {number}", number=number),
+                                   QMessageBox.ButtonRole.AcceptRole)
+            button.setToolTip(str(option["label"]))
+            buttons.append((button, option["value"]))
         back = box.addButton(self.i18n.text("Torna indietro"), QMessageBox.ButtonRole.RejectRole)
         box.setDefaultButton(back)
         box.setEscapeButton(back)
@@ -10872,6 +11246,168 @@ class MainWindow(QMainWindow):
         self._clear_height_step_deferral()
         self._save_project_config()
         self._refresh_regen_3d_availability()
+        return True
+
+    def _held_back_questions_text(self) -> str:
+        """@brief The log line when the automatic generation waits for an open question, naming who asks it.
+
+        @return Translated text: the generation did not start, then one
+            sentence per kind of open question naming the command that asks
+            it again -- the pad layout: «Rigenera footprint» / «Applica ai
+            file» (`_resolve_stored_pad_layout_question`); the body height:
+            «Rigenera modello STEP» (`_resolve_stored_body_height_question`);
+            any other: a new analysis, the only place it is asked.
+        @note Round 7b (F3): the line used to send every open question to
+            «Rigenera modello STEP», which asks only the height.
+        """
+        fields = {q.get("field") for q in getattr(self, "_extraction_questions", None) or ()
+                  if isinstance(q, dict)}
+        parts = [self.i18n.text("Generazione automatica non avviata: una domanda dell'analisi è "
+                                "rimasta senza risposta.")]
+        if "pad_layout" in fields:
+            parts.append(self.i18n.text(
+                "La domanda sulle posizioni dei pad viene riproposta da «Rigenera footprint» o "
+                "«Applica ai file», prima di scrivere il footprint."))
+        if "body_height_mm" in fields:
+            parts.append(self.i18n.text(
+                "La domanda sull'altezza del corpo viene riproposta da «Rigenera modello STEP»."))
+        if fields - {"pad_layout", "body_height_mm"}:
+            parts.append(self.i18n.text(
+                "Le domande di altro tipo vengono riproposte ripetendo l'analisi."))
+        return " ".join(parts)
+
+    def _stored_pad_layout_question(self) -> dict | None:
+        """@brief The open question about the pad layout, or None.
+
+        @return The first question of field `pad_layout` left without an
+            answer (`_extraction_questions`: «Torna indietro» on it during the
+            apply of an analysis, or saved with the project).
+        """
+        return next((q for q in getattr(self, "_extraction_questions", None) or ()
+                     if isinstance(q, dict) and q.get("field") == "pad_layout"), None)
+
+    @staticmethod
+    def _extraction_holds_question(extracted, key: str) -> bool:
+        """@brief Whether an extraction can still apply the answer to question `key`.
+
+        @param extracted The settled extraction, or None.
+        @param key Question key.
+        @return True when the extraction lists the question and keeps the
+            candidates its options write (`ExtractedParams.candidates`): a
+            pad layout is applied from those payloads, never from the
+            question's text.
+        """
+        if extracted is None:
+            return False
+        listed = any(isinstance(q, dict) and q.get("key") == key
+                     for q in getattr(extracted, "questions", None) or ())
+        candidates = getattr(extracted, "candidates", None)
+        return listed and isinstance(candidates, dict) and isinstance(candidates.get(key), dict)
+
+    def _pad_layout_question_block(self) -> str:
+        """@brief Why a path that cannot ask must not write the footprint now, '' when it may.
+
+        @return Translated reason when a pad-layout question is open; ''
+            otherwise. Used by the paths that run without the user in front
+            of a question (the automatic pipeline, the deferred rewrite of an
+            applied edit): they write nothing and say which command asks it.
+        """
+        if self._stored_pad_layout_question() is None:
+            return ""
+        return self.i18n.text(
+            "Footprint non scritto: la domanda sulle posizioni dei pad è ancora aperta. "
+            "«Rigenera footprint» (o «Applica ai file») la ripropone prima di scrivere il "
+            "footprint.")
+
+    def _resolve_stored_pad_layout_question(self) -> bool:
+        """@brief Ask the open pad-layout question before the footprint is written, apply the answer.
+
+        @return True when the footprint may be written: no open question, or
+            the question answered now and its layout applied to the package.
+            False when nothing may be written: the user went back (the
+            question stays open), the answer could not be applied, or the
+            session holds no extraction to apply it to.
+        @note Round 7b (F3, 2026-11-11): «Torna indietro» on a pad-layout
+            question used to leave it open while «Rigenera footprint» and
+            «Applica ai file» wrote the unconfirmed layout without asking,
+            and the log sent the user to «Rigenera modello STEP», which asks
+            only the height. Modelled on `_resolve_stored_body_height_question`:
+            the stored question is asked with its options; an answer is
+            applied by the extractor's `apply_answers` on the settled
+            extraction (the one writer of a chosen layout, with its payload),
+            remembered with the project, and the package is rebuilt from the
+            result -- a new package object, so a pending pad draft is rebased
+            as after an analysis (`_sync_footprint_draft_package`).
+        @note Limit, declared: the candidates live in the extraction of this
+            session, not in the project file. In a reopened project the
+            question cannot be applied: nothing is written and the user is
+            told to repeat the analysis, which asks it again.
+        """
+        question = self._stored_pad_layout_question()
+        if question is None:
+            return True
+        extracted = self._settled_extraction()
+        if not self._extraction_holds_question(extracted, question["key"]):
+            text = self.i18n.text(
+                "Footprint non scritto: la domanda sulle posizioni dei pad è ancora aperta, e la "
+                "risposta si applica solo al risultato di un'analisi di questa sessione, che dopo "
+                "la riapertura del progetto non c'è. Ripeti l'analisi dei documenti e rispondi "
+                "alla domanda.")
+            self._append_log(text)
+            QMessageBox.warning(self, self.i18n.text("Footprint non generato"), text)
+            return False
+        answer = self._ask_extraction_question(question)
+        if answer is QUESTION_BACK:
+            self._append_log(self.i18n.text(
+                "Footprint non scritto: la domanda sulle posizioni dei pad resta aperta e verrà "
+                "riproposta prima di scrivere il footprint."))
+            return False
+        from ..services import datasheet_extractor
+        key = question["key"]
+        try:
+            updated = datasheet_extractor.apply_answers(extracted, {key: answer})
+        except Exception as exc:  # noqa: BLE001 - nothing is written, the question stays open
+            self._append_log(tx("ATTENZIONE: risposte non applicate all'estrazione: {exc}", exc=exc))
+            return False
+        if any(isinstance(q, dict) and q.get("key") == key
+               for q in getattr(updated, "questions", None) or ()):
+            # `apply_answers` refused the layout and kept the question open,
+            # with the reason in the block (`pin_map_conflict`).
+            reason = str(getattr(updated, "pin_map_conflict", None) or "").strip()
+            self._append_log(tx("Footprint non scritto: la disposizione dei pad scelta non si può "
+                                "applicare. {reason}", reason=reason))
+            return False
+        geometry = getattr(updated, "package_geometry", None)
+        package = None
+        if isinstance(geometry, dict) and geometry:
+            try:
+                data = dict(geometry)
+                # The project name, as on every apply of an extraction.
+                data["name"] = self._component_name() or "Package"
+                package = package_from_mapping(data)
+            except (KeyError, TypeError, ValueError) as exc:
+                self._append_log(tx("Footprint non scritto: la disposizione dei pad scelta non si "
+                                    "può applicare. {reason}", reason=exc))
+                return False
+        # Committed only now: the answer is remembered like every other
+        # answer (the ones it contradicts are dropped) and the question closed.
+        self._extraction_answers = datasheet_extractor.remember_answer(
+            self._extraction_answers, key, answer)
+        self._extraction_questions = [q for q in self._extraction_questions if q is not question]
+        self._last_extracted = updated
+        if package is not None:
+            self.package_geometry = package
+        # The pads the answer restored are no longer unread (PADNULL H1).
+        self._unread_pads = self._dropped_footprint_pads(updated)
+        self._unread_pad_holes = self._pads_with_unread_holes(updated, self._unread_pads)
+        self._unread_pad_unfit = self._pads_with_unfit_values(updated, self._unread_pads)
+        detail = getattr(updated, "pin_map_conflict", None)
+        self._unread_pad_unfit_detail = (detail.strip() if self._unread_pad_unfit
+                                         and isinstance(detail, str) and detail.strip() else None)
+        label = next((o["label"] for o in question["options"] if o["value"] == answer), str(answer))
+        self._append_log(tx("Risposta dell'utente: {text} -> {label}",
+                            text=question["text"], label=label))
+        self._save_project_config()
         return True
 
     # ── Partial re-read of one datum (review 2026-11-04, M16) ──
@@ -11029,7 +11565,9 @@ class MainWindow(QMainWindow):
                 # declares the keyword; the worker passes them on only to an
                 # extractor function that takes them.
                 **(accepted_kwargs(worker_class.__init__, answers=dict(self._extraction_answers))
-                   if self._extraction_answers else {}))
+                   if self._extraction_answers else {}),
+                # The pad and body reading prompts of the profile (step P2).
+                **accepted_kwargs(worker_class.__init__, prompts=self._profile_prompt_texts()))
             self._reread_worker = worker
             worker.done.connect(self._on_reread_done)
             worker.error.connect(self._on_extract_error)
@@ -11934,9 +12472,7 @@ class MainWindow(QMainWindow):
             # saved so the user can look at them, but nothing is generated.
             self._auto_generation_params = None if geometry_held_back else params
             if questions_held_back:
-                self._append_log(tx("Generazione automatica non avviata: una domanda dell'analisi "
-                                    "è rimasta senza risposta. Ripeti l'analisi o rispondi da "
-                                    "«Rigenera modello STEP», poi genera."))
+                self._append_log(self._held_back_questions_text())
             elif geometry_held_back:
                 self._append_log(tx("Generazione automatica non avviata: un dubbio sulla geometria "
                                     "del package è da verificare sul disegno. Correggi i dati o "
@@ -16812,8 +17348,25 @@ class MainWindow(QMainWindow):
             an applied edit (`_flush_footprint_rewrite`) does not ask. In
             every case the files get the APPLIED footprint
             (`_applied_footprint_in_memory`), never a draft.
+        @note Open pad-layout question (round 7b, F3): a command the user
+            started asks it first (`_resolve_stored_pad_layout_question`;
+            «Torna indietro» writes nothing); the automatic pipeline and the
+            deferred rewrite write nothing while it is open
+            (`_pad_layout_question_block`).
         """
         if self._background_work_running() or self._automatic_generation_active:
+            return False
+        # An open pad-layout question (round 7b, F3): no footprint is written
+        # on a layout the user has not confirmed. A command the user started
+        # asks it first, BEFORE the draft question, so that an answer that
+        # replaces the package rebases the draft as an analysis would; the
+        # paths that run unattended write nothing and say which command asks.
+        if automatic or self._fp_rewrite_flushing:
+            pending = self._pad_layout_question_block()
+            if pending:
+                self._append_log(pending)
+                return False
+        elif not self._resolve_stored_pad_layout_question():
             return False
         if (not automatic and not self._fp_rewrite_flushing
                 and not self._settle_footprint_draft_before_start()):
@@ -24502,8 +25055,13 @@ class MainWindow(QMainWindow):
         if not self._ensure_api_key():
             return
         snapshot = self.symbol_tab.draft_rows()
+        # The profile's pin-type prompt (step P2); None when the profile
+        # cannot be read, which sends the default.
+        pin_prompt = (self._profile_prompt_texts() or {}).get('pin_type_prompt')
         dialog = PinTypeDialog(dict(name=self._component_name(), rows=snapshot,
-                                   documents=documents, model=self._vision_model()), self, tx=self.i18n.text)
+                                   documents=documents, model=self._vision_model(),
+                                   **({'prompt': pin_prompt} if pin_prompt is not None else {})),
+                               self, tx=self.i18n.text)
         account = getattr(self, 'ai_account', None)
         if account:
             project = self._project_dir_or_none()

@@ -19,7 +19,30 @@ from .messages import tx
 PROFILE_FIELDS = ('model','vision_model','verification_model','system_prompt','grounding_prompt',
                   'verification_prompt','terminal_prompt','lead_prompt','crop_prompt',
                   'crop_model','image_instructions','system_prompt_single','numbering_prompt',
-                  'pad_model')
+                  'pad_model','pad_positions_prompt','body_dimensions_prompt',
+                  'role_prompt_pinout','role_prompt_top','role_prompt_hires',
+                  'role_prompt_land_pattern','role_prompt_side_view','role_prompt_datasheet',
+                  'mechanical_evidence_prompt','inventory_prompt','inventory_enumerate_prompt',
+                  'inventory_enumerate_empty_prompt','marking_prompt',
+                  'contact_style_prompt','pin_type_prompt')
+#: Prompt fields added by schema 8 (2026-11-11, user request «non possiamo
+#: lasciarli embeddati nel codice» = they must not stay embedded in the code):
+#: every prompt that lived only in the code gets a profile field, its status
+#: and diff in the dialog (kicadgen/services/prompt_catalog.py). Wired into the
+#: analysis by step P2 of that plan (prompt_catalog entries with in_profile True).
+SCHEMA8_PROMPT_FIELDS = ('pad_positions_prompt','body_dimensions_prompt',
+                         'role_prompt_pinout','role_prompt_top','role_prompt_hires',
+                         'role_prompt_land_pattern','role_prompt_side_view',
+                         'role_prompt_datasheet','mechanical_evidence_prompt','inventory_prompt',
+                         'inventory_enumerate_prompt','inventory_enumerate_empty_prompt',
+                         'marking_prompt')
+#: Prompt fields added by schema 9 (2026-11-11, step P2): two prompts that
+#: were built inside a function and were lifted into module constants --
+#: the contact-style recheck of a castellated board
+#: (datasheet_extractor.CONTACT_STYLE_PROMPT) and the electrical pin-type
+#: suggestion (pin_type_ai.PIN_TYPE_PROMPT). The other inline texts found by
+#: step P1 stay in the code on purpose (prompt_catalog.CODE_ONLY_PROMPTS).
+SCHEMA9_PROMPT_FIELDS = ('contact_style_prompt', 'pin_type_prompt')
 #: 'system_prompt_single' is the datasheet prompt of a single component
 #: (families single_tht/single_smd), 'numbering_prompt' the prompt of the
 #: dedicated pin-numbering call (both 2026-10-10, schema 6).
@@ -50,8 +73,10 @@ _MISSING = object()
 #: 4: crop_prompt (per-body crop reading prompt, HANDOFF 146); 5: crop_model
 #: (model of that reading, blank = photo model, HANDOFF 150); 6:
 #: system_prompt_single and numbering_prompt; 7: pad_model (model of the
-#: dedicated pad-position reading, 2026-10-30).
-SCHEMA_VERSION = 7
+#: dedicated pad-position reading, 2026-10-30); 8: the prompts that lived
+#: only in the code (SCHEMA8_PROMPT_FIELDS, 2026-11-11); 9: the two prompts
+#: lifted out of functions (SCHEMA9_PROMPT_FIELDS, 2026-11-11).
+SCHEMA_VERSION = 9
 #: Longest time (seconds) a store keeps trusting the last database file
 #: signature it read before reading it again (review 2026-10-29, E2). Every
 #: lookup used to stat, open and read the file header (~0.2 ms on Windows):
@@ -108,64 +133,55 @@ def _replace_superseded_texts(db):
     """@brief Replace outdated built-in instructions and global prompts still stored verbatim.
 
     @param db Open connection inside the initialization transaction.
-    @note A stored text is replaced only when its SHA-256 digest is one of the
-        known former defaults (component_types.SUPERSEDED_INSTRUCTION_DIGESTS,
-        datasheet_extractor.SUPERSEDED_SYSTEM_PROMPT_DIGESTS,
+    @note A stored text is replaced only when prompt_catalog says it is
+        OUTDATED: its SHA-256 digest is one of the KNOWN former defaults of
+        its registry entry (component_types.SUPERSEDED_INSTRUCTION_DIGESTS,
+        datasheet_extractor.SUPERSEDED_*_DIGESTS,
         photo_crop_reading.SUPERSEDED_CROP_PROMPT_DIGESTS,
-        photo_terminals.SUPERSEDED_PROMPT_DIGESTS): a text the user
-        edited, even by one character, never matches and is kept. Only the
-        global system prompt, the global crop prompt and the built-in types
-        are touched; a per-type
-        override or a custom type copied from a built-in one is a deliberate
-        choice of the user and stays as it is. The UPDATE repeats the old text
-        in its condition, so a concurrent edit is never overwritten.
+        photo_terminals.SUPERSEDED_PROMPT_DIGESTS and, for EVERY profile
+        prompt, prompt_catalog.SUPERSEDED_DIGESTS[field] (review V4-4,
+        2026-11-11), read through prompt_catalog.PROMPTS so that every
+        registered prompt follows the same rule; a CRLF copy of a former
+        default counts as that default, review V5-4): a text the user edited,
+        even by one character, is CUSTOM
+        and is kept. A CUSTOM text is never changed here; the profile dialog
+        shows its status and diff instead. Only the global defaults and the
+        built-in types are touched; a per-type override or a custom type
+        copied from a built-in one is a deliberate choice of the user and
+        stays as it is. The UPDATE repeats the old text in its condition, so
+        a concurrent edit is never overwritten.
     """
-    from .component_types import SUPERSEDED_INSTRUCTION_DIGESTS, get as builtin_type, text_digest
-    from .datasheet_extractor import (
-        DEFAULT_SYSTEM_PROMPT, SUPERSEDED_SYSTEM_PROMPT_DIGESTS, DEFAULT_SINGLE_SYSTEM_PROMPT,
-        SUPERSEDED_SINGLE_PROMPT_DIGESTS, DEFAULT_PIN_NUMBERING_PROMPT,
-        SUPERSEDED_NUMBERING_PROMPT_DIGESTS)
+    from . import prompt_catalog
     rows = db.execute('SELECT key,instructions FROM component_types WHERE builtin=1').fetchall()
     for key, instructions in rows:
-        current = builtin_type(key)
-        if (current is not None and instructions != current.prompt
-                and text_digest(instructions) in SUPERSEDED_INSTRUCTION_DIGESTS.get(key, ())):
+        entry = prompt_catalog.instruction_entry(key)
+        if entry is not None and prompt_catalog.entry_status(entry, instructions) == prompt_catalog.OUTDATED:
             db.execute('UPDATE component_types SET instructions=? '
                        'WHERE key=? AND builtin=1 AND instructions=?',
-                       (current.prompt, key, instructions))
-    from .photo_crop_reading import SUPERSEDED_CROP_PROMPT_DIGESTS, SYSTEM_PROMPT as CROP_PROMPT
-    from .photo_terminals import SUPERSEDED_PROMPT_DIGESTS as SUPERSEDED_TERMINAL_PROMPT_DIGESTS
-    from .photo_terminals import PROMPT as TERMINAL_PROMPT
-    for name, current, superseded in (
-            ('system_prompt', DEFAULT_SYSTEM_PROMPT, SUPERSEDED_SYSTEM_PROMPT_DIGESTS),
-            ('system_prompt_single', DEFAULT_SINGLE_SYSTEM_PROMPT, SUPERSEDED_SINGLE_PROMPT_DIGESTS),
-            ('numbering_prompt', DEFAULT_PIN_NUMBERING_PROMPT, SUPERSEDED_NUMBERING_PROMPT_DIGESTS),
-            ('crop_prompt', CROP_PROMPT, SUPERSEDED_CROP_PROMPT_DIGESTS),
-            ('terminal_prompt', TERMINAL_PROMPT, SUPERSEDED_TERMINAL_PROMPT_DIGESTS)):
-        row = db.execute('SELECT value FROM ai_defaults WHERE name=?', (name,)).fetchone()
-        if row is not None and row[0] != current and text_digest(row[0]) in superseded:
+                       (entry.current_default(), key, instructions))
+    for entry in prompt_catalog.PROMPTS:
+        row = db.execute('SELECT value FROM ai_defaults WHERE name=?', (entry.field,)).fetchone()
+        if row is not None and prompt_catalog.entry_status(entry, row[0]) == prompt_catalog.OUTDATED:
             db.execute('UPDATE ai_defaults SET value=? WHERE name=? AND value=?',
-                       (current, name, row[0]))
+                       (entry.current_default(), entry.field, row[0]))
 
 
 def factory_defaults():
     """@brief Return the built-in AI defaults (models and prompts) used to seed the profile database.
 
     @return Mapping of default name to its factory value (a fresh dict).
+    @note Every prompt text comes from prompt_catalog.PROMPTS, the one
+        registry of the prompts: a prompt is never seeded from a second list.
     """
-    from .datasheet_extractor import (DEFAULT_SYSTEM_PROMPT, DEFAULT_SINGLE_SYSTEM_PROMPT,
-                                      DEFAULT_PIN_NUMBERING_PROMPT, DEFAULT_PAD_POSITIONS_MODEL)
+    from .datasheet_extractor import DEFAULT_PAD_POSITIONS_MODEL
     from .openrouter import DEFAULT_MODEL
-    from .photo_grounding import DEFAULT_VISION_MODEL, GROUNDING_PROMPT, VERIFICATION_PROMPT
-    from .photo_terminals import PROMPT as TERMINAL_PROMPT
-    from .photo_leads import PROMPT as LEAD_PROMPT
-    from .photo_crop_reading import SYSTEM_PROMPT as CROP_PROMPT
-    return dict(model=DEFAULT_MODEL,vision_model=DEFAULT_VISION_MODEL,verification_model=DEFAULT_MODEL,
-        system_prompt=DEFAULT_SYSTEM_PROMPT,grounding_prompt=GROUNDING_PROMPT,
-        verification_prompt=VERIFICATION_PROMPT,terminal_prompt=TERMINAL_PROMPT,
-        lead_prompt=LEAD_PROMPT,crop_prompt=CROP_PROMPT,crop_model='',image_instructions='',
-        system_prompt_single=DEFAULT_SINGLE_SYSTEM_PROMPT,
-        numbering_prompt=DEFAULT_PIN_NUMBERING_PROMPT, pad_model=DEFAULT_PAD_POSITIONS_MODEL)
+    from .photo_grounding import DEFAULT_VISION_MODEL
+    from .prompt_catalog import PROMPTS
+    values = dict(model=DEFAULT_MODEL, vision_model=DEFAULT_VISION_MODEL,
+                  verification_model=DEFAULT_MODEL, crop_model='',
+                  pad_model=DEFAULT_PAD_POSITIONS_MODEL)
+    values.update((entry.field, entry.current_default()) for entry in PROMPTS)
+    return values
 
 
 def bare_backup_name(value):
@@ -405,6 +421,28 @@ class ProfileStore:
                            ('pad_model', factory_defaults()['pad_model']))
                 db.execute('PRAGMA user_version=7')
                 version = 7
+            if version == 7:
+                # The prompts that lived only in the code (2026-11-11): their
+                # factory texts become the global defaults. Same rules as the
+                # previous steps: a row already there is never replaced, no
+                # per-type override is created, and no stored text changes.
+                factory = factory_defaults()
+                for name in SCHEMA8_PROMPT_FIELDS:
+                    db.execute('INSERT OR IGNORE INTO ai_defaults VALUES (?,?)',
+                               (name, factory[name]))
+                db.execute('PRAGMA user_version=8')
+                version = 8
+            if version == 8:
+                # The two prompts lifted out of functions (2026-11-11, step
+                # P2): same rules as step 7->8 -- the factory text becomes the
+                # global default, a row already there is never replaced, no
+                # per-type override is created, no stored text changes.
+                factory = factory_defaults()
+                for name in SCHEMA9_PROMPT_FIELDS:
+                    db.execute('INSERT OR IGNORE INTO ai_defaults VALUES (?,?)',
+                               (name, factory[name]))
+                db.execute('PRAGMA user_version=9')
+                version = 9
             if version == SCHEMA_VERSION:
                 # Fail explicitly on a damaged schema; never silently reset user profiles.
                 db.execute('SELECT key,label,family,instructions,active,builtin,position FROM component_types LIMIT 1')
@@ -767,6 +805,43 @@ class ProfileStore:
             for field in PHOTO_PROMPT_FIELDS:
                 values[field] += '\n\nIstruzioni specifiche per le immagini:\n'+extra
         return values
+
+    def prompt_statuses(self, key=''):
+        """@brief Status of every registered prompt of a profile against the current program defaults.
+
+        @param key Component type key; empty for the global defaults only.
+        @return One dict per prompt_catalog.PROMPTS entry, in registry order,
+            with `field`, `title` (Italian catalog source), `stage`,
+            `status` (prompt_catalog CURRENT/CUSTOM/OUTDATED), `is_override`
+            (True when the type stores its own text, False when it inherits
+            the global default) and `in_profile` (True for every entry of
+            PROMPTS since step P2). For a BUILT-IN type a last dict with
+            field "instructions" gives the status of the type's instructions
+            (is_override False: they belong to the type itself).
+        @throws ProfileError When `key` is not in the catalogue.
+        @note Read only: no stored text is changed, CUSTOM texts included.
+            The texts are those of `resolve`, without the image instructions
+            that `snapshot` appends.
+        """
+        from . import prompt_catalog
+        values = self.resolve(key)
+        overrides = self.overrides(key) if key else {}
+        rows = []
+        for entry in prompt_catalog.PROMPTS:
+            text = values.get(entry.field)
+            if not isinstance(text, str):
+                continue
+            rows.append(dict(field=entry.field, title=entry.title, stage=entry.stage,
+                             status=prompt_catalog.entry_status(entry, text),
+                             is_override=entry.field in overrides,
+                             in_profile=entry.in_profile))
+        row = self.get_type(key) if key else None
+        entry = prompt_catalog.instruction_entry(key) if row and row['builtin'] else None
+        if entry is not None:
+            rows.append(dict(field=entry.field, title=entry.title, stage=entry.stage,
+                             status=prompt_catalog.entry_status(entry, row['instructions']),
+                             is_override=False, in_profile=True))
+        return rows
 
     def save_type(self,key,*,label,family,instructions='',active=True,overrides=None):
         """@brief Create (empty `key`) or update a component type and optionally replace its overrides.

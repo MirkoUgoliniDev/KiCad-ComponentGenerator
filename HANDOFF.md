@@ -1,5 +1,24 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## STATO 11/11/2026 notte — giri 6, 6b, 7, 7b e prompt nel profilo (P1, P2) COMMITTATI su FOOTPRINT-ADVANCE (utente: «ok»), NON mergiati, NON pushati
+
+Suite completa VERDE a codice fermo: A 8287 passati 9 saltati 19 sottotest, B 5318 passati 4 saltati = 13605 passati,
+13 saltati, 19 sottotest. Commit: vedi la riga aggiornata dal commit di sola documentazione che segue (base `1266fb7`).
+`main` e `origin` fermi a `03a1a60` (v1.0.8). data/analysis_profiles.sqlite3 aperto a schema 9 e committato.
+CONTENUTO: (a) i fori disegnati che smentiscono due letture concordi producono SEMPRE la domanda pad_layout (con il
+layout dei fori se esiste), mai un blocco ne' una conferma silenziosa; (b) un terminale letto una volta e' «stimato»;
+(c) istruzioni della tipologia allineate e protette se modificate a mano (digest nel progetto); (d) ogni prompt nel
+profilo con stato, differenze, ripristino, avviso all'avvio e riga nel log; (e) «Genera»/«Rigenera footprint»/«Applica
+ai file» chiedono la domanda pad_layout aperta prima di scrivere. Dettaglio sotto, blocchi dal «PROVA DELL'UTENTE 11/11
+17:42» a «U1 HA FINITO».
+NON VERIFICATO: il giro 7b (U1) senza revisione indipendente; nessuna analisi reale dopo queste modifiche.
+LIMITI DICHIARATI: in un progetto riaperto una domanda pad_layout aperta richiede di rifare l'analisi (candidati non
+salvati); su pagine stirate 5.5-8% i layout giusti ricevono una domanda; una lettura sbagliata del 5-6% passa con
+l'avviso (come 1266fb7); i prompt foto sono nominati anche alle famiglie a componente singolo nell'avviso.
+DA DECIDERE CON L'UTENTE: i prompt «Componente singolo», «Schede e moduli» e «Verifica foto» del database risultano
+PERSONALIZZATI (dal dialogo del profilo: «Mostra differenze», «Ripristina predefinito»); vista del rele' SRD; difetti
+non autorizzati della revisione completa (F8-*, F2-2, F1-*, F3-1, F3-2, F4-*, F9-2, F10-*, C*, P*); push e merge.
+
 ## STATO 11/11/2026 pomeriggio — giri 4 e 5 COMMITTATI su FOOTPRINT-ADVANCE (utente: «Ok committa»), NON mergiati, NON pushati
 
 Suite completa VERDE a codice fermo: A 8255 passati 9 saltati 19 sottotest, B 5138 passati 4 saltati = 13393 passati,
@@ -10,6 +29,358 @@ Y3, Z1) e di cio' che la verifica indipendente V1/V2 ha trovato in quelle correz
 sotto, «REVISIONE COMPLETA DEL CODICE — 11/11/2026».
 NON VERIFICATO: il giro 5 senza seconda revisione indipendente; nessuna analisi reale dopo l'ultima riscrittura del
 prompt single.
+PROVA DELL'UTENTE 11/11 17:42 (analisi del rele' SRD lanciata DAL PROGRAMMA; letto analisi-ai.log, nessun codice
+toccato): CONFERMATO che il programma manda il prompt single VECCHIO (5731 caratteri, contiene «stima il foro», non
+contiene hole_callout ne' «PIAZZOLA:»): e' quello salvato nel database dei profili (V1-5). SECONDA FONTE TROVATA ORA,
+non nota prima: il blocco «Tipologia componente (generato, modificabile)» mandato come istruzioni aggiuntive dice
+ancora «se il datasheet da' solo il diametro del terminale, stima drill_mm = diametro terminale + 0.2..0.3 mm e
+pad_diameter_mm = drill_mm + 0.7..0.9 mm»: viene da kicadgen/services/component_types.py:56 (istruzioni della
+tipologia «componente singolo THT») ed e' anche salvato nel progetto (project_config.json, field_component_prompt).
+Contraddice la regola nuova (il foro non stampato lo ricava il programma). DA CORREGGERE con l'OK dell'utente:
+istruzioni della tipologia in component_types.py (con il digest vecchio in SUPERSEDED_INSTRUCTION_DIGESTS) e il
+testo gia' salvato nei progetti/profili. Finche' restano, dal programma i fori li propone ancora il modello.
+ESITO DELLA PROVA DELL'UTENTE (11/11 17:42-17:44, risultato SBAGLIATO, utente: «il pin centrale non deve essere
+allineato», «guarda le dimensioni dei fori e dei pad»). DIAGNOSI riprodotta offline dalle risposte nel log (script in
+scratchpad/user1742/), nessun codice toccato:
+ 1. Posizione del pin 4: ENTRAMBE le letture (principale gpt-5.5 e dedicata gpt-5.6-sol) hanno messo 1, 4 e 5 nella
+    stessa colonna (fermata «1,4,5»; la dedicata ha trascritto la quota 2±0.05 come «linea di riferimento»). Due
+    letture concordi -> il programma scrive «Posizioni dei pad confermate dalla lettura dedicata» e GENERA. Ma il
+    testimone dei fori disegnati SMENTISCE quel layout: check_pad_layout = not_confirmed/distorted (errore 0.21 mm,
+    tolleranza 0.15), mentre lo stesso layout col pin 4 spostato di 2 mm a sinistra = confirmed, errore 0.09, corpo
+    «agrees». Il programma mette solo la nota «i fori disegnati coincidono solo deformando il disegno; controllare il
+    disegno» e genera comunque. DIFETTO DEL PROGRAMMA, PREESISTENTE: le stesse risposte passate nell'estrattore di
+    v1.0.8 (03a1a60) danno lo stesso identico risultato (pin 4 a -6.15). Non e' una regressione dei commit di oggi.
+    Viola la regola «una lettura non confermata o smentita blocca la generazione». Classe: due letture che fanno lo
+    stesso errore battono un testimone geometrico che le smentisce.
+ 2. Fori e piazzole: il modello ha dichiarato i terminali per pad SBAGLIATI e «read»: pad 1 e 2 tondi Ø0.6; pad 3, 4,
+    5 piatti 1.1 x 0.4. Il disegno dice: 1 e 5 Ø0.6 (bobina), 2 e 3 lamelle 1 x 0.4, 4 lamella 1.1. Il programma ha
+    ricavato fedelmente da quei terminali (0.85/1.65 e 1.45/2.25, segnati «derived»). Nessuna seconda lettura controlla
+    il terminale dichiarato per pad: UNA lettura sola decide i fori. (Nella corsa reale dallo script della mattina lo
+    stesso modello li aveva dichiarati giusti: il modello non risponde uguale due volte.)
+ 3. La vista: risposta «bottom» -> footprint specchiato (pin 2 in alto a sinistra): voluto.
+ PROPOSTA (da autorizzare): (a) se due letture concordano ma i fori disegnati le smentiscono in modo osservabile, NON
+ si genera: blocco/domanda, e se i fori confermano un layout alternativo misurabile lo si propone; (b) i terminali per
+ pad letti da UNA sola lettura restano «stimati» finche' una seconda lettura indipendente non li conferma.
+AUTORIZZATO dall'utente (11/11 ~18:00, «ok» alla proposta (a)+(b)). PIANO GIRO 6 (scritto prima di toccare il codice):
+ T1 (fixer) kicadgen/services/datasheet_extractor.py, kicadgen/services/component_types.py, i18n (voci), test nuovi:
+  (a) due letture concordi smentite dai fori disegnati in modo osservabile -> niente generazione: blocco con rimedio;
+      se i fori confermano un layout alternativo misurabile (measured_layout) lo si propone come candidato della
+      domanda pad_layout, mai adottato in silenzio;
+  (b) terminale per pad: la lettura dedicata (pad_model) trascrive anche i terminali per pad; concordi -> «read»; uno
+      solo -> lead «estimated» (quindi foro e piazzola ricavati sono «estimated»); discordi -> segnalati con entrambi i
+      valori, mai mediati;
+  (c) completamento di A1-A3 sfuggito alle revisioni: le istruzioni della tipologia «componente singolo THT» in
+      component_types.py:56 dicono ancora «stima drill_mm = diametro terminale + 0.2..0.3 …»: allinearle alla regola
+      nuova, digest vecchio in SUPERSEDED_INSTRUCTION_DIGESTS; verificare come si aggiorna il testo gia' salvato nei
+      progetti (field_component_prompt «generato, modificabile»).
+ NON incluso: il prompt system_prompt_single salvato nel database dei profili (potrebbe essere una modifica
+ dell'utente): resta la domanda aperta.
+ Guardia obbligatoria: le risposte dell'analisi dell'utente delle 17:42 (generated/SRD-05VDC-SL-C/analisi-ai.log,
+ ultima analisi) rielaborate offline NON devono piu' generare col pin 4 allineato.
+ Poi: verifica indipendente, suite completa a codice fermo, richiesta di OK al commit.
+ T1 HA FINITO (11/11 ~19:00 reali; script e uscite in scratchpad/t1/: replay1742.py, before/, after/, cmp.txt).
+  (a) UNA regola, _agreement_contradicted (datasheet_extractor ~4629), usata dal ramo «letture concordi» di
+   apply_dedicated_pads (~5312) e da _resolve_chain_candidate (~4918); reread_pad_positions passa da apply_dedicated_pads.
+   Smentita = «no_match» osservabile, oppure «distorted» su una pagina che gli altri pad PROVANO in scala
+   (_pads_the_holes_single_out ~4598: il layout SENZA ciascun pad e' confermato dai soli fori disegnati con
+   scale_observable). Unverifiable, body_scale e «distorted» non provato non smentiscono nulla. Su smentita:
+   _refuse_contradicted_agreement (~4776): niente scritto; _hole_backed_layouts (~4683) cerca un layout confermato dai
+   fori (misura, oppure pad singolo riposizionato su una quota stampata non attribuita a nessun pad) e lo offre come
+   opzione della domanda pad_layout (HOLES_SOURCE «holes»), MAI adottato; senza alternativa, blocco duro.
+   PERCHE' «distorted» era solo un avviso: commit 65aee39 (31/10), docstring di _pick_by_holes: un disegno puo' non
+   essere in scala con le proprie quote. Caso LEGITTIMO MANTENUTO (criterio strutturale: se nessun sottoinsieme prova la
+   scala, resta l'avviso).
+   Replay 17:42 ora: nessun «confermate», nessun pad 4 a -6.15; domanda «pad_layout:holes:46b50b1a|main+dedicated:2c5c6a5f»
+   con opzione 1 = layout delle letture, opzione 2 = «disposizione confermata dai fori disegnati» con pad 4 sulla quota
+   1.4 (scarto 0.09 mm, tolleranza 0.15, scala verificata dal contorno); rispondendo 2 (apply_answers): pad 1/5 a -6.15,
+   2/3 a 6.05, pad 4 a -8.15, origine body_center; rispondendo 1: layout vecchio.
+  (b) schema `printed_terminals` in _PAD_POSITIONS_TOOL (~1445) e paragrafo «TERMINALI QUOTATI» del prompt pad (~1313,
+   non salvato nei profili); printed_terminals() (~2325); _dedicated_leads solo se la lettura e' girata E same_model
+   False; _confirmed_lead_word (~13211): stesso terminale in entrambe -> parola dichiarata; diverso -> «estimated» con
+   nota «terminale letto diversamente dalle due letture» (valore principale, mai mediato); una sola lettura / nessuna
+   dedicata / stesso modello / risposta vecchia -> «estimated» con nota «terminale letto una sola volta»; foro e piazzola
+   derivati diventano «estimated». Replay 17:42: tutti e 5 i pad lead/drill/pad «estimated».
+  (c) component_types.py:48-66 single_tht riscritto (trascrivi il foro stampato, altrimenti dai il terminale; il
+   programma ricava); digest vecchio 0941635a… in SUPERSEDED_INSTRUCTION_DIGESTS["single_tht"]; le altre tre tipologie
+   non avevano l'istruzione. NESSUNA modifica a main_window.py: all'apertura il progetto rinnova il blocco «generato»
+   (main_window ~9128-9138, apply_block) — ATTENZIONE: apply_block sostituisce TUTTO il blocco, anche modificato
+   dall'utente dentro i marcatori (preesistente). data/analysis_profiles.sqlite3 va riaperto e committato.
+  Test: nuovo tests/test_extraction_review_round6.py (32; mutazione: regola spenta -> 6+2+9 falliscono); contratti
+  cambiati (nessuno allentato): test_pad_positions_by_drawn_holes (rinominato: il layout misurato e' OFFERTO, mai dato),
+  test_extraction_declared_attributes, test_extraction_pad_terminals (2), round3, round4, round5 (terminale letto una volta
+  -> «estimated» al posto di «derived», valori invariati). Mirati tutti verdi. 8 voci i18n. Replay: 40, 34 identici;
+  cambiano SRD ultima (con e senza risposte salvate) e SRD a10 (domanda invece di conferma + terminali stimati) e,
+  solo nelle PAROLE di provenienza, HLK, SRD a6, a7; VE12H (25) e SRD a1-a5, a8, a9 identici. Risposta reale della
+  mattina: stessi valori (0.85/1.65, 1.35/2.15, 1.40/2.20, pad 4 a -8.15, corpo 19.1 x 15.5), provenienza «estimated».
+  LIMITI DICHIARATI: (1) il candidato dei fori esiste nel caso 17:42 solo perche' il modello dedicato ha trascritto la
+  quota 2±0.05 come fermata «ref:» non attribuita; drawing_holes.measured_layout rifiuta quel layout («no_match»:
+  il pad 4 sbagliato cade sul cerchio vagante, quindi l'ancoraggio «tutti tranne il pad 4» non e' mai provato da
+  _layout_candidates): senza la fermata ref: il risultato sarebbe il blocco duro (mai un footprint sbagliato); fix in
+  drawing_holes.py (anche ancoraggi che escludono un pad su un cerchio non disegnato come foro). (2) con scala al
+  limite del vincolo la pagina potrebbe risultare «distorted» tutta e un layout giusto diventare domanda/blocco. (3)
+  «distorted» con DUE pad sbagliati o con meno di 5 pad resta solo avviso. (4) una domanda pad_layout aperta trattiene
+  solo la generazione automatica: «Rigenera footprint» costruisce ancora i pad principali (F2-1 noto, non autorizzato).
+  (5) la regola (b) declassa anche lead_diameter_mm di parte sui pad espliciti. (6) CAMBIO DI COMPORTAMENTO oltre il
+  caso: due letture concordi smentite come «no_match» con misura unica prima si scrivevano da sole (H6), ora domanda.
+  (7) il prompt system_prompt_single nel database dei profili resta quello vecchio (domanda aperta).
+ GUARDIA DEL COORDINATORE (11/11 ~19:05): rieseguito scratchpad/t1/replay1742.py: nessun footprint col pin 4 allineato;
+  domanda pad_layout con due opzioni (letture: pad 4 a 3.40 = stessa colonna di 1 e 5; fori: pad 4 a 1.40); rispondendo
+  alle fori -> pad 4 a -8.15, altri invariati; rispondendo alle letture -> layout vecchio; tutti i pad «estimated».
+ VERIFICA INDIPENDENTE DEL GIRO 6 (V3, adversarial-reviewer, solo snippet, scratchpad/v3/) e SUITE COMPLETA lanciate in
+  parallelo (11/11 ~19:05): suite basetemp .venv/claude-test-full-r6, log scratchpad/suite-r6.log. NOTA: il revisore
+  non esegue pytest; se per errore lo facesse la suite va rifatta.
+ V3 HA FINITO (11/11 ~18:45 reali; script scratchpad/v3/: fb.py, fb2.py, fb3.py, snap.py, fuzz5.py, fuzz5b.py).
+  V3-1 ALTO riprodotto, REGRESSIONE del giro 6: un layout GIUSTO su una pagina stirata del 3.5-7% viene ora BLOCCATO
+   (letture concordi + «distorted» + _pads_the_holes_single_out trova pad «isolati» perche' _allowed_stretch cresce
+   togliendo pad: tolleranza/estensione). Casi: rele' 5 pad al 3.5-4% (isolati 1,2,3,5 o 2,3); 6 pad al 4%; 2x3 al
+   5-6%; header 2x4 al 6% su y con UN SOLO pad isolato (['4']); 2x5 al 5.5%. Messaggio falso «la pagina e' in scala».
+   Sotto il 3% e sopra il 7% nulla. Il limite (2) dichiarato da T1 era sottostimato.
+  V3-2 MEDIO preesistente (esposizione allargata dal giro 6): all'apertura del progetto apply_block (main_window
+   ~9128-9138, component_types.py:268) sostituisce TUTTO il blocco «generato, modificabile» anche se l'utente l'ha
+   modificato: la modifica sparisce in silenzio. Fix: rinnovare solo se il digest del blocco e' superato o uguale al
+   default attuale.
+  V3-3 BASSO: printed_terminals solleva TypeError con shape lista/dict (~2352). V3-4 BASSO: printed_terminals puo'
+   restituire inf (1e308 in pollici). V3-5 BASSO sospetto: una chiave `_dedicated_leads` (e `_dedicated_holes`) mandata
+   dal modello non viene tolta. V3-6 INFO: lo strumento pad non e' mai stato convertibile in strict (anche a 1266fb7).
+  Non rotto: replay 40 corse (34 identiche, 6 cambi tutti voluti); nessuna analisi registrata prima corretta ora
+  bloccata; fuzz 7.7% bloccati tutti per «niente posto», nessun motivo nuovo; percorso domanda e GUI ok (solo F2-1
+  noto e una risposta salvata costruiscono i pad senza chiedere); _same_lead; digest delle istruzioni.
+ SUITE r6 FERMATA dal coordinatore (resa vecchia dalla correzione di V3-1).
+ RICHIESTA DELL'UTENTE (11/11 sera): «dobbiamo evidenziare questi prompt nell'interfaccia, non possiamo lasciarli
+  embeddati nel codice … trova un modo!». INVENTARIO (coordinatore, sola lettura): GIA' modificabili nel dialogo del
+  profilo (profile_dialog.py, campi ai_defaults): system_prompt («Schede e moduli»), system_prompt_single («Componente
+  singolo»), numbering_prompt, grounding_prompt, verification_prompt, terminal_prompt, lead_prompt, crop_prompt,
+  image_instructions e le «Istruzioni tipologia». SOLO NEL CODICE: DEFAULT_PAD_POSITIONS_PROMPT (lettura dedicata dei
+  pad, datasheet_extractor ~1281), DEFAULT_BODY_DIMENSIONS_PROMPT (lettura dedicata del corpo, ~1512), _ROLE_PROMPTS
+  (~8809), photo_global_inventory.PROMPT/PROMPT_ENUMERATE, photo_markings.PROMPT, photo_grounding.MECHANICAL_EVIDENCE_PROMPT.
+  PROBLEMA VERO dietro la richiesta: quando il codice cambia un prompt, il profilo salvato tiene in silenzio il testo
+  vecchio se non lo riconosce come vecchio predefinito, e nessuno lo vede (caso system_prompt_single dc7044b8…).
+  PROPOSTA (in attesa dell'OK, regola «conferma l'intento prima di costruire»): (1) portare nel profilo, modificabili
+  come gli altri, i prompt che oggi stanno solo nel codice (bump SCHEMA_VERSION con migrazione); (2) nel dialogo del
+  profilo, per ogni prompt uno stato visibile: «predefinito di questa versione» / «personalizzato» / «predefinito di
+  una versione precedente», con «Mostra differenze» e «Ripristina predefinito»; (3) all'avvio, se un prompt salvato
+  differisce dal predefinito attuale e non e' un vecchio predefinito noto, un avviso UNA volta che apre il confronto,
+  invece di tenerlo in silenzio; (4) il log dell'analisi scrive per ogni prompt usato se era predefinito o
+  personalizzato. Da costruire DOPO che T2 ha finito su main_window.py.
+  APPROVATA dall'utente (11/11 sera: «ok … intanto implementa tutto»). PIANO:
+   P1 (subito, file disgiunti da T2): kicadgen/services/prompt_catalog.py (NUOVO: registro unico dei prompt con
+    campo, titolo, default, digest superati, stato predefinito/personalizzato/vecchio, diff), analysis_profiles.py
+    (campi nuovi + SCHEMA_VERSION + migrazione + stato), profile_dialog.py (stato, «Mostra differenze», «Ripristina
+    predefinito»), i18n.py (inserimenti locali), test nuovi. NON tocca datasheet_extractor.py, photo_*.py, main_window.py.
+   P2 (dopo T2 e P1): collegare i prompt oggi solo nel codice (pad positions, body dimensions, ruoli documenti,
+    inventario globale, marcature, evidenza meccanica) al profilo; avviso unico all'avvio in main_window; riga nel log
+    dell'analisi con lo stato di ogni prompt usato.
+  P1 HA FINITO (11/11 sera; script in scratchpad/p1/): kicadgen/services/prompt_catalog.py (registro: campo, titolo,
+   stadio, default letto pigramente dal modulo proprietario, digest dei vecchi default, in_profile; API prompt_status,
+   entry_status, prompt_diff, entry_diff, restore_default, status_label, fields, entry, instruction_entry);
+   stati: current (uguale al default salvo spazi attorno), outdated (digest in un insieme superato), custom (tutto il
+   resto; vuoto = custom salvo image_instructions). analysis_profiles.py: SCHEMA_VERSION 8, 13 campi nuovi
+   (SCHEMA8_PROMPT_FIELDS: pad_positions_prompt, body_dimensions_prompt, 6 role_prompt_<ruolo>, mechanical_evidence_prompt,
+   inventory_prompt, inventory_enumerate_prompt, inventory_enumerate_empty_prompt, marking_prompt) con migrazione
+   INSERT OR IGNORE; _replace_superseded_texts guidato dal registro; ProfileStore.prompt_statuses(key=''). Dialogo del
+   profilo: etichetta di stato, «Mostra differenze», «Ripristina predefinito» per ogni prompt e per le istruzioni di
+   tipologia; i 13 campi nuovi NON mostrati finche' P2 non li collega (in_profile=False). Copia del DB committato:
+   CUSTOM system_prompt (a1538d55, differisce in una frase sull'esempio «15.24 mm a passo 2.54»),
+   system_prompt_single (dc7044b8), verification_prompt (7bd7d3e9, una riga); tutto il resto current; nessuna override;
+   single_tht era outdated e viene sostituito all'apertura. Test nuovi tests/test_prompt_catalog.py (22),
+   tests/test_profile_prompt_status.py (19); cambiato test_analysis_profiles (SCHEMA_VERSION 8). 31 voci i18n.
+   Prompt NON raggiungibili dal registro (variabili locali): UNREGISTERED_INLINE_PROMPTS (contact-style recheck,
+   verifica semantica dei package, localizzazione per strisce, _OMISSION_REMINDER, suggerimento tipo pin): P2.
+   DA FARE IN P2: collegare i 13 campi (read_pad_positions, read_body_dimensions, _role_description, photo_grounding
+   ~996/1190, review_global_inventory con le cache che includano il digest del testo, read_markings), mettere
+   in_profile=True, avviso all'avvio, riga nel log, registrare i prompt inline. data/analysis_profiles.sqlite3 va
+   committato dopo un'apertura a schema 8.
+  T2 HA FINITO (giro 6b; script in scratchpad/t2/, fb_all.py --old per la regola del giro 6): V3-1 con criterio
+   strutturale nel testimone: drawing_holes._single_misplaced(points, targets, tolerance_px) -> pad solo se (i) un pad
+   sta oltre la tolleranza dalla mappa AFFINE stimata sugli altri, (ii) UNO SOLO, tolto, lascia gli altri su una
+   SIMILITUDINE entro la tolleranza per foro (nessuna tolleranza di stiramento), (iii) i rimasti mostrano uno
+   stiramento (>= 4 pad non allineati, quindi lettura >= 5 pad). Esposto come LayoutCheck.misplaced_pad (opzionale).
+   _agreement_contradicted: «distorted» smentisce solo se misplaced_pad nomina un pad; «no_match» invariato. CORRETTO
+   ANCHE un difetto del testimone: la ricerca larga scartava una conferma trovata (gate stretto 6% < stiramento
+   accettato): ora la tiene (le fit stirate richiedono ancora cerchi disegnati come fori). Blocchi falsi: 816 pagine
+   (12 layout, 0-8% su X e Y, con e senza rotazione) 30 -> 0; fb.py, fb2.py, fb3.py tutti 0. Replay 17:42: rifiutato,
+   opzione dei fori col pad 4 a -8.15. Replay 40/40 identici allo stato del giro 6; risposta reale della mattina
+   identica. LIMITE DICHIARATO: un pad sbagliato su una pagina stirata ~3% o piu' da' solo l'avviso (nessun blocco),
+   un footprint sbagliato e' possibile in quel caso.
+   V3-2: component_types.block_text, refresh_block(text, type, known_texts), BLOCK_ABSENT/CURRENT/REFRESHED/EDITED;
+   main_window ~9133-9146: il blocco si riscrive solo se e' un testo scritto dal programma (default attuale o superato di
+   qualunque tipologia, o istruzione di tipologia del DB); modificato a mano -> lasciato, con UNA riga di log (per
+   riprenderlo: scegliere un'altra tipologia e poi di nuovo questa); blocco senza marcatore di chiusura non piu' tagliato.
+   V3-3/V3-4: printed_terminals non solleva piu' e rifiuta misure non finite dopo la conversione. V3-5:
+   without_private_keys (~2327) toglie ogni chiave «_…» dalla risposta grezza principale e dalla lettura dedicata.
+   Test nuovo tests/test_review_round6b.py (40); cambiato test_extraction_review_round6 (il doppio DrawnPage riporta
+   misplaced_pad). Mirati 72 + 461 + 234 + 144 + 93 verdi. 1 voce i18n.
+ P2 LANCIATO (11/11 sera) dopo T2: datasheet_extractor.py, photo_grounding.py, photo_global_inventory.py,
+  photo_markings.py, main_window.py, workers.py, prompt_catalog.py + test.
+ P2 HA FINITO: ogni prompt inviato viene dal profilo (prompt_catalog.effective_text: vuoto/None = default). Percorso:
+  MainWindow._profile_prompt_texts() -> prompt_catalog.profile_prompts -> {campo: testo} passato (accepted_kwargs) a
+  ExtractWorker, ReconcileWorker, RereadWorker -> prompts= in extract_pin_header_params, _extract_photo_stage,
+  extract_inventory, reconcile_saved_proposals, reread_pad_positions, reread_body_height. Campi collegati:
+  pad_positions_prompt, body_dimensions_prompt, role_prompt_<ruolo> (datasheet_extractor.role_instructions),
+  contact_style_prompt (NUOVO, schema 9), mechanical_evidence_prompt (photo_grounding.mechanical_evidence_tail: col
+  default richieste e chiavi di cache identiche), inventory_* (3), marking_prompt, pin_type_prompt (NUOVO, schema 9).
+  Tutte le voci di PROMPTS in_profile=True. Tre prompt restano nel codice (CODE_ONLY_PROMPTS, mostrati in sola lettura
+  nella scheda «Testi nel codice» con il motivo): SEMANTIC_VERIFICATION_PROMPT e LEGACY_STRIP_PROMPT (percorsi non
+  usati in produzione), _OMISSION_REMINDER (correzione fissa composta dai campi mancanti). Testi sollevati dalle
+  funzioni byte per byte (SHA-256 contro HEAD). Cache: gia' chiavi sul testo inviato; aggiunti
+  _marking_prompt_sha256 e prompt_sha256 nell'audit. SCHEMA_VERSION 9 (8->9 INSERT OR IGNORE). Avviso all'avvio
+  (_check_prompt_notice): una volta per esecuzione e per profilo, finestra NON modale con titoli e stato (mai il
+  testo), pulsanti «Apri la gestione dei profili AI», «Non mostrare più per questi testi» (config
+  prompt_notice_dismissed = "campo:sha256"), «Chiudi»; un digest nuovo viene riproposto. Log: SentPromptLog scrive
+  «Prompt inviato «titolo»: predefinito|personalizzato|vecchio predefinito, sha256 xxxxxxxx.» la prima volta che un
+  testo compare in una richiesta (risposte dalla cache: nessuna riga). Dialogo: gruppi «Ruoli documenti» e
+  «Inventario fotografico». Test nuovo tests/test_prompt_wiring.py (35); contratti cambiati con nota «CONTRACT
+  CHANGED» in test_prompt_catalog, test_profile_prompt_status, test_analysis_profiles, test_profile_dialog. Mirati:
+  86 + 594 + 1536 + 99 + 43 + 543 + 99 verdi. Replay 40/40 identici; 17:42 invariato; risposta reale identica.
+  APERTI: il DB del repository va aperto a schema 9 e committato; corrispondenza del log per testo (un prompt
+  personalizzato cortissimo potrebbe combaciare dentro un altro); i prompt foto di una tipologia sono registrati senza
+  le note immagine accodate.
+ VERIFICA INDIPENDENTE DI TUTTO IL GIRO 6/6b/P1/P2 (diff contro 1266fb7) lanciata ora con due revisori in sola
+  lettura (V4 servizi, V5 GUI), poi suite completa.
+ V5 HA FINITO (GUI; script scratchpad/v5/). V5-1 MEDIO REGRESSIONE riprodotto: refresh_block decide «scritto dal
+  programma» confrontando con i testi ATTUALI del DB; se l'utente cambia (o ripristina) le istruzioni della tipologia
+  dopo aver salvato un progetto, il blocco vecchio X del progetto non e' piu' riconosciuto -> BLOCK_EDITED, resta e
+  continua a essere inviato, e il log dice falsamente «modificato a mano» (a 1266fb7 apply_block lo aggiornava). Fix:
+  registrare col progetto il digest del blocco scritto. V5-2 MEDIO riprodotto: l'avviso dei prompt e' «una volta per
+  profilo» ma la chiave e' la tipologia; le tipologie ereditano i prompt globali, quindi cambiando tipologia lo stesso
+  avviso ricompare e le finestre si IMPILANO (3 visibili); alle tipologie a scheda nomina system_prompt_single che
+  non usano. Fix: una volta per (campo, digest) nella sessione, riusare/chiudere la finestra precedente, nominare solo i
+  prompt usati da quella famiglia. V5-3 MEDIO (preesistente, peggiorato dal giro 6) riprodotto: la domanda pad_layout
+  usa le etichette lunghe come testo dei PULSANTI (380 e 205 caratteri sul caso 17:42): non vanno a capo, tagliate,
+  le coordinate che distinguono le opzioni non si leggono. Fix: descrizioni nel testo, pulsanti corti (o scelte
+  radio con a capo). V5-4 BASSO: un testo che differisce solo per CRLF e' «personalizzato» per il DB e per l'avviso ma
+  «predefinito» nel dialogo. V5-5 BASSO: l'avviso non cambia lingua; puo' aprirsi sotto un'altra finestra modale.
+  Non rotto: ripristina+salva byte per byte (anche lo spazio iniziale), istruzioni delle 4 tipologie, lingue e misure
+  del dialogo, i18n, flusso dei prompt ai worker (rilettura a ogni avvio), refresh_block senza riscritture inutili,
+  domanda del caso 17:42 (risposta fori -> pad 4 a -8.15; «Torna indietro» trattiene).
+ V4 HA FINITO (servizi; script scratchpad/v4/, common.py carica drawing_holes di 1266fb7 come OLD). V4-1 ALTO
+  REGRESSIONE riprodotto: layout GIUSTO del rele' su pagina con lieve prospettiva (bordo alto 3-4% piu' stretto) ->
+  «distorted» con misplaced_pad nominato -> BLOCCO, messaggio falso «la pagina e' in scala» (fbk.py 3/72, fbk2.py 4/72;
+  anche DIP 2x7 con keystone 5% via no_match): la prospettiva non e' affine. V4-2 MEDIO REGRESSIONE riprodotto: un
+  «no_match» senza alcun fit (max_error_mm None) blocca un accordo giusto su pagine con cerchi estranei che toccano i
+  fori (stray.py: 4/12). V4-3 MEDIO REGRESSIONE riprodotto: la ricerca larga allargata da T2 CONFERMA letture con un
+  asse sbagliato del 6-7% (passo 2.54 su disegno a 2.72; interasse 7% corto con errore 0.18 > 0.15, body agrees) che
+  prima davano no_match (wp.py, wp2.py). V4-4 MEDIO: i 15 prompt portati nel profilo NON hanno insiemi di digest
+  superati: al prossimo cambio del predefinito nel codice resteranno congelati nel DB di ogni utente (la stessa classe
+  di dc7044b8) e l'avviso li chiamera' «personalizzati». V4-5 BASSO: stato «current» ignora gli spazi attorno ma il
+  testo inviato no (inventario: richiesta diversa e cache mancata). V4-6 BASSO: SentPromptLog puo' attribuire un
+  prompt corto non inviato. V4-7 BASSO: _reread_start non applica without_private_keys alla risposta salvata. V4-8 INFO:
+  un DB migrato a schema 9 e' rifiutato da v1.0.8 (dati intatti, profili inutilizzabili fino al ritorno alla versione
+  nuova). Non rotto: 1200 letture con un pad spostato 0.25-2 mm su pagine stirate 0-4%, 0 conferme false; pagina vera
+  HLK 0 conferme false (le altre pagine non misurate: SRD oltre 25 minuti, fermata); richieste identiche a 1266fb7 col
+  profilo predefinito (salvo printed_terminals voluto); chiavi di cache identiche; migrazioni 7->9 su copia e su DB
+  sintetico byte per byte; replay 40/40, 17:42, mattina identici; fuzz pulito salvo V4-7.
+ DECISIONE DEL COORDINATORE (giro 7), dentro l'OK dell'utente del 11/11 («non genera: blocca o ti fa la domanda»):
+  il testimone dei fori NON PUO' essere perfetto (prospettiva, cerchi estranei, stiramento: tre giri di eccezioni hanno
+  prodotto ogni volta blocchi falsi o conferme false). Quindi una smentita dei fori contro due letture concordi diventa
+  SEMPRE una DOMANDA all'utente (layout delle letture + layout dei fori se esiste), MAI un blocco duro, e il messaggio
+  dice solo cio' che e' misurato («i fori disegnati non confermano questa disposizione»), senza «la pagina e' in scala».
+  Il criterio _single_misplaced resta solo per proporre il layout alternativo e nominare il pad sospetto. La ricerca
+  larga torna al limite stretto (HYPOTHESIS_TOL_SPAN). ATTENZIONE: con piu' domande pesa di piu' F2-1 («Rigenera
+  footprint» costruisce i pad principali con la domanda aperta) — non autorizzato, DA PROPORRE all'utente.
+ GIRO 7: R1 (servizi) datasheet_extractor.py, drawing_holes.py, prompt_catalog.py, analysis_profiles.py + test:
+  V4-1, V4-2 (via domanda), V4-3, V4-4, V4-5, V4-6, V4-7, V5-4. R2 (GUI) main_window.py, component_types.py, i18n.py +
+  test: V5-1, V5-2, V5-3, V5-5.
+ R1 HA FINITO (11/11 sera; script e uscite in scratchpad/r1/: before/, after/, run_with_hook.py, pitch6.py).
+  V4-1/V4-2: datasheet_extractor _agreement_contradicted («no_match» smentisce solo con max_error_mm non None; chiave
+   "misplaced" = misplaced_pad del testimone), _contradiction_text (solo il misurato: «i fori disegnati non confermano
+   questa disposizione», «il pad N e' il piu' lontano dai fori» solo se il testimone lo nomina), _refuse_contradicted_
+   agreement -> _block_or_ask(contradicted=True): SEMPRE domanda pad_layout (1 opzione = layout delle letture, 2 con
+   il layout dei fori); unico blocco rimasto: numeri di pad ripetuti (nessun layout riscrivibile). Disaccordi: invariati.
+  V4-3: drawing_holes _Fit.stretch; la ricerca larga declassa a «distorted» una conferma con stretch > HYPOTHESIS_TOL_SPAN.
+   wp/wp2: 2+2 conferme nuove -> 0. PREZZO: header 2x4 corretto su pagina stirata 6.5% in Y torna «distorted» (non
+   piu' confermato dai fori; due letture concordi restano confermate con l'avviso). LIMITE PREESISTENTE (anche
+   1266fb7): un passo letto fino a ~6% sbagliato e' proposto dal gate STRETTO e confermato (pitch6.py).
+  V4-4: prompt_catalog.SUPERSEDED_DIGESTS (un insieme per OGNI campo, unito all'insieme del modulo proprietario);
+   tests/test_review_round7.py fissa lo SHA-256 di ogni default (anche istruzioni delle 4 tipologie).
+  V4-5: effective_text manda i byte del default se lo stato e' CURRENT; collegati gli helper (photo_global_inventory
+   _profile_or_default, photo_crop_reading.effective_prompt, photo_markings, pin_type_ai, contact style, numerazione,
+   pad, corpo, prompt principale). V5-4: entry_status normalizza CRLF/CR; notice_digest per l'avviso.
+  V4-6: prompt_catalog.sending({campo: testo}) dichiarato dai call site dell'estrattore; fallback per sottostringa che
+   non attribuisce un testo trovato solo dentro un altro prompt registrato. V4-7: _reread_start toglie le chiavi «_»
+   (tiene _numbers_by_convention, _grid_missing derivate da single_answer_to_data).
+  Verificatori (prima -> dopo; «contraddizioni» di layout GIUSTI ora = domanda, mai blocco, mai testo vietato):
+   fbk 3 -> 3 domande a 1 opzione; fbk2 4 -> 4 domande; stray 14 contraddizioni (4 su letture giuste) -> 10 (2 giuste),
+   tutte domande; ATTENZIONE: 3 letture SBAGLIATE su pagine affollate, senza fit, ora confermate con avviso (V4-2);
+   stray2 0; fb_all 816 pagine 0 -> 0. Replay 40/40 stessi campi (cambia solo la frase in SRD ultima, no-answers, a10);
+   17:42 stessa domanda e stesse risposte (pad 4 -6.15 / -8.15); risposta reale della mattina identica.
+ R2 HA FINITO: V5-1 component_types.block_digest (SHA-256 del testo del blocco, LF, senza spazi attorno),
+  refresh_block(..., written_digest=None): col digest salvato decisione esatta (uguale -> rinnovato, diverso ->
+  modificato); senza (progetti vecchi) la regola di prima; CRLF ignorato. main_window salva
+  state["generated_block_sha256"] solo se il blocco esiste; un progetto vecchio aperto viene salvato UNA volta per
+  scrivere il digest. V5-2 _prompt_notice_seen per (campo, digest) nella sessione; una sola finestra riusata;
+  _prompt_fields_not_sent(family) dalle stesse condizioni dell'analisi (limite: i prompt foto sono nominati anche alle
+  famiglie a componente singolo). V5-3 domanda: descrizioni complete nel testo («Opzione N: …», a capo, selezionabili),
+  pulsanti «Opzione N» con tooltip (caso 17:42: finestra 617 px invece di 7264). V5-5 avviso ritradotto al cambio
+  lingua; attende la chiusura di un'altra finestra modale (riprova ogni 400 ms). Test nuovo
+  tests/test_review_round7_gui.py (14); contratti cambiati in test_review_round6b, test_prompt_wiring,
+  test_extraction_questions_gui (anche _FakeReread accetta prompts=None: rotto da P2). 2 voci i18n. UN TEST ROSSO DI
+  COMPETENZA R1: test_review_round6b.py::test_a_confirmation_found_only_by_the_wide_search_is_kept (la ricerca larga e'
+  tornata al limite stretto, V4-3: contratto da aggiornare).
+ R1 HA FINITO (riassunto del coordinatore; R1 ha scritto anche il proprio blocco «R1 HA FINITO» qui sotto): una
+  smentita dei fori contro due letture concordi e' SEMPRE una domanda (anche a una sola opzione: «Confermare la
+  disposizione letta dopo averla controllata sul disegno?»); unico blocco duro rimasto: pad con lo stesso numero.
+  «no_match» smentisce solo con un fit decisivo (max_error_mm non None). Testo misurato: «i fori disegnati non
+  confermano questa disposizione», «il pad N e' il piu' lontano dai fori». Ricerca larga limitata a
+  HYPOTHESIS_TOL_SPAN (_Fit.stretch). prompt_catalog.SUPERSEDED_DIGESTS per ogni campo; tests/test_review_round7.py
+  fissa lo SHA-256 dei 24 predefiniti e delle 4 istruzioni di tipologia (fallisce se un predefinito cambia senza
+  registrare il vecchio digest). effective_text manda i byte del predefinito quando lo stato e' current. CRLF = LF.
+  prompt_catalog.sending({campo: testo}) per l'attribuzione nel log. _reread_start applica without_private_keys.
+  Numeri: fbk 3 e fbk2 4 -> domande a una opzione, 0 blocchi; stray 14 -> 10 contraddizioni, tutte domande; wp, wp2
+  2+2 conferme sbagliate -> 0; fb_all 816 pagine 0 blocchi. PREZZO DICHIARATO: 3 letture SBAGLIATE su pagine con molti
+  cerchi estranei senza fit decisivo tornano confermate col solo avviso (come prima del giro 6); il caso header 2x4
+  stirato 6.5% non e' piu' confermato dai soli fori (le due letture concordi restano confermate con l'avviso).
+  Replay 40/40 identici nei campi; 17:42 stessa domanda; mattina identica. Mirati 945 + 322 + 106 verdi. 4 voci i18n.
+  Toccato anche pin_type_ai.py (fuori lista, una riga).
+ VERIFICA FINALE (V6, sola lettura, solo snippet) e SUITE COMPLETA lanciate in parallelo (11/11 notte): basetemp
+  .venv/claude-test-full-r7, log scratchpad/suite-r7.log.
+ V6 HA FINITO (script scratchpad/v6/). F1 ALTO REGRESSIONE contro 1266fb7 riprodotto: due letture concordi con un
+  «no_match» SENZA fit decisivo ora sono CONFERMATE col solo avviso e il footprint si genera; 1266fb7 le rifiutava
+  sempre (blocco). Tre letture SBAGLIATE su pagine con cerchi estranei (stray6.py) erano rifiutate a 1266fb7 e ora sono
+  confermate. CORREZIONE dell'handoff: la frase di R1 «come prima del giro 6» NON significa «come 1266fb7». Fix: anche
+  il no_match senza fit va alla domanda a una opzione. F2 MEDIO al bordo (wp6.py, 2 su 28): letture concordi con passo
+  sbagliato del 6-7% -> «distorted» senza misplaced_pad -> confermate con avviso, 1266fb7 le rifiutava (per un fit non
+  trovato). Fix: «distorted» con stretch del fit oltre HYPOTHESIS_TOL_SPAN -> domanda. F3 MEDIO (F2-1 allargato):
+  dopo «Torna indietro» sulla domanda pad_layout, «Genera»/«Rigenera footprint» scrivono il layout non confermato
+  senza chiedere (_generate_applied guarda solo i pad non letti; pin_map_conflict ferma solo l'automatico); il log
+  rimanda a «Rigenera modello STEP» che chiede solo l'altezza. Fix: chiedere la domanda pad_layout salvata da
+  «Genera»/«Rigenera footprint» come per l'altezza, correggere il testo del log. F4 BASSO: testo della domanda a una
+  opzione («Posizioni dei pad: Posizioni dei pad …» doppio; «Scegli il valore che vedi» non adatto; non dice che
+  «Torna indietro» lascia la domanda aperta). F5 BASSO: su un layout giusto con prospettiva «il pad 2 e' il piu'
+  lontano dai fori» indica un pad giusto (vero alla lettera). F6 BASSO preesistente: cambiare le istruzioni della
+  tipologia nel dialogo profili riscrive il blocco del progetto aperto anche se modificato a mano (_reload_profile_types
+  -> apply_block). Non rotto: replay 40/40, 17:42, mattina; testimone non piu' severo di 1266fb7 sui giusti; 0
+  alternative dei fori sbagliate su 112 varianti; meccanica delle risposte salvate; prompt; refresh_block.
+ SUITE r7 FERMATA dal coordinatore (superata dalla correzione).
+ GIRO 7b (coordinatore, 11/11 notte): U1 (fixer) F1, F2 (datasheet_extractor), F3, F4, F6 (main_window, i18n) + test.
+  F3 rientra nell'OK dell'utente dell'11/11 («non genera: blocca o ti fa la domanda»): «Genera» senza risposta lo
+  violerebbe.
+ U1 HA FINITO (11/11 ~21:45; uscite scratchpad/u1/after e u1/before; fb_all7b.py conta correttamente). F1: un
+  «no_match» osservabile smentisce l'accordo anche senza fit -> domanda a una opzione (testo «… non coincidono con
+  questa disposizione e non ne confermano nessun'altra» solo se non c'e' alternativa). F2: drawing_holes espone
+  LayoutCheck.stretch_ratio (solo per «distorted»); «distorted» senza pad nominato e stiramento > HYPOTHESIS_TOL_SPAN
+  -> domanda; sotto, l'avviso di sempre. F3: _generate chiede prima la domanda pad_layout aperta
+  (_resolve_stored_pad_layout_question ~11322) per «Rigenera footprint», «Aggiorna solo il footprint», «Applica ai
+  file» e la generazione completa; risposta -> apply_answers sull'estrazione della sessione, scritto; «Torna indietro»
+  -> nulla scritto; pipeline automatica e riscrittura differita non scrivono finche' e' aperta. LIMITE: in un progetto
+  RIAPERTO i candidati della domanda non sono salvati: niente scritto, si chiede di rifare l'analisi (prima scriveva il
+  layout non confermato). F4 testi corretti. F6 _reload_profile_types usa refresh_block. COSTO: su fb_all 160/816
+  layout GIUSTI su pagine stirate 5.5-8% ora ricevono una domanda (0 blocchi); NOTA: il contatore di fb_all.py di T2 era
+  sbagliato (contava solo singled). FRAGILE: una lettura sbagliata del 5-6% passa ancora con l'avviso (come 1266fb7).
+  Numeri: nofit -> domanda; stray6 3 letture sbagliate -> domande; wp6 2 -> 0; replay 40/40 identici; 17:42 stesse
+  opzioni; mattina identica. Test nuovo tests/test_review_round7b.py (22); contratti cambiati: test_review_round7
+  (1), test_review_round6b (2). Mirati 811 + 191 + 61 + 72 + 22 verdi. 14 voci i18n nuove, 2 tolte.
+ SUITE COMPLETA lanciata (11/11 ~21:50), codice fermo, nessun agente attivo: basetemp .venv/claude-test-full-r8, log
+  scratchpad/suite-r8.log.
+ SUITE COMPLETA VERDE (claude-test-full-r8, exit 0): A 8287 passati 9 saltati 19 sottotest, B 5318 passati 4 saltati
+  = 13605 passati, 13 saltati, 19 sottotest. Albero: 34 voci in git status, 25 file tracciati modificati (+2991/-341)
+  piu' file nuovi (prompt_catalog.py e test). NIENTE committato: in attesa dell'OK. NON fatto: revisione indipendente
+  del giro 7b (U1). Al commit: aprire data/analysis_profiles.sqlite3 a schema 9 e committarlo, pre-commit-check,
+  riallineare CLAUDE.md e la testa di questo file.
+ GIRO 6b (coordinatore, 11/11 ~18:50): T2 (fixer) datasheet_extractor.py (+ drawing_holes.py se serve) + test: V3-1,
+  V3-3, V3-4, V3-5; main_window.py + component_types.py: V3-2 (completa (c), autorizzato perche' senza di esso il
+  rinnovo delle istruzioni del giro 6 distrugge le modifiche dell'utente).
+ Esiti per agente (dettaglio):
 DA DECIDERE CON L'UTENTE (una domanda per volta):
  1. PROMPT NEL DATABASE DEI PROFILI (V1-5): data/analysis_profiles.sqlite3, ai_defaults.system_prompt_single ha digest
     dc7044b8… (non e' il default nuovo f583c828… ne' un default noto; simile al 98% a quello di v1.0.8, senza la frase

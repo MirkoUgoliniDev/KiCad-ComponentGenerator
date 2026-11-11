@@ -18,7 +18,7 @@ only the block and not what the user wrote on their own.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Sequence
 
 BLOCK_START = "--- Tipologia componente (generato, modificabile) ---"
 BLOCK_END = "--- fine tipologia componente ---"
@@ -45,17 +45,24 @@ _SINGLE_THT = ComponentType(
         "TIPOLOGIA: componente SINGOLO a FORI PASSANTI (THT). E' un singolo "
         "componente discreto o connettore, con terminali che attraversano il PCB "
         "e vanno in fori metallizzati.\n"
-        "- Terminali su una griglia regolare: layout \"matrix\" con rows, cols, "
-        "pad_diameter_mm e drill_mm; pitch_mm solo con piu' di una colonna, "
-        "row_spacing_mm solo con piu' di una riga. Se i terminali non stanno su "
-        "una griglia regolare, descrivi ogni pad in package_geometry (pad_type "
-        "\"thru_hole\" con il suo drill_mm).\n"
-        "- Ogni pad ha un foro: drill_mm e' maggiore di zero e minore di "
-        "pad_diameter_mm. Leggi le due quote dalla tabella/disegno \"Recommended "
-        "PCB layout\", \"PCB hole dimensions\" o simili; se il datasheet da' solo "
-        "il diametro del terminale, stima drill_mm = diametro terminale + "
-        "0.2..0.3 mm e pad_diameter_mm = drill_mm + 0.7..0.9 mm: dichiara "
-        "entrambi \"estimated\" in value_sources e spiega la stima nelle note.\n"
+        "- Terminali su una griglia regolare: layout \"matrix\" con rows, cols e "
+        "pad_diameter_mm; pitch_mm solo con piu' di una colonna, row_spacing_mm "
+        "solo con piu' di una riga. Se i terminali non stanno su una griglia "
+        "regolare, descrivi ogni pad in package_geometry (pad_type "
+        "\"thru_hole\").\n"
+        "- FORI: trascrivi solo cio' che e' STAMPATO. Se la tabella o il disegno "
+        "\"Recommended PCB layout\", \"PCB hole dimensions\" o simili stampa il "
+        "foro, riportalo in drill_mm (maggiore di zero e minore della piazzola) "
+        "e dichiaralo \"read\" in value_sources; per un pad di package_geometry "
+        "ricopia anche il richiamo stampato in hole_callout. Se il foro NON e' "
+        "stampato non stimarlo: ometti drill_mm e da' il terminale che entra nel "
+        "foro, com'e' quotato -- in lead per ogni pad di package_geometry, in "
+        "lead_diameter_mm per la griglia -- dichiarandone la provenienza in "
+        "value_sources. Foro e piazzola non stampati li ricava il programma dal "
+        "terminale.\n"
+        "- PIAZZOLE: se il disegno stampa la piazzola trascrivila e dichiarala "
+        "\"read\"; altrimenti la dimensione che scrivi e' una tua stima, da "
+        "dichiarare \"estimated\" in value_sources.\n"
         "- pitch_mm e row_spacing_mm sono quote distinte e si leggono dalla vista "
         "dall'alto o dal basso del disegno meccanico quotato, non dalla vista "
         "laterale: dichiara in contacts_view quale vista hai letto (la "
@@ -180,12 +187,19 @@ SUPERSEDED_LABELS: dict[str, tuple[str, ...]] = {
 #: single_tht and aggregate_castellated were replaced the same day because
 #: they let an estimated drill/pad or hole size go without declaring it as
 #: such (value_sources) and did not say that an unobserved contact style is
-#: left to the user.
+#: left to the user. The text of single_tht with digest 0941635a... was
+#: replaced on 2026-11-11: it still told the model to estimate the hole and
+#: the pad from the terminal diameter («stima drill_mm = ...»), while
+#: since 2026-11-10 the model transcribes the terminal and the PROGRAM
+#: derives a hole that is not printed (datasheet_extractor
+#: DEFAULT_SINGLE_SYSTEM_PROMPT, `_resolve_pad_terminals`); the instruction
+#: is sent with every analysis and contradicted the system prompt.
 SUPERSEDED_INSTRUCTION_DIGESTS: dict[str, frozenset[str]] = {
     "single_tht": frozenset({
         "b4ac3268f0ad952b7e6547d640017fba687cec112b7473c04464eaff04ef15a0",
         "a22b90207ad9a7c73c6cb09623cd0f7b9a1b948eda120ea1985dbc4780328555",
         "dfcb4dd38185961f7d5e72fef151657f8b22090d065917434e3ff1cd66de5155",
+        "0941635ab39bec9b9fdf01f3f2286984ce34d7b6623dd476894ae2ea8b2c2518",
     }),
     "single_smd": frozenset({
         "8c8b7b749de39798ae1b1cf71b263b94dc34b3c82f338a828e7bcf6b8c7326b2",
@@ -264,3 +278,115 @@ def apply_block(text: str, component_type: Optional[ComponentType]) -> str:
         return cleaned
     block = build_block(component_type)
     return f"{block}\n\n{cleaned}".strip() if cleaned else block
+
+
+#: Outcomes of :func:`refresh_block`.
+BLOCK_ABSENT = "absent"
+BLOCK_CURRENT = "current"
+BLOCK_REFRESHED = "refreshed"
+BLOCK_EDITED = "edited"
+
+
+def block_text(text: str) -> Optional[str]:
+    """@brief Return the instruction text inside the generated block of the notes, or None without a block.
+
+    @param text Notes text (None is treated as empty).
+    @return What lies between BLOCK_START and BLOCK_END, without the line
+        breaks `build_block` puts around it; None when the notes hold no
+        block or the block has lost its closing marker (it cannot be told
+        apart from the user's text after it).
+    """
+    before, start, rest = (text or "").partition(BLOCK_START)
+    inner, end, _after = rest.partition(BLOCK_END)
+    if not start or not end:
+        return None
+    return inner.strip("\r\n")
+
+
+def _block_payload(inner: str) -> str:
+    """The instruction inside a block as compared and digested: LF line ends, no surrounding blanks.
+
+    A notes editor may hand CRLF back (a project file edited on Windows), and
+    `build_block` puts line breaks around the instruction: neither is part of
+    what the program wrote.
+    """
+    return inner.replace("\r\n", "\n").replace("\r", "\n").strip()
+
+
+def block_digest(text: str) -> Optional[str]:
+    """@brief Digest of the instruction inside the generated block of the notes, or None without a block.
+
+    This is what the window stores with a project when the PROGRAM writes the
+    block (review V5-1, 2026-11-11), so that a later open can tell «the text
+    the program wrote» from «a text the user edited» without comparing with
+    the profile database, whose texts may have changed in between.
+
+    @param text Notes text (None is treated as empty).
+    @return SHA-256 hex digest of the block's instruction with LF line ends
+        and no surrounding blanks; None when `block_text` finds no complete block.
+    """
+    inner = block_text(text)
+    return None if inner is None else text_digest(_block_payload(inner))
+
+
+def refresh_block(text: str, component_type: Optional[ComponentType],
+                  known_texts: Sequence[str] = (),
+                  written_digest: Optional[str] = None) -> tuple[str, str]:
+    """@brief Bring the generated block of saved notes up to date, unless the user edited it.
+
+    The block is called «generato, modificabile» in the window: the user may
+    rewrite it, and such a rewrite is the project's own instruction. Opening a
+    project used to replace the whole block with the type's current text
+    (`apply_block`), so an edit disappeared without a word (review V3-2,
+    2026-11-11). The block is now replaced only when its text is one the
+    PROGRAM wrote: the current or a superseded built-in instruction of ANY
+    type (a stale block of another type -- castellated instructions left in a
+    single THT project -- is generated text too, and is still resynchronised),
+    or one of `known_texts` (the instructions the profile database holds, the
+    user's chosen defaults). Text outside the markers is kept as
+    `apply_block` keeps it.
+
+    @param text Saved notes text.
+    @param component_type The project's type as the profile defines it (its
+        `prompt` is the current default), or None for no type.
+    @param known_texts Further texts the program may have written into a
+        block: the instructions of every type of the profile database. Used
+        only when `written_digest` is None.
+    @param written_digest `block_digest` of the block the program last wrote
+        into these notes, as stored with the project; None for a project
+        saved before the digest was stored.
+    @return (notes, outcome): BLOCK_ABSENT (no complete block, notes
+        unchanged), BLOCK_CURRENT (the block already holds the current
+        default, notes unchanged), BLOCK_REFRESHED (a generated block,
+        replaced as `apply_block` does) or BLOCK_EDITED (a block the user
+        edited, notes unchanged).
+    @note With `written_digest` the decision is exact: the block is the
+        program's text when its digest equals the one stored when the program
+        wrote it. Comparing with the CURRENT database texts (the rule for
+        older projects) misjudges a project saved before the user changed or
+        restored the type's instructions in the profile: its block was
+        written by the program, yet matches no text the database holds any
+        more, and was kept and reported as edited by hand (review V5-1).
+    """
+    inner = block_text(text)
+    if inner is None:
+        return text, BLOCK_ABSENT
+    payload = _block_payload(inner)
+    if component_type is not None and payload == _block_payload(component_type.prompt):
+        return text, BLOCK_CURRENT
+    if isinstance(written_digest, str) and written_digest:
+        # Stored by the program when it wrote the block: exact provenance.
+        if text_digest(payload) == written_digest:
+            return apply_block(text, component_type), BLOCK_REFRESHED
+        return text, BLOCK_EDITED
+    # A project saved before the digest existed: the block is the program's
+    # when it holds a text the program can have written -- the current or a
+    # superseded built-in instruction of any type, or a database text.
+    digests = {digest for digests in SUPERSEDED_INSTRUCTION_DIGESTS.values() for digest in digests}
+    known = [ct.prompt for ct in COMPONENT_TYPES] + [t for t in known_texts if isinstance(t, str)]
+    # Digests of the texts as they are and normalised: the block's own line
+    # breaks and the line-end convention are not part of the instruction.
+    digests |= {text_digest(t) for t in known} | {text_digest(_block_payload(t)) for t in known}
+    if text_digest(inner) in digests or text_digest(payload) in digests:
+        return apply_block(text, component_type), BLOCK_REFRESHED
+    return text, BLOCK_EDITED

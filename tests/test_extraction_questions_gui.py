@@ -148,6 +148,8 @@ def test_the_real_dialog_offers_the_options_and_torna_indietro_as_escape(window,
 
     def fake_exec(box):
         seen["buttons"] = [b.text() for b in box.buttons()]
+        seen["tooltips"] = [b.toolTip() for b in box.buttons()]
+        seen["body"] = box.informativeText()
         seen["escape"] = box.escapeButton().text()
         pixmap = box.iconPixmap()
         seen["pixmap"] = (pixmap.width(), pixmap.height())
@@ -164,7 +166,12 @@ def test_the_real_dialog_offers_the_options_and_torna_indietro_as_escape(window,
     answer = window._ask_extraction_question(_question(
         "h:1", evidence={"document": "drawing.png", "crop": [10, 10, 110, 60]}))
     assert answer is gui.QUESTION_BACK
-    assert seen["buttons"][:2] == ["18 mm", "23 mm"]
+    # CONTRACT CHANGED (review V5-3, 2026-11-11): the buttons carry short
+    # names and the descriptions are in the dialog body (and the tooltips),
+    # because a long description in a button was cut off unreadable.
+    assert seen["buttons"][:2] == ["Opzione 1", "Opzione 2"]
+    assert seen["tooltips"][:2] == ["18 mm", "23 mm"]
+    assert "Opzione 1: 18 mm" in seen["body"] and "Opzione 2: 23 mm" in seen["body"]
     assert seen["escape"] == window.i18n.text("Torna indietro")
     assert seen["pixmap"] == (100, 50)                    # the crop, not the stock icon
     # Negative: no such document, the stock question icon and no failure.
@@ -346,9 +353,13 @@ class _FakeReread(gui.QThread):
 
     def __init__(self, stored, doc_paths, document_roles, *, field, model=None, pad_model=None,
                  component_family=None, system_prompt=None, extra_instructions=None,
-                 part_number=None):
+                 part_number=None, prompts=None):
+        # `prompts`: workers.RereadWorker takes the profile's prompt texts
+        # since step P2 (2026-11-11); a subclass that forwards **kwargs (the
+        # answering fake of test_review_round3_gui) received it and failed.
         super().__init__()
         self.stored, self.field, self.model = stored, field, model
+        self.prompts = prompts
         self.component_family = component_family
         _FakeReread.created.append(self)
 

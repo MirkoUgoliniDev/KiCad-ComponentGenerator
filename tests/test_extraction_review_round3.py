@@ -62,8 +62,11 @@ def test_the_part_lead_derives_the_hole_of_pads_without_hole_or_terminal():
     for pin in _pins(params).values():
         assert (pin["drill_mm"], pin["pad_length_mm"]) == (drill, land)
         assert pin["lead"] == {"shape": "round", "diameter_mm": 0.6}
-        assert pin["sources"] == {"drill_mm": "derived", "pad_size": "derived", "shape": "derived",
-                                  "lead": "read"}
+        # CONTRACT CHANGED (user, 2026-11-11, round 6 (b)): the part-level terminal was read by
+        # the main answer alone -- read once -- so it and what is derived from it are «estimated».
+        assert pin["sources"] == {"drill_mm": "estimated", "pad_size": "estimated",
+                                  "shape": "estimated", "lead": "estimated"}
+    assert "terminale letto una sola volta" in params.notes
     assert "terminale dichiarato per il componente" in params.notes
     assert "ne' foro stampato ne' terminale" not in params.notes
     assert params.unread_pads is None

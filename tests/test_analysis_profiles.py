@@ -471,7 +471,10 @@ def test_v4_database_receives_a_blank_crop_model_and_keeps_every_user_text(tmp_p
     assert upgraded.overrides(key) == {'crop_prompt': 'type crop', 'vision_model': 'type/photo'}
     assert upgraded.resolve(key)['crop_model'] == ''
     with sqlite3.connect(store.path) as db:
-        assert db.execute('PRAGMA user_version').fetchone()[0] == SCHEMA_VERSION == 7
+        # Schema 8 (2026-11-11) added the prompts that lived only in the code;
+        # CONTRACT CHANGED the same day (step P2): schema 9 added the two
+        # prompts lifted out of functions, so the migration ends at 9.
+        assert db.execute('PRAGMA user_version').fetchone()[0] == SCHEMA_VERSION == 9
 
 
 def test_v6_database_receives_the_pad_model_and_keeps_every_user_text(tmp_path):

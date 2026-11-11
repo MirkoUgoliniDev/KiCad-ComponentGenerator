@@ -748,7 +748,10 @@ def undeclared_lead_count_confidence(data):
 
 #: Tail appended to the prompt for the second attempt, when the first omitted
 #: required fields on every row. It names the FIELDS, not the board: it is a
-#: contract correction, not a hint about the case.
+#: contract correction, not a hint about the case. Registered in
+#: prompt_catalog.CODE_ONLY_PROMPTS (2026-11-11, step P2): it stays in the
+#: code, shown read-only in the profile dialog, because it is composed with
+#: the omitted field names and must keep naming the schema's own fields.
 _OMISSION_REMINDER = (
     '\n\nYour previous answer omitted these REQUIRED fields on every component: {fields}. '
     'Every component object must carry every required field of the schema, with one of '
@@ -1559,6 +1562,12 @@ def _leads_by_side_inconsistent(row):
             and type(row.get('lead_count')) is int and sum(counts) != row['lead_count'])
 
 
+def _profile_or_default(text, field: str) -> str:
+    """The text sent for profile field `field`: prompt_catalog.effective_text (blank or default-equal: the default's bytes, V4-5)."""
+    from .prompt_catalog import effective_text
+    return effective_text(field, {field: text})
+
+
 def _call_once(call, kwargs) -> dict:
     """One paid inventory call; a failure becomes {'error': text} as before.
 
@@ -1576,7 +1585,8 @@ def _call_once(call, kwargs) -> dict:
 
 def review_global_inventory(photo, components, length, width, model, call, log, cache_dir=None,
                             *, verification_prompt=None, extra_instructions=None,
-                            detector_ran=False):
+                            detector_ran=False, prompt=None, enumerate_prompt=None,
+                            enumerate_empty_prompt=None):
     """@brief Make one global semantic request, or replay a validated versioned cache.
     @param photo Calibrated BGR top photograph.
     @param components All YOLO candidates with unique integer IDs and global boxes.
@@ -1595,6 +1605,13 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
     @param detector_ran True when a local detector ran on this photograph. With
         no components it selects the enumeration prompt that says the detector
         ran and found nothing, instead of «NO local detector ran».
+    @param prompt Profile field 'inventory_prompt' (request WITH detector
+        candidates); None or blank sends PROMPT.
+    @param enumerate_prompt Profile field 'inventory_enumerate_prompt' (no
+        local detector ran); None or blank sends PROMPT_ENUMERATE.
+    @param enumerate_empty_prompt Profile field
+        'inventory_enumerate_empty_prompt' (a detector ran and found nothing);
+        None or blank sends PROMPT_ENUMERATE_AFTER_EMPTY_DETECTOR.
     @return Normalized component hypotheses, retaining unresolved input on failure.
     @throws ValueError Invalid photo, dimensions or candidate IDs/boxes; failed empty inventory.
     @note Arbitrary angles: a row that is exactly one proposal whose edges were
@@ -1627,6 +1644,11 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
         only when the unreadable-answer retry has not already been spent.
     @note A missing ``presence_confidence`` is read as the overall confidence,
         its lower bound; see ``_presence``.
+    @note The response cache is content-addressed: its key is the SHA-256 of
+        the whole request, system prompt included, and every row records the
+        SHA-256 of the prompt sent (``_global_inventory_prompt_hash``). An
+        edited profile prompt therefore never replays an answer cached for
+        another text; the constant version strings only label the audit.
     """
     if photo is None or len(photo.shape) < 2 or min(photo.shape[:2]) < 1:
         raise ValueError('Global inventory requires a nonempty photograph')
@@ -1703,8 +1725,12 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
         content.extend([{'type': 'text',
                          'text': f'Context tile {i}/{len(tiles)}; GLOBAL bounds {bounds}'},
                         image_block(fit_to_model(photo[top:bottom, left:right], limits))])
-    prompt = (PROMPT_ENUMERATE_AFTER_EMPTY_DETECTOR if empty_detector
-              else PROMPT_ENUMERATE if enumerating else PROMPT)
+    # The profile's text of the chosen request (blank or missing: the factory
+    # text). Read before `prompt` is rebound to the composed request below.
+    prompt = _profile_or_default(
+        enumerate_empty_prompt if empty_detector else enumerate_prompt if enumerating else prompt,
+        'inventory_enumerate_empty_prompt' if empty_detector
+        else 'inventory_enumerate_prompt' if enumerating else 'inventory_prompt')
     supplements = [clean for s in (verification_prompt or '', extra_instructions or '')
                    if (clean := _inventory_context(s))]
     if supplements:

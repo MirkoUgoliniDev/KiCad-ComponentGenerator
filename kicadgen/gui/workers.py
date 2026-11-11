@@ -782,6 +782,7 @@ class ExtractWorker(QThread):
         numbering_prompt: str | None = None,
         pad_model: str | None = None,
         part_number: str | None = None,
+        prompts: dict | None = None,
     ):
         """@brief Snapshot extraction settings before starting background work.
 
@@ -819,6 +820,9 @@ class ExtractWorker(QThread):
             the KiCad library footprints it names confirm the pad geometry of
             a single part; None or blank searches nothing. Forwarded like
             `crop_prompt`.
+        @param prompts The profile's prompt texts, {field: text}
+            (prompt_catalog.profile_prompts of ProfileStore.resolve), copied;
+            forwarded as `prompts=` like `crop_prompt`. None sends the defaults.
         @note YOLO changes photo proposals only; AI verification remains configured.
         """
         super().__init__()
@@ -830,6 +834,8 @@ class ExtractWorker(QThread):
         self.pad_model = pad_model
         #: Part number of the component (field «Sigla»); None = no library search.
         self.part_number = part_number
+        #: Profile prompt texts of this run (a copy); None = the defaults.
+        self.prompts = dict(prompts) if prompts is not None else None
         self.extra_instructions = extra_instructions
         self.include_nc_pins = include_nc_pins
         self.model = model
@@ -950,7 +956,10 @@ class ExtractWorker(QThread):
                                   numbering_prompt=self.numbering_prompt,
                                   pad_model=self.pad_model,
                                   part_number=self.part_number,
-                                  cancel=self.cancel_event),
+                                  cancel=self.cancel_event,
+                                  # None = the defaults: not forwarded at all.
+                                  **({"prompts": self.prompts}
+                                     if getattr(self, "prompts", None) is not None else {})),
                 **phase_kwargs(extract, self._forward_phase),
             )
             self.done.emit(params)
@@ -1072,7 +1081,7 @@ class ReconcileWorker(QThread):
     def __init__(self, photo_png, proposals, length_mm, width_mm, model, cache_dir,
                  *, declared=None, verification_prompt=None, extra_instructions=None,
                  detector='yolo', crop_prompt=None, crop_model=None, reviewed=True,
-                 smd_model_path=None):
+                 smd_model_path=None, prompts=None):
         """@brief Snapshot the approved proposals before leaving the GUI thread.
 
         @param photo_png Calibrated photograph on which the proposals were measured.
@@ -1097,8 +1106,13 @@ class ReconcileWorker(QThread):
             the cache).
         @param smd_model_path Weights file of the local SMD network, or None
             for the default.
+        @param prompts The profile's prompt texts ({field: text}), copied, as
+            for ExtractWorker: the inventory and marking prompts reach
+            reconcile_saved_proposals, and every request is reported in the
+            log (prompt_catalog.SentPromptLog). None sends the defaults.
         """
         super().__init__()
+        self.prompts = dict(prompts) if prompts is not None else None
         self.photo_png = photo_png
         self.proposals = deepcopy(proposals)
         self.length_mm, self.width_mm = float(length_mm), float(width_mm)
@@ -1161,22 +1175,39 @@ class ReconcileWorker(QThread):
                 # With the SMD network there is no paid inventory: the service
                 # announces the phase when it really starts.
                 self.phase.emit('llm_inventory', self.model, 0, 0)
+            call = make_logged_call(call_tool, self.progress.emit, log_prompt=True,
+                                    **accepted_kwargs(make_logged_call,
+                                                      cancel=self._raise_if_cancelled))
+            prompts = getattr(self, "prompts", None)
             report = reconcile_saved_proposals(
                 self.photo_png, self.proposals, self.length_mm, self.width_mm, self.model,
-                make_logged_call(call_tool, self.progress.emit, log_prompt=True,
-                                 **accepted_kwargs(make_logged_call,
-                                                   cancel=self._raise_if_cancelled)),
+                _reporting_call(call, prompts, self.progress.emit),
                 self.progress.emit, self.cache_dir, declared=self.declared,
                 verification_prompt=self.verification_prompt,
                 extra_instructions=self.extra_instructions, detector=self.detector,
                 crop_prompt=self.crop_prompt,
                 **accepted_kwargs(reconcile_saved_proposals, crop_model=self.crop_model,
                                   cancel=self.cancel_event, reviewed=self.reviewed,
-                                  smd_model_path=self.smd_model_path),
+                                  smd_model_path=self.smd_model_path,
+                                  **({"prompts": prompts} if prompts is not None else {})),
                 **phase_kwargs(reconcile_saved_proposals, self._forward_phase))
             self.done.emit(report)
         except Exception as exc:  # noqa: BLE001 - network/API errors are reported in the UI
             self.error.emit(tx("Rilancio dell'inventario fallito: {exc}", exc=exc))
+
+
+def _reporting_call(call, prompts, log):
+    """The logged call of a partial run, reporting each profile prompt it sends; `call` itself without a profile.
+
+    The full extraction wraps its own call (datasheet_extractor with
+    `prompts`); the inventory re-run and the partial re-read build their call
+    here, so they wrap it here: one log line per prompt sent, with its status
+    and digest (prompt_catalog.SentPromptLog), never the text.
+    """
+    if prompts is None:
+        return call
+    from ..services.prompt_catalog import SentPromptLog
+    return SentPromptLog(prompts, log).wrap(call)
 
 
 #: Field of an extraction question (ExtractedParams.questions[*]["field"]) ->
@@ -1220,7 +1251,7 @@ class RereadWorker(QThread):
                  *, field: str, model: str | None = None, pad_model: str | None = None,
                  component_family: str | None = None, system_prompt: str | None = None,
                  extra_instructions: str | None = None, part_number: str | None = None,
-                 answers: dict | None = None):
+                 answers: dict | None = None, prompts: dict | None = None):
         """@brief Snapshot the stored answer and the settings before leaving the GUI thread.
 
         @param stored Main answer of the extraction as kept with the project
@@ -1246,8 +1277,14 @@ class RereadWorker(QThread):
             ({question key: value}), copied; forwarded as `answers=` when the
             re-read function accepts it, as ExtractWorker does (review
             2026-11-11, K4: a re-read used to ask again what was answered).
+        @param prompts The profile's prompt texts ({field: text}), copied:
+            forwarded as `prompts=` when the re-read function accepts it (the
+            pad and body readings send 'pad_positions_prompt' and
+            'body_dimensions_prompt'), and every request is reported in the
+            log (prompt_catalog.SentPromptLog). None sends the defaults.
         """
         super().__init__()
+        self.prompts = dict(prompts) if prompts is not None else None
         self.stored = deepcopy(stored) if isinstance(stored, dict) else {}
         self.answers = dict(answers) if isinstance(answers, dict) and answers else None
         self.doc_paths = list(doc_paths or [])
@@ -1338,13 +1375,16 @@ class RereadWorker(QThread):
                                   field=self.field, model=model))
             self.phase.emit('llm', model, 0, 0)
             self._raise_if_cancelled()
+            prompts = getattr(self, "prompts", None)
+            call = make_logged_call(call_tool, self.progress.emit, log_prompt=True,
+                                    **accepted_kwargs(make_logged_call,
+                                                      cancel=self._raise_if_cancelled))
             params = reread(
                 self.stored, self.doc_paths, model=model,
-                call=make_logged_call(call_tool, self.progress.emit, log_prompt=True,
-                                      **accepted_kwargs(make_logged_call,
-                                                        cancel=self._raise_if_cancelled)),
+                call=_reporting_call(call, prompts, self.progress.emit),
                 progress=self.progress.emit,
                 **accepted_kwargs(reread, same_model=(model == main_model),
+                                  **({"prompts": prompts} if prompts is not None else {}),
                                   document_roles=self.document_roles,
                                   component_family=self.component_family,
                                   system_prompt=self.system_prompt,

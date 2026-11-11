@@ -585,6 +585,22 @@ class LayoutCheck:
         2.54, mils taken for mm): the caller must not present it as a
         verified size. Even True ties the pads to the DECLARED body only:
         pads and body both doubled agree with each other.
+    @note ``misplaced_pad`` (2026-11-11) is the key of ``pads_mm`` of the ONE
+        pad a refused fit ("no_match", "distorted") cannot blame on the page
+        (:func:`_single_misplaced`): no affine map of the whole reading puts
+        every pad on its circle within the per-hole tolerance, while the
+        other pads -- enough of them to show a stretch -- fit a similarity
+        within that tolerance. None in every other case, including a page
+        that may simply be stretched: then the refusal says nothing about
+        which pad is wrong, or whether any is.
+    @note ``stretch_ratio`` (round 7b, 2026-11-11) is the stretch
+        (:func:`_stretch_ratio`: anisotropy plus shear, as a ratio) of the
+        affine map fitted on the pads of a "distorted" refusal -- how much
+        the page would have to be stretched for the reading to land on its
+        holes -- or None when the decisive fit could not show one or the
+        verdict is another. Read-only evidence for the caller, which may
+        compare it with HYPOTHESIS_TOL_SPAN, the stretch the search itself
+        attributes to a page not to scale.
     """
 
     status: str
@@ -596,6 +612,8 @@ class LayoutCheck:
     scale_observable: bool = False
     body_check: str = BODY_NONE
     scale_verified: bool = False
+    misplaced_pad: object | None = None
+    stretch_ratio: float | None = None
 
 
 @dataclass(frozen=True)
@@ -658,13 +676,20 @@ class _Fit:
     """Result of one refined assignment: its stage, its errors and what the body outline said.
 
     ``body_check`` is one of the BODY_* values; it stays BODY_NONE for a
-    fit made without a body.
+    fit made without a body. ``misplaced`` is the index of the one pad
+    :func:`_single_misplaced` singles out in a refused fit, else None.
+    ``stretch`` is the :func:`_stretch_ratio` of the affine map fitted on
+    the pads when they can show one (:func:`_affine_observable`), else None;
+    the wide second pass of :func:`_check_image` caps a confirmation by it,
+    and a "distorted" fit reports it (``LayoutCheck.stretch_ratio``).
     """
 
     stage: str
     max_error_mm: float
     tolerance_mm: float
     body_check: str = BODY_NONE
+    misplaced: int | None = None
+    stretch: float | None = None
 
 
 @dataclass(frozen=True)
@@ -781,7 +806,7 @@ def check_pad_layout(images: Sequence[Path], pads_mm: Mapping[object, Sequence[f
         return LayoutCheck(CONFIRMED, "confirmed", confirmed.name, round(fit.max_error_mm, 4),
                            round(fit.tolerance_mm, 4), confirmed.circles, observable,
                            fit.body_check, fit.body_check == BODY_AGREES)
-    return _summarise(results, observable, unchecked)
+    return _summarise(results, observable, unchecked, list(pads_mm.keys()))
 
 
 def mirror_variants(pads_mm: Mapping[object, Sequence[float]]) -> list[dict]:
@@ -2282,6 +2307,61 @@ def _tolerance_mm(scale: float) -> float:
     return max(MIN_TOLERANCE_MM, TOLERANCE_PX / max(scale, 1e-9))
 
 
+def _single_misplaced(points: np.ndarray, targets: np.ndarray, tolerance_px: float) -> int | None:
+    """Index of the ONE pad of a refused fit that no stretch of the page explains, else None.
+
+    A page stretched by its scan or redrawn not to scale moves EVERY pad by
+    one linear map, by an amount proportional to the pad's position: one
+    affine map fits the whole reading with residuals at the per-hole noise.
+    A misplaced pad moves alone: no affine map of the whole set absorbs it,
+    and the other pads fit the page with no stretch at all. Three conditions,
+    each with the per-hole tolerance of the fit and nothing else (no
+    proportional allowance: the stretch allowance of :func:`_allowed_stretch`
+    grows as pads are removed, so a subset of a stretched page passes it
+    where the whole set does not -- review V3-1, 2026-11-11):
+
+    (i) the whole set is NOT an affine image of the drawn holes: some pad
+        lies beyond the tolerance from where the affine map fitted on the
+        OTHER pads puts it (:func:`_leave_one_out_affine_px`; a pad the
+        others do not determine says nothing and is ignored);
+    (ii) exactly one pad whose removal leaves pads that fit a SIMILARITY
+        (uniform scale, rotation, translation) within the tolerance, each
+        measured against the others (:func:`_leave_one_out_px`, the test of
+        step 1 of :func:`_fit_assignment`), the tolerance taken at the scale
+        of that fit;
+    (iii) those remaining pads can show a stretch (:func:`_affine_observable`:
+        AFFINE_MIN_PADS pads, not nearly collinear). Without it a similarity
+        fit of the rest proves nothing about the page's scale across them,
+        and the lone pad may only be the stretch seen where the rest cannot
+        show it. AFFINE_MIN_PADS = 4 is also 2 + MIN_WITNESS_PADS: two pads
+        fix a similarity and each further one is an independent witness of
+        it, so the whole reading needs at least five pads.
+
+    Two or more pads satisfying (ii) leave the culprit unknown: None.
+
+    @param points Reading pads (n, 2), mm.
+    @param targets Centres of the circles assigned to them (n, 2), px.
+    @param tolerance_px Per-hole tolerance of the whole fit, px.
+    @return The pad index, or None when the refusal may be the page's.
+    """
+    count = len(points)
+    if count < AFFINE_MIN_PADS + 1:
+        return None
+    stretched = _leave_one_out_affine_px(points, targets)
+    if not bool((np.isfinite(stretched) & (stretched > tolerance_px)).any()):
+        return None
+    singled = []
+    for index in range(count):
+        keep = np.arange(count) != index
+        rest, rest_targets = points[keep], targets[keep]
+        if not _affine_observable(rest):
+            continue
+        scale = _fit_similarity(rest, rest_targets).scale
+        if _leave_one_out_px(rest, rest_targets).max() <= _tolerance_mm(scale) * scale:
+            singled.append(index)
+    return singled[0] if len(singled) == 1 else None
+
+
 def _fit_assignment(points: np.ndarray, circles: Sequence[_Circle], assign: np.ndarray,
                     mask: np.ndarray, body: tuple[float, float] | None, *,
                     anchoring: bool = True, outlines: dict | None = None) -> _Fit:
@@ -2337,20 +2417,31 @@ def _fit_assignment(points: np.ndarray, circles: Sequence[_Circle], assign: np.n
     # A body no outline was compared with: the fit stopped before step 6.
     unchecked = BODY_NONE if body is None else BODY_UNVERIFIABLE
     within_ratio = stretched = False
+    # The stretch this fit shows, carried by its confirmation (None: the
+    # pads cannot show one); see _Fit.stretch.
+    shown_stretch = None
     if _affine_observable(points):
         affine_projected, linear = _fit_affine(points, targets)
         proper = bool(np.linalg.det(linear) > 0)
-        within_ratio = proper and _stretch_ratio(linear) <= _allowed_stretch(points, tolerance)
+        shown_stretch = _stretch_ratio(linear)
+        within_ratio = proper and shown_stretch <= _allowed_stretch(points, tolerance)
         if residual_px.max() > tolerance_px:
+            # A refusal of a reading that can show the page's stretch says,
+            # when it can, which one pad no stretch explains.
+            misplaced = _single_misplaced(points, targets, tolerance_px)
             if not proper or np.linalg.norm(targets - affine_projected, axis=1).max() > tolerance_px:
-                return _Fit("no_match", max_error, tolerance, unchecked)
+                return _Fit("no_match", max_error, tolerance, unchecked, misplaced)
             stretched_px = _leave_one_out_affine_px(points, targets)
             if not within_ratio or stretched_px.max() > tolerance_px:
-                return _Fit("distorted", max_error, tolerance, unchecked)
+                # The stretch is carried for the caller (LayoutCheck.stretch_ratio).
+                return _Fit("distorted", max_error, tolerance, unchecked, misplaced,
+                            stretch=shown_stretch)
             max_error = float(stretched_px.max() / sim.scale)
             stretched = True
         elif not within_ratio:
-            return _Fit("distorted", max_error, tolerance, unchecked)
+            # Every pad within the tolerance of a similarity fitted on the
+            # others: no pad stands out, only the page's shape is refused.
+            return _Fit("distorted", max_error, tolerance, unchecked, stretch=shown_stretch)
     elif residual_px.max() > tolerance_px:
         return _Fit("no_match", max_error, tolerance, unchecked)
     if abs(sim.rotation_deg) > MAX_ROTATION_DEG:
@@ -2363,7 +2454,7 @@ def _fit_assignment(points: np.ndarray, circles: Sequence[_Circle], assign: np.n
     if not _anchored_on_holes(len(points) if anchoring else MIN_WITNESS_PADS + 2, holes, stretched):
         return _Fit(UNANCHORED, max_error, tolerance, unchecked)
     if body is None:
-        return _Fit("confirmed", max_error, tolerance, BODY_NONE)
+        return _Fit("confirmed", max_error, tolerance, BODY_NONE, stretch=shown_stretch)
     key = (frozenset(int(k) for k in assign), round(sim.scale, 6), round(tolerance_px, 6))
     if outlines is not None and key in outlines:
         verdict = outlines[key]
@@ -2372,7 +2463,7 @@ def _fit_assignment(points: np.ndarray, circles: Sequence[_Circle], assign: np.n
         if outlines is not None:
             outlines[key] = verdict
     stage = "body_scale" if verdict == BODY_CONTRADICTED else "confirmed"
-    return _Fit(stage, max_error, tolerance, verdict)
+    return _Fit(stage, max_error, tolerance, verdict, stretch=shown_stretch)
 
 
 def body_allowance_mm(size_mm: float, tolerance_mm: float) -> float:
@@ -2695,13 +2786,39 @@ def _check_image(name: str, analysis: _Analysis, points: np.ndarray,
         # stretch (drawing not to scale, a whole axis read wrong) is
         # reported "distorted", which is a stronger statement than
         # "no_match" and must not be lost to the narrow confirmation gate.
+        # A fit of this pass that CONFIRMS is a confirmation (review V3-1,
+        # 2026-11-11): the gate only proposes assignments, the fit judges
+        # them, and the stretch the fit accepts on a small part
+        # (_allowed_stretch: PAGE_STRETCH_RATIO + tolerance / spread) can
+        # exceed the narrow gate's HYPOTHESIS_TOL_SPAN, so a correct reading
+        # on a page stretched by about 6 % was proposed only here and,
+        # dropped, ended as a "no_match" with no fit at all. A fit on a
+        # stretched page still needs every circle drawn like a hole
+        # (step 5 of _fit_assignment), the guard against chance fits.
+        # Review V4-3 (2026-11-11): the confirmation of this pass is capped
+        # at the narrow gate's span. The stretch _allowed_stretch accepts on
+        # a small part (its tolerance / spread term) reached 6-7 %, and a
+        # reading with a whole axis WRONG by that much (pitch 2.54 read on
+        # holes drawn at 2.72, a row spacing 7 % short) was confirmed here.
+        # A fit whose stretch exceeds HYPOTHESIS_TOL_SPAN -- what the narrow
+        # gate would let through -- is reported "distorted" instead: the
+        # wide search may find a fit the narrow one missed, never confirm
+        # a stretch the narrow one would refuse.
         for assign in _hypothesis_assignments(points, circles, gate_fraction=DISTORTION_GATE,
                                               kinds=kinds)[:MAX_ASSIGNMENTS]:
             if _on_reference(points, circles, assign, references):
                 continue
             fit = _fit_assignment(points, circles, assign, mask, body, outlines=outlines)
-            if fit.stage != "confirmed" and _better(fit, best):
+            if (fit.stage == "confirmed" and fit.stretch is not None
+                    and fit.stretch > HYPOTHESIS_TOL_SPAN):
+                fit = replace(fit, stage="distorted",
+                              body_check=BODY_NONE if body is None else BODY_UNVERIFIABLE)
+            if _better(fit, best):
                 best = fit
+            if best.stage == "confirmed" and best.body_check in (BODY_NONE, BODY_AGREES):
+                break
+        if best is not None and best.stage == "confirmed":
+            return _ImageResult(name, True, len(circles), best, hole_like)
     if best is None or best.stage == "no_match":
         # Still nothing: a page turned beyond the upright window is not a
         # wrong reading.
@@ -2740,7 +2857,7 @@ def _check_image(name: str, analysis: _Analysis, points: np.ndarray,
 
 
 def _summarise(results: Sequence[_ImageResult], observable: bool = False,
-               unchecked: str = BODY_NONE) -> LayoutCheck:
+               unchecked: str = BODY_NONE, keys: Sequence[object] | None = None) -> LayoutCheck:
     """Choose the overall non-confirmed answer from the per-image results.
 
     "not_confirmed" needs an image whose reading reached a contradicting
@@ -2752,7 +2869,9 @@ def _summarise(results: Sequence[_ImageResult], observable: bool = False,
     one image "unanchored" comes after the last two, see
     :func:`_check_image`). ``unchecked`` is the ``body_check`` of an
     answer no fit carries one for (BODY_UNVERIFIABLE when a body was given,
-    else BODY_NONE); ``scale_verified`` is never True here.
+    else BODY_NONE); ``scale_verified`` is never True here. ``keys`` are the
+    pad keys of the reading, in the order of its points: the decisive fit's
+    ``misplaced`` index is reported as its key (``misplaced_pad``).
     """
     def rounded(value: float) -> float | None:
         """Finite values rounded to 0.1 um, others None."""
@@ -2764,8 +2883,15 @@ def _summarise(results: Sequence[_ImageResult], observable: bool = False,
         fit = decisive.fit
         reason = NO_MATCH_UNOBSERVABLE if fit.stage == "no_match" and not observable else fit.stage
         body_check = BODY_CONTRADICTED if fit.stage == "body_scale" else unchecked
+        # The pad the decisive fit singles out (_single_misplaced), by key.
+        misplaced = (keys[fit.misplaced] if keys is not None and fit.misplaced is not None
+                     else None)
+        # The stretch a "distorted" refusal needed (None for any other stage).
+        stretch = (rounded(fit.stretch) if fit.stage == "distorted" and fit.stretch is not None
+                   else None)
         return LayoutCheck(NOT_CONFIRMED, reason, decisive.name, rounded(fit.max_error_mm),
-                           rounded(fit.tolerance_mm), decisive.circles, observable, body_check)
+                           rounded(fit.tolerance_mm), decisive.circles, observable, body_check,
+                           misplaced_pad=misplaced, stretch_ratio=stretch)
     for reason in _UNJUDGED:
         flagged = [r for r in results if r.fit is not None and r.fit.stage == reason]
         if flagged:

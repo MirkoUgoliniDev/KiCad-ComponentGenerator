@@ -249,10 +249,18 @@ def test_the_remedy_follows_the_pad_type():
 def test_two_agreeing_readings_refuted_by_the_holes_are_not_written():
     """CONTRACT CHANGED (review 2026-11-04, H6): two readings wrong the same way used to pass
     with a warning; an observable «no_match» of the drawn holes now refuses them. Without a
-    measure and with one layout only, the hard block stays."""
+    measure and with one layout only, the hard block stayed.
+
+    CONTRACT CHANGED AGAIN (round 7, coordinator's decision of 2026-11-11):
+    the witness is imperfect, so the refusal is never a hard block: the
+    readings' layout is the one option of a "pad_layout" question, its text
+    saying the drawn holes do not confirm it."""
     data = _main(TRUE)
     apply_dedicated_pads(data, _reading(), check_layout=FakeHoles(SHIFTED))
-    assert "le smentiscono" in data["_pin_map_conflict"]
+    assert "_pin_map_conflict" not in data
+    question, = data["_questions"]
+    assert question["field"] == "pad_layout" and len(question["options"]) == 1
+    assert "non confermano questa disposizione" in question["text"]
     assert _offsets(data) == _true_offsets(), "the main pads stay as read, nothing adopted"
 
 
@@ -274,8 +282,16 @@ def test_a_collinear_three_pad_no_match_is_not_a_refutation():
     assert "_pin_map_conflict" not in data and "Attenzione" in data["_numbering_note"]
 
 
-def test_agreeing_readings_refuted_by_the_holes_take_the_measure_when_it_is_unique():
-    """H6 positive: the measure on the drawn holes moves the one wrong pad, with its provenance."""
+def test_agreeing_readings_refuted_by_the_holes_are_offered_the_measure_never_given_it():
+    """The measure on the drawn holes is OFFERED beside the layout the two readings agree on.
+
+    CONTRACT CHANGED (user, 2026-11-11, round 6 (a)): since H6 the measured
+    layout was written at once («the measure decides»). The holes verify
+    geometry, not numbering, and two agreeing readings are not nothing: the
+    program now adopts neither -- it records the "pad_layout" question with
+    both layouts, each with what the holes said. The answer writes the
+    measured layout exactly as before, the moved pad with its provenance.
+    """
     class Measure:
         def __call__(self, pads, body):
             from types import SimpleNamespace
@@ -286,9 +302,23 @@ def test_agreeing_readings_refuted_by_the_holes_take_the_measure_when_it_is_uniq
     shifted_chains = [CHAINS[0], {"axis": "y", "stops": ["edge", "1,2,3", "4,5", "edge"],
                                   "values": [2.0, 7.0, 3.0]}]
     data = _main(SHIFTED)
+    before = _offsets(data)
     apply_dedicated_pads(data, _reading(shifted_chains), check_layout=FakeHoles(TRUE),
                          measure_layout=Measure())
-    assert "_pin_map_conflict" not in data and "misurate sui fori" in data["_numbering_note"]
+    # Round 7: the measured wording («non confermano», never «smentiscono»).
+    assert "_pin_map_conflict" not in data and "non confermano" in data["_numbering_note"]
+    assert _offsets(data) == before, "nothing is adopted: neither the readings nor the measure"
+    question, = data["_questions"]
+    values = sorted(option["value"].split(":")[0] for option in question["options"])
+    assert question["field"] == "pad_layout" and values == ["holes", "main+dedicated"]
+    measured = next(option for option in question["options"] if option["value"].startswith("holes:"))
+    assert "misurate sui fori" in measured["label"] and "STIMATA dai pixel" in measured["label"]
+    # The user's (saved) answer: the measured layout is written, as the measure used to write it.
+    data = _main(SHIFTED)
+    data["_answers"] = {question["key"]: measured["value"]}
+    apply_dedicated_pads(data, _reading(shifted_chains), check_layout=FakeHoles(TRUE),
+                         measure_layout=Measure())
+    assert "_pin_map_conflict" not in data and not data.get("_questions")
     moved = next(p for p in data["package_geometry"]["pins"] if p["number"] == "2")
     assert moved["source"] == MEASURED_PIXELS_SOURCE
     assert _offsets(data) == _true_offsets()

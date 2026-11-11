@@ -270,7 +270,10 @@ def test_a_real_slot_side_that_was_not_printed_is_dropped_and_named():
 
 @pytest.mark.parametrize("level", ["pad", "part"])
 def test_a_zero_hole_with_a_declared_terminal_is_derived_from_it(level):
-    lead = {"lead": {"shape": "round", "diameter_mm": 0.6}, "value_sources": {"lead": "read"}}
+    """CONTRACT CHANGED (user, 2026-11-11, round 6 (b)): the hole still comes from the terminal,
+    but a terminal only the main answer read is read ONCE, so the hole is «estimated», no longer
+    «derived»; with a second agreeing reading it is «derived» (test_extraction_review_round6)."""
+    lead ={"lead": {"shape": "round", "diameter_mm": 0.6}, "value_sources": {"lead": "read"}}
     pads = [_pin(n, x, drill_mm=0, **(copy.deepcopy(lead) if level == "pad" else {}))
             for n, x in (("1", 0.0), ("2", 2.54))]
     top = {} if level == "pad" else {"lead_diameter_mm": 0.6, "value_sources": {"lead_diameter_mm": "read"}}
@@ -278,8 +281,9 @@ def test_a_zero_hole_with_a_declared_terminal_is_derived_from_it(level):
     assert _assert_invariant(params) == "footprint"
     hole = tht_estimates.estimated_hole({"shape": "round", "diameter_mm": 0.6})
     for pin in params.package_geometry["pins"]:
-        assert pin["drill_mm"] == hole and pin["sources"]["drill_mm"] == "derived"
+        assert pin["drill_mm"] == hole and pin["sources"]["drill_mm"] == "estimated"
     assert "foro 0 nella risposta" in params.notes
+    assert "terminale letto una sola volta" in params.notes
 
 
 @pytest.mark.parametrize("pad_type", ["thru_hole", "np_thru_hole"])

@@ -537,7 +537,9 @@ def test_a_grid_may_omit_an_unprinted_hole_and_the_part_lead_gives_it():
     assert _assert_invariant(params) == "footprint"
     estimate = tht_estimates.estimated_round_pad({"shape": "round", "diameter_mm": 0.64})
     assert {pin["drill_mm"] for pin in params.package_geometry["pins"]} == {estimate.drill_mm}
-    assert all(pin["sources"]["drill_mm"] == "derived" for pin in params.package_geometry["pins"])
+    # CONTRACT CHANGED (user, 2026-11-11, round 6 (b)): the part-level terminal was read by the
+    # main answer alone, so the hole it gives is «estimated», no longer «derived».
+    assert all(pin["sources"]["drill_mm"] == "estimated" for pin in params.package_geometry["pins"])
 
 
 def test_a_grid_without_hole_and_without_lead_is_unread_never_invented():
