@@ -1,6 +1,6 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
-## STATO 12/11/2026 SERA — lavoro della serata COMMITTATO su FOOTPRINT-ADVANCE come `(in commit)` (base `4dde1e8`) e mergiato in main (utente: «committa e pusha, poi mergia in main e pusha, poi torna qui»)
+## STATO 12/11/2026 SERA — lavoro della serata COMMITTATO su FOOTPRINT-ADVANCE come `807375f` (base `4dde1e8`) e mergiato in main (utente: «committa e pusha, poi mergia in main e pusha, poi torna qui»)
 
 Suite completa a codice fermo (wb21): A 8353 passati 9 saltati 19 sottotest, B 5435 passati 4 saltati = 13788
 passati, 13 saltati, 19 sottotest, nessun rosso. CONTENUTO (dettagli nelle sezioni sotto): modello AI per passo
