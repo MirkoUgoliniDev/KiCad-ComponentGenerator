@@ -1,5 +1,82 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## STATO 12/11/2026 — quattro modifiche della giornata COMMITTATE e PUSHATE su FOOTPRINT-ADVANCE (utente: «ok committa e pusha»), NON mergiate in main
+
+Suite completa a codice fermo: A 8298 passati 9 saltati 19 sottotest, B 5332 passati 4 saltati 1 fallito (elenco del
+menu «Strumenti» senza «Prompt inviati...», contratto aggiornato, file rilanciato da solo: verde) = 13630 passati,
+13 saltati, 19 sottotest. Base `36d7a02`. Hash del commit: vedi il commit «docs: handoff» successivo.
+CONTENUTO: (1) passo «Revisione corpi» nascosto per i componenti singoli; (2) gruppo richiudibile ridotto al titolo,
+colonna del footprint senza riquadri vuoti; (3) finestra dei dettagli dei controlli (footprint e KLC); (4) numero del
+prompt inviato (registro data/sent_prompts.sqlite3, non versionato) e «Strumenti > Prompt inviati...».
+DA DECIDERE CON L'UTENTE (invariato): prompt personalizzati nel DB, difetti non autorizzati della revisione completa,
+merge in main. Segnalati e NON autorizzati oggi: provenienza «estimated» su pad 2 e 5 del rele' SRD; Invio tenuto
+premuto sulla lista dei controlli riapre la finestra.
+
+### Dettaglio del 12/11 (scritto durante il lavoro)
+
+RICHIESTA DELL'UTENTE (dopo aver visto il passo 3 barrato con il rele' SRD): «perche' non lo nascondiamo per questo
+tipo di componenti? non ha senso metterlo barrato». COMPORTAMENTO CONCORDATO: per un componente singolo la barra mostra
+4 passi rinumerati (1 Documenti, 2 Analisi AI, 3 Modello STEP, 4 KiCad), senza l'etichetta e senza la freccia che la
+precede; per una scheda con componenti restano 5 passi; senza progetto o senza tipo scelto restano 5; cambiando tipo
+il passo compare/sparisce subito; il barrato non si usa piu'. FILE: kicadgen/gui/workflow_bar.py (`set_state(done,
+current, hidden)`, numerazione sui soli passi visibili), kicadgen/gui/main_window.py `_refresh_workflow_state`,
+tests/test_workflow_bar.py (contratto: nascosto, numerazione, ricomparsa). La stringa «Solo per le schede con
+componenti.» (tooltip del barrato) non serve piu': tolta da DEFAULT_TRANSLATIONS (nel DB restano righe innocue, INSERT
+OR IGNORE). STATO: fatto; revisione read-only (1 agente) -> 2 difetti CONFERMATI e CORRETTI: (1) il cambio di tipo non
+aggiornava la barra (`_on_component_type_changed` non chiamava `_refresh_workflow_state`; preesistente, col barrato si
+notava meno); (2) due predicati di «scheda» (facts["board"] col cancello `_selected_family()` contro
+`_photo_inventory_family() is False`): con tipo indeciso o scheda senza tipo la revisione restava il passo corrente per
+sempre -> un predicato solo (`_photo_inventory_family() is True`) e la revisione non spuntabile non e' mai «corrente».
+README.md/README.it.md aggiornati. I 3 test nuovi falliscono sul codice precedente (verificato con git stash).
+Suite completa: da rilanciare (la prima corsa e' stata fermata per applicare le correzioni).
+AUTORIZZATI dall'utente («ok», 12/11), FATTI, test mirati verdi (workflow/collapsible/finding/side panel 34, i18n+doc
+65); revisione read-only (1 agente) FATTA: (1) test_klc_findings_ui.py asseriva il vecchio tooltip «Passa il mouse» ->
+contratto aggiornato a «Clic su una riga»; (2) aiuto ⓘ «klc» riscritto per il clic (voce di catalogo sostituita, 4
+lingue); (3) le righe dei «Controlli» del footprint restavano nella lingua vecchia -> `_on_language_changed` riprogramma
+i controlli sull'ultimo footprint (`_fp_checks_built`), test che fallisce senza la correzione; (4) NON corretto, cosmetico:
+tenendo premuto Invio sulla lista del footprint la finestra si apre e si chiude a ripetizione.
+PROVA DELL'UTENTE 08:26-08:30 (VE12H-K): (i) con «Proprieta'» chiuso «Controlli» si prendeva parte dell'altezza libera e
+mostrava la riga sospesa in un riquadro vuoto -> nella colonna solo «Proprieta'» e lo stretch finale possono crescere
+(Layer/Disegno/Controlli politica verticale Maximum), test che fallisce senza; (ii) «errore» segnalato = NESSUN crash
+(nessun crash report, programma vivo): analisi 08:26:48 fermata con «Nessun footprint» perche' la risposta principale
+(deepseek-flash) non aveva coordinate e l'unica lettura dedicata (1 e 4 nella stessa colonna) era smentita dai fori
+disegnati -> blocco CORRETTO per regola; analisi 08:28:40 riuscita (lettura dedicata 4|1|5|2,3 confermata dai fori,
+scarto 0.21 mm), footprint+STEP generati 08:29:39. Utente chiede a cosa serve «sha256 48186de1» nella scheda di
+avanzamento (impronta del testo del prompt, dalla P1/P2 di a482721): proposta di toglierla dalla scheda, tenerla nel log.
+Suite completa: rilanciata dopo (i).
+FATTO, test mirati verdi (219). CORREZIONE DEL PROGETTO dopo la revisione read-only: la prima versione metteva il
+registro nel database dei profili (schema 10) -> i testi dei prompt (anche note dell'utente) sarebbero finiti nel DB
+COMMITTATO e lo schema 10 avrebbe chiuso fuori le versioni vecchie. ORA: file proprio data/sent_prompts.sqlite3
+(escluso da .gitignore, nei test nella cartella temporanea), NUOVO kicadgen/services/sent_prompts.py (register,
+lookup, registry_path; tabella creata una volta per file e processo); schema profili RESTA 9 (modifiche tolte).
+prompt_catalog: prompt_log_line con n. (ripiego sull'impronta se il registro non si scrive), prompt_machine_line
+«AI_PROMPT_SENT number= field= sha256=» (solo file, filtrata dalla scheda), register_sent, SentPromptLog(register=).
+NUOVO kicadgen/gui/sent_prompts_dialog.py (impronta solo nel tooltip), menu «Prompt inviati...». Altri punti della
+revisione: errori sqlite nello slot mostrati, docstring workers. Detto all'utente: il DB committato NON conterra' i
+testi (cambiato rispetto a quanto annunciato prima).
+SUITE COMPLETA 12/11 (codice fermo, tutte le modifiche di oggi): meta' A 8298 passati 9 saltati 19 sottotest; meta' B
+1 fallito 5332 passati 4 saltati. Il rosso: tests/test_tools_menu.py fissava l'elenco del menu «Strumenti» senza
+«Prompt inviati...» -> contratto aggiornato, il file da solo 5 passati. NON rifatta la suite completa dopo questa
+modifica di un solo test. NIENTE COMMITTATO: serve l'OK dell'utente.
+AUTORIZZATO («ok», 12/11): numero univoco del prompt al posto dell'impronta. Registro dei prompt
+inviati in data/analysis_profiles.sqlite3 (testo esatto -> numero progressivo; stesso testo = stesso numero); scheda
+di avanzamento e log mostrano «…: predefinito, n. 17.»; analisi-ai.log tiene anche l'impronta accanto al numero;
+«Strumenti > Prompt inviati…»: numero -> testo completo, titolo, stato, data del primo invio; 4 lingue. Detto
+all'utente: il DB committato conterra' i testi dei prompt inviati. FILE: (a) collapsible_group.py
+(politica verticale Fixed da chiuso, quella del chiamante ripristinata; override setSizePolicy) + column.addStretch(0)
+in `_build_footprint_side_panel`, test tests/test_collapsible_group.py; (b) NUOVO kicadgen/gui/finding_details.py
+(FINDING_DETAILS_ROLE = UserRole+2, build/show), collegato a `_on_footprint_check_clicked` e al nuovo
+`_on_klc_finding_clicked`; tooltip dei due elenchi riscritti (voci vecchie tolte dal catalogo, nuove in 4 lingue,
+riusate «Errore», «Avviso», «Chiudi»); TRAPPOLA: il guard dei test rifiuta solo le modali statiche, non QDialog.exec:
+un test che clicca una riga deve intercettare `gui.show_finding_details` (fatto nei due test di
+test_footprint_side_panel.py), altrimenti la suite resta appesa. Testo della richiesta: (a) CollapsibleGroupBox chiuso ridotto al titolo (il gruppo «Proprieta'»
+con stretch 1 restava alto) + addStretch in fondo alla colonna del footprint; (b) clic su una riga di «Controlli»
+(footprint) e «Controlli KiCad (KLC)» -> finestra modale centrata con gravita', testo completo e rimedio.
+FORI DEL RELE' SRD (stessa sessione, solo diagnosi, utente: «per ora lascia stare i fori»): i pad 2-3-4 hanno foro
+1.35/1.40 perche' sono lamelle (1x0.4, 1.1x0.3): foro = diagonale + 0.25, piazzola = foro + 0.8 (tht_estimates.py);
+il DRILLING del datasheet non stampa diametri. Segnalato, non autorizzato: provenienza «estimated» su pad 2 e 5 anche
+se la quota «2-» copre entrambi i pad della coppia.
+
 ## STATO 11/11/2026 notte — giri 6, 6b, 7, 7b e prompt nel profilo (P1, P2) COMMITTATI su FOOTPRINT-ADVANCE (utente: «ok»), NON mergiati, NON pushati
 
 Suite completa VERDE a codice fermo: A 8287 passati 9 saltati 19 sottotest, B 5318 passati 4 saltati = 13605 passati,

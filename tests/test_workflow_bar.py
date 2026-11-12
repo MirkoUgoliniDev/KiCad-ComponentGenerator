@@ -8,17 +8,51 @@ from tests.test_photo_inventory_gui import gui
 
 def test_the_bar_ticks_done_steps_and_highlights_the_current_one(window):  # noqa: F811
     bar = WorkflowBar()
-    bar.set_state({"documents"}, "analysis", {"review": "Solo per le schede con componenti."})
+    bar.set_state({"documents"}, "analysis")
     assert "✓" in bar.labels["documents"].text()
     assert "●" in bar.labels["analysis"].text()
-    assert bar.labels["review"].font().strikeOut()
     assert bar.labels["analysis"].font().bold() and not bar.labels["documents"].font().bold()
-    assert bar.labels["review"].toolTip() == "Solo per le schede con componenti."
     assert "○" in bar.labels["kicad"].text()
     spy = QSignalSpy(bar.step_clicked)
     QTest.mouseClick(bar.labels["model3d"], Qt.MouseButton.LeftButton, pos=QPoint(2, 2))
     assert spy[0][0] == "model3d"
     assert [key for key, _ in WORKFLOW_STEPS] == ["documents", "analysis", "review", "model3d", "kicad"]
+
+
+def _shown_texts(bar):
+    """Texts of the visible step labels, in bar order."""
+    return [bar.labels[key].text() for key, _ in WORKFLOW_STEPS if not bar.labels[key].isHidden()]
+
+
+def test_a_hidden_step_disappears_with_its_arrow_and_the_rest_is_renumbered(window):  # noqa: F811
+    """@brief Positive (user request 2026-11-12): a step that does not apply is
+    not shown at all, not struck through, and the visible steps count 1..4."""
+    bar = WorkflowBar()
+    bar.set_state({"documents", "analysis"}, "model3d", {"review"})
+    assert bar.labels["review"].isHidden() and bar.arrows["review"].isHidden()
+    assert _shown_texts(bar) == ["✓ 1 · Documenti", "✓ 2 · Analisi AI",
+                                 "● 3 · Modello STEP", "○ 4 · KiCad"]
+    assert not any(bar.labels[key].font().strikeOut() for key in bar.labels)
+    assert not bar.arrows["model3d"].isHidden() and not bar.arrows["kicad"].isHidden()
+
+
+def test_a_step_shown_again_takes_back_its_number_and_arrow(window):  # noqa: F811
+    """@brief Negative: hiding is not sticky; the same bar given no hidden step
+    shows the five steps numbered 1..5 again."""
+    bar = WorkflowBar()
+    bar.set_state(set(), "documents", {"review"})
+    bar.set_state(set(), "documents")
+    assert not bar.labels["review"].isHidden() and not bar.arrows["review"].isHidden()
+    assert [text.split(" · ")[0][-1] for text in _shown_texts(bar)] == ["1", "2", "3", "4", "5"]
+
+
+def test_hiding_the_first_step_never_leaves_a_leading_arrow(window):  # noqa: F811
+    """@brief Negative: the arrow belongs to the step it points to; the first
+    visible step has none, whichever step that is."""
+    bar = WorkflowBar()
+    bar.set_state(set(), None, {"documents"})
+    assert bar.arrows["analysis"].isHidden()
+    assert _shown_texts(bar)[0] == "○ 1 · Analisi AI"
 
 
 def test_without_a_project_no_step_is_current(window):  # noqa: F811
@@ -41,22 +75,69 @@ def test_a_generated_board_points_to_kicad(window, tmp_path):  # noqa: F811
     (folder / "SCHEDA.3dshapes").mkdir()
     (folder / "SCHEDA.3dshapes" / "SCHEDA.step").write_text("step")
     window._refresh_workflow_state()
-    done, current, skipped = window.workflow_bar.state()
+    done, current, hidden = window.workflow_bar.state()
     assert {"analysis", "model3d"} <= done
-    assert "review" not in skipped, "una scheda con componenti ha la revisione"
+    assert "review" not in hidden, "una scheda con componenti ha la revisione"
+    assert not window.workflow_bar.labels["review"].isHidden()
     assert current in ("documents", "review")
     assert window.status_project.text() == "Progetto: SCHEDA"
 
 
-def test_a_single_component_skips_the_body_review(window, tmp_path):  # noqa: F811
-    """@brief Negativo: un componente singolo non ha corpi da rivedere."""
+def test_a_single_component_hides_the_body_review(window, tmp_path):  # noqa: F811
+    """@brief Negativo: un componente singolo non ha corpi da rivedere; the
+    step is hidden and comes back as soon as the type becomes a board."""
     window.field_library_root.setText(str(tmp_path))
     window.field_name.setText("RELE")
     combo = window.combo_component_type
+    # No manual refresh: the type change itself must update the bar.
     combo.setCurrentIndex(combo.findData("single_tht"))
+    _done, current, hidden = window.workflow_bar.state()
+    assert "review" in hidden and current != "review"
+    assert window.workflow_bar.labels["review"].isHidden()
+    combo.setCurrentIndex(combo.findData("aggregate_tht"))
+    assert "review" not in window.workflow_bar.state()[2]
+    assert not window.workflow_bar.labels["review"].isHidden()
+
+
+def test_an_undecided_type_keeps_every_step_without_proposing_the_review(window, tmp_path):  # noqa: F811
+    """@brief Negative: «(non specificata)» cannot tell board from single
+    component (`_photo_inventory_family()` None): nothing is hidden, since
+    hiding is a claim the type must declare, but the review, which cannot be
+    ticked for it, is never the current step either."""
+    window.field_library_root.setText(str(tmp_path))
+    window.field_name.setText("INCERTO")
+    combo = window.combo_component_type
+    combo.setCurrentIndex(combo.findData("single_tht"))
+    combo.setCurrentIndex(0)
+    assert window._photo_inventory_family() is None
+    done, current, hidden = window.workflow_bar.state()
+    assert hidden == set() and not window.workflow_bar.labels["review"].isHidden()
+    assert current != "review"
+    folder = window._project_dir()
+    (folder / "INCERTO.pretty").mkdir(parents=True)
+    (folder / "INCERTO.pretty" / "INCERTO.kicad_mod").write_text("(footprint)")
+    window.docs_list.addItem("datasheet.pdf")
     window._refresh_workflow_state()
-    _done, current, skipped = window.workflow_bar.state()
-    assert "review" in skipped and current != "review"
+    done, current, _hidden = window.workflow_bar.state()
+    assert {"documents", "analysis"} <= done and "review" not in done
+    assert current == "model3d", "the review it cannot tick must not hold the highlight"
+
+
+def test_a_board_kind_without_a_type_can_tick_its_review(window, tmp_path, monkeypatch):  # noqa: F811
+    """@brief Positive: a board chosen in the wizard with no type yet is a
+    board for the bar too (one predicate): its review is proposed, and a done
+    review is ticked."""
+    window.field_library_root.setText(str(tmp_path))
+    window.field_name.setText("MODULO")
+    window.combo_component_type.setCurrentIndex(0)
+    window.project_kind = gui._PROJECT_KIND_BOARD
+    folder = window._project_dir()
+    (folder / "MODULO.pretty").mkdir(parents=True)
+    (folder / "MODULO.pretty" / "MODULO.kicad_mod").write_text("(footprint)")
+    monkeypatch.setattr(window, "_reviewed_this_extraction", True, raising=False)
+    window._refresh_workflow_state()
+    done, current, hidden = window.workflow_bar.state()
+    assert "review" in done and "review" not in hidden
 
 
 def test_the_status_bar_says_what_is_running(window):  # noqa: F811

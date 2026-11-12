@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QMouseEvent
-from PyQt6.QtWidgets import QGroupBox, QStyle, QStyleOptionGroupBox, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QGroupBox, QSizePolicy, QStyle, QStyleOptionGroupBox, QVBoxLayout, QWidget
 
 #: Arrow glyphs in front of the title, collapsed and expanded.
 ARROW_COLLAPSED = "▸"  # ▸
@@ -24,6 +24,13 @@ class CollapsibleGroupBox(QGroupBox):
         rendered title, so the arrow is added here and never reaches the
         catalogue; the source string is pinned in `i18n_title_source` so the
         pass never reads the decorated title back as a source.
+    @note A collapsed group takes only the height of its title, whatever
+        stretch factor or size policy its layout gives it: before, a group
+        given the free height of a column (the footprint tab's «Proprietà»)
+        kept that height, empty, when closed (user report, 2026-11-12). The
+        vertical policy is Fixed while collapsed; the caller's policy is
+        restored on expanding (`setSizePolicy` while collapsed sets the one
+        restored).
     """
 
     #: Emitted with the new state after a toggle.
@@ -47,6 +54,32 @@ class CollapsibleGroupBox(QGroupBox):
         self.body = QWidget(self)
         outer.addWidget(self.body)
         self.body.setVisible(self._expanded)
+        #: Vertical policy to restore on expanding; the caller's choice.
+        self._open_vertical_policy = self.sizePolicy().verticalPolicy()
+        self._apply_height_policy()
+
+    def setSizePolicy(self, *args) -> None:  # noqa: N802 - Qt override
+        """@brief Record the caller's policy, keeping the collapsed height fixed.
+
+        @param args Either a QSizePolicy or (horizontal, vertical) policies,
+            as `QWidget.setSizePolicy` takes them.
+        @note While collapsed the vertical part is remembered for the next
+            expand and Fixed is kept, so a caller cannot reopen the empty gap.
+        """
+        policy = args[0] if len(args) == 1 else QSizePolicy(*args)
+        self._open_vertical_policy = policy.verticalPolicy()
+        super().setSizePolicy(policy)
+        self._apply_height_policy()
+
+    def _apply_height_policy(self) -> None:
+        """Fixed vertical policy while collapsed, the caller's one while expanded."""
+        policy = self.sizePolicy()
+        wanted = (self._open_vertical_policy if self._expanded
+                  else QSizePolicy.Policy.Fixed)
+        if policy.verticalPolicy() != wanted:
+            policy.setVerticalPolicy(wanted)
+            # The base method: the override would record Fixed as the caller's.
+            QGroupBox.setSizePolicy(self, policy)
 
     def setTitle(self, title: str) -> None:  # noqa: N802 - Qt override
         """@brief Store the bare title and draw it with the state arrow.
@@ -80,6 +113,7 @@ class CollapsibleGroupBox(QGroupBox):
             return
         self._expanded = expanded
         self.body.setVisible(expanded)
+        self._apply_height_policy()
         self.setTitle(self._base_title)
         self.toggled.emit(expanded)
 

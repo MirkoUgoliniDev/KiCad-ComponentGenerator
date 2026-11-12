@@ -480,7 +480,11 @@ def test_a_declared_field_is_reported_with_the_status_of_the_text_sent():
     custom = "My own pad-position instructions."
     lines = _logged({}, ({"pad_positions_prompt": custom}, {"system_prompt": custom}))
     line, = [line for line in lines if pc.tx(pc.entry("pad_positions_prompt").title) in line]
-    assert pc.tx("personalizzato") in line and text_digest(custom)[:8] in line
+    # Since 2026-11-12 the visible line names the registry number, the machine
+    # line of the file keeps the full digest.
+    assert pc.tx("personalizzato") in line and ", n. " in line and text_digest(custom)[:8] not in line
+    assert (f"AI_PROMPT_SENT number={line.rsplit('n. ', 1)[1].rstrip('.')} "
+            f"field=pad_positions_prompt sha256={text_digest(custom)}") in lines
     # Declared, it is reported even when the request text holds it only inside another prompt.
     main = pc.restore_default("system_prompt")
     lines = _logged({}, ({"system_prompt": main}, {"system_prompt": main}))

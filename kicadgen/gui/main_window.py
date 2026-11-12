@@ -33,7 +33,7 @@ from PyQt6.QtWidgets import (
     QDialog, QListWidget, QMainWindow, QMenu, QMessageBox, QPushButton, QScrollArea,
     QSplitter, QListWidgetItem, QStackedWidget, QTabWidget, QTextEdit, QVBoxLayout,
     QToolButton, QWidget, QTableWidget, QTableWidgetItem, QHeaderView, QWizard, QWizardPage,
-    QGridLayout, QInputDialog,
+    QGridLayout, QInputDialog, QSizePolicy,
 )
 
 from ..cad3d.annotations import (ANNOTATION_CONVENTION, EdgeFilletAnnotation,
@@ -95,6 +95,7 @@ from ..app_paths import (DEFAULT_YOLO_ONNX, DEFAULT_YOLO_PT, DEFAULT_YOLO_SMD_ON
 # that replace the module with a fake must not change its contract.
 from ..services.photo_yolo import yolo_settings as validate_yolo_settings
 from .component_editor_dialog import ComponentEditorDialog
+from .finding_details import FINDING_DETAILS_ROLE, finding_details, show_finding_details
 from .workflow_bar import WorkflowBar
 from .project_wizard import CollapsibleTools, ProjectWizard
 from ..generators.host_mounting import header_footprint_params
@@ -2482,6 +2483,11 @@ class MainWindow(QMainWindow):
         for action in (self.action_reread_height, self.action_reread_pads):
             action.setVisible(self._reread_worker_class() is not None)
         tools_menu.aboutToShow.connect(self._refresh_reread_actions)
+        tools_menu.addSeparator()
+        # The number «n. 17» the analysis log gives each prompt sent, back
+        # to its exact text (user request, 2026-11-12).
+        self.action_sent_prompts = tools_menu.addAction(
+            self.i18n.text("Prompt inviati..."), self._show_sent_prompts)
 
         help_menu = self.menu_help = self.menuBar().addMenu(self.i18n.tr("app.help"))
         # «Apri cartella progetto tool» (open tool project folder) removed by the
@@ -4225,6 +4231,11 @@ class MainWindow(QMainWindow):
             # The marked fields' tooltips and the findings are composed
             # texts: only a refresh writes them in the new language.
             self._refresh_klc_findings()
+        if getattr(self, "fp_checks_list", None) is not None and self._fp_last_checks_source() is not None:
+            # The footprint «Controlli» rows and the details they open are
+            # composed in the language of their last run: re-run them on the
+            # same footprint (review 2026-11-12, finding 3).
+            self._refresh_footprint_checks(self._fp_last_checks_source())
         # The export history shows its kinds translated at draw time (B2).
         self._refresh_kicad_export_history()
         if hasattr(self, "guided_docs"):
@@ -4251,6 +4262,7 @@ class MainWindow(QMainWindow):
         self.action_forget_answers.setText(self.i18n.text("Dimentica le risposte"))
         self.action_reread_height.setText(self.i18n.text("Rileggi solo le quote del corpo"))
         self.action_reread_pads.setText(self.i18n.text("Rileggi solo le posizioni dei pad"))
+        self.action_sent_prompts.setText(self.i18n.text("Prompt inviati..."))
         self.action_exit.setText(self.i18n.text("Esci"))
         # File menu entries added on 2026-09-24: before they stayed in the
         # start-up language (the user's «testi cablati» (hard-wired texts) check).
@@ -5332,6 +5344,10 @@ class MainWindow(QMainWindow):
             # A profile switch: its prompts are checked once (see
             # _check_prompt_notice); before the first show, showEvent does it.
             self._schedule_prompt_notice()
+        # The type decides whether the body review step exists: the bar
+        # follows at once, not at the next unrelated refresh (review
+        # 2026-11-12, finding 1).
+        self._refresh_workflow_state()
 
     def _refresh_type_effect(self) -> None:
         """@brief Offer the header pins choice for boards only, showing the project's value.
@@ -5601,7 +5617,11 @@ class MainWindow(QMainWindow):
         docs_list = getattr(self, "docs_list", None)
         facts["documents"] = bool(docs_list is not None and docs_list.count())
         facts["analysis"] = bool(getattr(self, "_acquisition_completed", False)) or footprint
-        facts["board"] = self._photo_inventory_family() is True if self._selected_family() else False
+        # ONE predicate for «a board with bodies to review», the same the
+        # hidden rule of `_refresh_workflow_state` reads: a board kind chosen
+        # in the wizard without a type is a board too (review 2026-11-12,
+        # finding 2: two predicates left the review shown but never tickable).
+        facts["board"] = self._photo_inventory_family() is True
         facts["review"] = facts["board"] and (
             bool(getattr(self, "_reviewed_this_extraction", False))
             or self._review_bundle() is not None)
@@ -5617,13 +5637,24 @@ class MainWindow(QMainWindow):
                                       ("analysis", facts["analysis"]),
                                       ("review", facts["review"]),
                                       ("model3d", facts["step"])) if flag}
-        skipped = {}
-        if facts["name"] and not facts["board"]:
-            skipped["review"] = "Solo per le schede con componenti."
+        # The body review exists only for boards with components: for any
+        # other chosen type it is hidden, not struck through (user request,
+        # 2026-11-12). Hidden only when the chosen project kind or type
+        # DECLARES one single component (`_photo_inventory_family() is
+        # False`); with no project, no type, or a type that cannot decide
+        # (None), every step stays shown since which case applies is unknown.
+        family = self._photo_inventory_family()
+        hidden = set()
+        if facts["name"] and family is False:
+            hidden.add("review")
+        # A review still shown for an undecided type (family None) cannot be
+        # ticked: it is never proposed as the next step, otherwise the
+        # highlight would stay on it forever (review 2026-11-12, finding 2).
+        not_proposed = hidden | (set() if facts["board"] else {"review"})
         order = ("documents", "analysis", "review", "model3d", "kicad")
-        current = (next((key for key in order if key not in done and key not in skipped), None)
+        current = (next((key for key in order if key not in done and key not in not_proposed), None)
                    if facts["name"] else None)
-        bar.set_state(done, current, skipped)
+        bar.set_state(done, current, hidden)
         self._refresh_status_bar(facts["name"])
 
     def _on_costs_changed(self) -> None:
@@ -13837,12 +13868,15 @@ class MainWindow(QMainWindow):
         self.klc_list.setSelectionMode(QListWidget.SelectionMode.NoSelection)
         self.klc_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.klc_list.setMaximumHeight(120)
+        # A click on a finding opens its full text and remedy, as the
+        # footprint tab's «Controlli» (user request, 2026-11-12).
+        self.klc_list.itemClicked.connect(self._on_klc_finding_clicked)
         # Renamed from «Regole KLC:» (user, 2026-10-15, option 3: the old
         # label did not say these are checks run on the component).
         self.label_klc = QLabel("Controlli KiCad (KLC):")
         self.label_klc.setToolTip(
             "Controlli sulle convenzioni delle librerie KiCad (KLC): ⛔ errore, ⚠ avviso. "
-            "Passa il mouse su una riga per sapere che cosa correggere e dove.")
+            "Clic su una riga per leggere il testo completo e che cosa correggere e dove.")
         form.addRow(self.label_klc, self._metadata_field_row(self.klc_list, "klc", top=True))
         QWidget.setTabOrder(self.field_reference, self.field_meta_description)
         QWidget.setTabOrder(self.field_meta_description, self.field_meta_keywords)
@@ -14054,8 +14088,8 @@ class MainWindow(QMainWindow):
                 (what, self.i18n.text(
                     "Le KiCad Library Conventions (KLC) sono le regole con cui vengono scritte le librerie "
                     "ufficiali di KiCad. Qui vengono controllate quelle sui metadati, sul footprint e sul "
-                    "simbolo, mentre scrivi: la lista si aggiorna da sola. Passa il mouse su una riga: il "
-                    "suggerimento dice che cosa correggere e in quale campo, scheda o comando.")),
+                    "simbolo, mentre scrivi: la lista si aggiorna da sola. Clic su una riga: si apre il "
+                    "testo completo, con che cosa correggere e in quale campo, scheda o comando.")),
                 (where, self.i18n.text(
                     "⛔ errore: ciò che KiCad o le convenzioni rifiutano. Un campo obbligatorio vuoto blocca "
                     "l’installazione finché non viene compilato; per gli altri errori l’installazione chiede "
@@ -14301,7 +14335,10 @@ class MainWindow(QMainWindow):
             # The remedy (what to change and where) lives next to the rule
             # in klc_checks.FIX_HINTS; the GUI only shows it. A finding made
             # without one (tests, future callers) falls back to the table.
-            item.setToolTip(finding.hint or klc_checks.fix_hint(finding.code))
+            hint = finding.hint or klc_checks.fix_hint(finding.code)
+            item.setToolTip(hint)
+            item.setData(FINDING_DETAILS_ROLE,
+                         finding_details(finding.severity, finding.message, hint))
             self.klc_list.addItem(item)
         self._mark_metadata_fields(findings)
         self._refresh_install_gate(findings)
@@ -14309,6 +14346,25 @@ class MainWindow(QMainWindow):
     #: Item data role holding the finding code of a «Controlli KiCad (KLC)»
     #: row; the empty-state row has none, which is how tests tell it apart.
     FINDING_CODE_ROLE = Qt.ItemDataRole.UserRole
+
+    def _show_sent_prompts(self) -> None:
+        """@brief Open «Prompt inviati»: a registry number back to the prompt text sent.
+
+        @note The dialog is released after `exec()` (tests rule).
+        """
+        from .sent_prompts_dialog import SentPromptsDialog
+        dialog = SentPromptsDialog(self.i18n.text, self)
+        try:
+            dialog.exec()
+        finally:
+            dialog.deleteLater()
+
+    def _on_klc_finding_clicked(self, item) -> None:
+        """@brief Open the full text and remedy of a clicked «Controlli KiCad (KLC)» row.
+
+        @param item The clicked row; the empty-state row opens nothing.
+        """
+        show_finding_details(self, item.data(FINDING_DETAILS_ROLE), self.i18n.text)
 
     def _metadata_fields(self) -> dict:
         """@brief The editors of «Metadati del componente» by field key (`METADATA_HELP_TITLES`)."""
@@ -18868,7 +18924,8 @@ class MainWindow(QMainWindow):
         column.addWidget(self.fp_properties_group, 1)
         checks = CollapsibleGroupBox("Controlli", expanded=True)
         checks.setToolTip("Controlli geometrici sul footprint in bozza (KLC): clic su una riga per "
-                          "selezionare gli elementi coinvolti nel disegno.")
+                          "selezionare gli elementi coinvolti nel disegno e leggere il testo completo "
+                          "con il rimedio.")
         checks_column = QVBoxLayout(checks.body)
         checks_column.setContentsMargins(0, 4, 0, 0)
         self.fp_checks_list = QListWidget()
@@ -18881,6 +18938,17 @@ class MainWindow(QMainWindow):
         self.fp_checks_list.itemActivated.connect(self._on_footprint_check_clicked)
         checks_column.addWidget(self.fp_checks_list)
         column.addWidget(checks)
+        # Stretch 0: while «Proprietà» (stretch 1) is open it takes the free
+        # height; once it is collapsed (fixed at its title) the free height
+        # lands here, below the groups, which then sit packed at the top
+        # (user report, 2026-11-12).
+        column.addStretch(0)
+        # Only «Proprietà» and the trailing stretch may grow: the other groups
+        # never take more than their content (Maximum). With «Proprietà»
+        # closed, the free height otherwise went partly to «Controlli», which
+        # showed its one row floating in an empty box (user report, 2026-11-12).
+        for group in (layers, drawing, checks):
+            group.setSizePolicy(group.sizePolicy().horizontalPolicy(), QSizePolicy.Policy.Maximum)
         panel.setFixedWidth(250)
         self._fit_footprint_checks_height()
         self._fp_checks_timer = QTimer(self)
@@ -19517,6 +19585,10 @@ class MainWindow(QMainWindow):
         self._fp_checks_pending = footprint
         timer.start()
 
+    def _fp_last_checks_source(self):
+        """The footprint the «Controlli» list was last computed on (or is pending), None if none."""
+        return getattr(self, "_fp_checks_built", None)
+
     def _refresh_footprint_checks_now(self) -> None:
         """@brief Rewrite the «Controlli» list from the pending footprint and the user drawings.
 
@@ -19536,6 +19608,8 @@ class MainWindow(QMainWindow):
             timer.stop()
         lst.clear()
         built = self._fp_checks_pending
+        #: Kept for a re-run in another interface language (`_on_language_changed`).
+        self._fp_checks_built = built
         if built is None:
             self._fp_last_checks = []
             lst.addItem(self.i18n.text("Nessun footprint da controllare."))
@@ -19567,6 +19641,8 @@ class MainWindow(QMainWindow):
             drawings = tuple(dict.fromkeys(owners[index - generated] for index in finding.graphics
                                            if 0 <= index - generated < len(owners)))
             item.setData(self._FP_CHECK_TARGETS_ROLE, (tuple(finding.pads), drawings))
+            item.setData(FINDING_DETAILS_ROLE,
+                         finding_details(finding.severity, finding.message, finding.hint))
             lst.addItem(item)
         self._fit_footprint_checks_height()
 
@@ -19582,18 +19658,20 @@ class MainWindow(QMainWindow):
             selections, as the rubber band keeps them.
         """
         targets = item.data(self._FP_CHECK_TARGETS_ROLE)
-        if not targets:
-            return
-        pads, drawings = targets
-        if drawings:
-            self._fp_selection.set_many(drawings)
-            self._fp_pad_selection.clear()
-        elif pads and self.package_geometry is not None:
-            self._fp_pad_selection.set_many(pads)
-            self._fp_selection.clear()
-        else:
-            return
-        self._refresh_drawing_selection()
+        if targets:
+            pads, drawings = targets
+            if drawings:
+                self._fp_selection.set_many(drawings)
+                self._fp_pad_selection.clear()
+                self._refresh_drawing_selection()
+            elif pads and self.package_geometry is not None:
+                self._fp_pad_selection.set_many(pads)
+                self._fp_selection.clear()
+                self._refresh_drawing_selection()
+        # Then the full text and remedy (user request, 2026-11-12): the row
+        # is cut by the column and the remedy was only a tooltip. After the
+        # selection, so the drawing behind the window already shows it.
+        show_finding_details(self, item.data(FINDING_DETAILS_ROLE), self.i18n.text)
 
     # ── Footprint draw tools: the window is the ClickToolHost of the preview ──
 

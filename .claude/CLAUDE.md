@@ -230,7 +230,12 @@ contradicts the measure; point 150, `FIX` only: profile field «Modello lettura 
 checkbox, one review window in two stages with the detector's reading kept beside the AI's,
 three-section «Parametri» modal, phantom sides excluded by the photo, pulsing running mark,
 unread row spacing ignored, pad width at the pitch downgraded, lands measured on the photo)
-is 13605 passed,
+is 13630 passed,
+13 skipped and 19 subtests (2026-11-12, branch `FOOTPRINT-ADVANCE`, halves 8298/9/19 and 5332/4 with one red test
+— the «Strumenti» menu list without the new entry — fixed and re-run alone, not a second full run: body review step
+hidden for single components, collapsed groups shrink to their title, a click on a check row opens its full text and
+remedy, prompts named by a registry number kept in the untracked data/sent_prompts.sqlite3; see HANDOFF.md «STATO
+12/11/2026»); before that, 13605 passed,
 13 skipped and 19 subtests (2026-11-11 night, branch `FOOTPRINT-ADVANCE`, commit `a482721`, NOT merged into `main`, halves 8287/9/19 and
 5318/4: a drawn-hole contradiction of two agreeing pad readings always becomes the pad-layout question (never a block,
 never a silent confirmation), a terminal read once is an estimate, every prompt sent to a model lives in the analysis

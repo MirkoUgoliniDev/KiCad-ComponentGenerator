@@ -216,7 +216,9 @@ def test_the_label_is_renamed_everywhere(window):  # noqa: F811
     assert window.label_klc.text() == "Controlli KiCad (KLC):"
     assert window.METADATA_HELP_TITLES["klc"] == "Controlli KiCad (KLC)"
     assert "Controlli KiCad (KLC)" in window._metadata_help_buttons["klc"].toolTip()
-    assert "Passa il mouse su una riga" in window.label_klc.toolTip()
+    # Since 2026-11-12 a click opens the full text and remedy: the tooltip says so.
+    assert "Clic su una riga" in window.label_klc.toolTip()
+    assert "Passa il mouse su una riga" not in window.label_klc.toolTip()
     assert "controlli KiCad (KLC)" in window.group_metadata.toolTip()
     assert "Regole KLC:" not in window.label_klc.text()
 

@@ -226,8 +226,12 @@ def test_the_log_names_each_prompt_sent_with_its_status_and_digest(offline, monk
     _single_part_run(monkeypatch, tmp_path, {'pad_positions_prompt': secret}, logs)
     lines = _prompt_lines(logs)
     pad = [line for line in lines if 'Datasheet: posizioni dei pad' in line]
-    assert pad == [f"Prompt inviato «Datasheet: posizioni dei pad»: personalizzato, "
-                   f"sha256 {text_digest(secret)[:8]}."]
+    assert len(pad) == 1 and pad[0].startswith("Prompt inviato «Datasheet: posizioni dei pad»: personalizzato, n. ")
+    # The number turns back into the exact text sent (registry, 2026-11-12).
+    from kicadgen.services import sent_prompts
+    number = int(pad[0].rsplit("n. ", 1)[1].rstrip("."))
+    row = sent_prompts.lookup(number)
+    assert row["text"] == secret and row["field"] == "pad_positions_prompt" and row["status"] == "custom"
     body = [line for line in lines if 'Datasheet: quote del corpo' in line]
     assert len(body) == 1 and ': predefinito,' in body[0]
     single = [line for line in lines if 'Datasheet: componente singolo' in line]
@@ -245,11 +249,71 @@ def test_an_outdated_text_is_logged_as_an_old_default(monkeypatch):
         if e.field == 'pad_positions_prompt' else e for e in pc.PROMPTS))
     monkeypatch.setattr(pc, '_BY_FIELD', {e.field: e for e in pc.PROMPTS})
     logs = []
-    log = pc.SentPromptLog({'pad_positions_prompt': old}, logs.append)
+    log = pc.SentPromptLog({'pad_positions_prompt': old}, logs.append, register=lambda field, text: 7)
     log.observe({'system_prompt': old})
     log.observe({'system_prompt': old})                       # once per run
-    assert logs == [f"Prompt inviato «Datasheet: posizioni dei pad»: vecchio predefinito, "
-                    f"sha256 {text_digest(old)[:8]}."]
+    assert logs == [f"AI_PROMPT_SENT number=7 field=pad_positions_prompt sha256={text_digest(old)}",
+                    "Prompt inviato «Datasheet: posizioni dei pad»: vecchio predefinito, n. 7."]
+
+
+def test_the_same_text_keeps_its_number_and_a_new_text_gets_the_next(monkeypatch):
+    """@brief Positive and negative (registry, 2026-11-12): one number per exact text."""
+    from kicadgen.services import sent_prompts
+    first = sent_prompts.register('pad_positions_prompt', 'testo A', 'custom')
+    assert sent_prompts.register('pad_positions_prompt', 'testo A', 'custom') == first
+    second = sent_prompts.register('pad_positions_prompt', 'testo A ', 'custom')
+    assert second != first, "one more blank is another text, another number"
+    other_field = sent_prompts.register('numbering_prompt', 'testo A', 'custom')
+    assert other_field not in (first, second)
+    assert sent_prompts.lookup(first)['text'] == 'testo A'
+    assert sent_prompts.lookup(second)['text'] == 'testo A '
+    assert sent_prompts.lookup(10 ** 6) is None and sent_prompts.lookup('x') is None
+
+
+def test_the_registry_is_not_the_committed_profile_database():
+    """@brief Negative (review 2026-11-12): prompt texts never reach the published database."""
+    import sqlite3
+    from kicadgen.services import sent_prompts
+    from kicadgen.services.analysis_profiles import SCHEMA_VERSION, ProfileStore
+    store = ProfileStore()
+    sent_prompts.register('pad_positions_prompt', 'nota privata', 'custom')
+    assert sent_prompts.registry_path() != store.path
+    assert sent_prompts.registry_path().name == 'sent_prompts.sqlite3'
+    with sqlite3.connect(store.path) as db:
+        tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert 'sent_prompts' not in tables and SCHEMA_VERSION == 9
+
+
+def test_a_real_registry_failure_falls_back_to_the_digest(monkeypatch):
+    """@brief Negative on the real path: an unwritable registry gives the digest line, the run goes on."""
+    import sqlite3
+    from kicadgen.services import sent_prompts
+
+    def broken(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+    monkeypatch.setattr(sent_prompts, 'register', broken)
+    assert pc.register_sent('pad_positions_prompt', 'testo C') is None
+    logs = []
+    pc.SentPromptLog({'pad_positions_prompt': 'testo C'}, logs.append).observe({'system_prompt': 'testo C'})
+    assert logs[-1].endswith(f"sha256 {text_digest('testo C')[:8]}.")
+
+
+def test_a_registry_that_cannot_be_written_falls_back_to_the_digest():
+    """@brief Negative: a failing registry never stops a run; the line names the digest."""
+    logs = []
+    log = pc.SentPromptLog({'pad_positions_prompt': 'testo B'}, logs.append,
+                           register=lambda field, text: None)
+    log.observe({'system_prompt': 'testo B'})
+    assert logs == [f"AI_PROMPT_SENT number=- field=pad_positions_prompt sha256={text_digest('testo B')}",
+                    f"Prompt inviato «Datasheet: posizioni dei pad»: personalizzato, "
+                    f"sha256 {text_digest('testo B')[:8]}."]
+
+
+def test_the_machine_line_stays_out_of_the_progress_card():
+    """@brief The full digest is for the log file only (user, 2026-11-12: «l'impronta non mi serve»)."""
+    from kicadgen.gui.analysis_overlay import is_machine_line
+    assert is_machine_line(pc.prompt_machine_line('pad_positions_prompt', 'x', 3))
+    assert not is_machine_line(pc.prompt_log_line('pad_positions_prompt', 'x', 3))
 
 
 def test_without_a_profile_the_extraction_writes_no_prompt_line(offline, monkeypatch, tmp_path):
@@ -571,7 +635,8 @@ def test_saving_the_dialog_unchanged_keeps_every_new_field_byte_identical(app, t
 
 def test_the_new_visible_strings_have_four_languages():
     from kicadgen.services.i18n import DEFAULT_TRANSLATIONS
-    sources = ["Prompt inviato «{title}»: {status}, sha256 {digest}.", "personalizzato",
+    sources = ["Prompt inviato «{title}»: {status}, sha256 {digest}.",
+               "Prompt inviato «{title}»: {status}, n. {number}.", "personalizzato",
                "vecchio predefinito", "predefinito", "Prompt diversi dal predefinito",
                "Non mostrare più per questi testi", "Apri la gestione dei profili AI",
                "Testi nel codice", "{title}: {status}"]

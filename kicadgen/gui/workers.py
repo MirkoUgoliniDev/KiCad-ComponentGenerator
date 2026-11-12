@@ -1202,7 +1202,7 @@ def _reporting_call(call, prompts, log):
     The full extraction wraps its own call (datasheet_extractor with
     `prompts`); the inventory re-run and the partial re-read build their call
     here, so they wrap it here: one log line per prompt sent, with its status
-    and digest (prompt_catalog.SentPromptLog), never the text.
+    and registry number (prompt_catalog.SentPromptLog), never the text.
     """
     if prompts is None:
         return call

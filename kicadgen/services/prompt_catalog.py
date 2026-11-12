@@ -561,20 +561,60 @@ def log_status_label(status: str) -> str:
             OUTDATED: "vecchio predefinito"}[status]
 
 
-def prompt_log_line(field: str, text: str) -> str:
-    """@brief One analysis-log line naming a prompt sent, its status and its digest.
+def prompt_log_line(field: str, text: str, number: Optional[int] = None) -> str:
+    """@brief One analysis-log line naming a prompt sent, its status and its registry number.
 
     @param field Profile prompt field.
     @param text The text sent (after the blank fallback of `effective_text`).
-    @return Translated line with the title, the short status and the first
-        8 hex characters of the SHA-256 of `text`. Never the text itself:
-        the log is shared in crash reports, and a prompt may hold user notes.
+    @param number Registry number of the text (`register_sent`); None when
+        the registry could not be written, then the first 8 hex characters
+        of its SHA-256 identify it instead.
+    @return Translated line with the title, the short status and the number
+        (user request 2026-11-12: a number that «Strumenti > Prompt
+        inviati...» turns back into the text, not a digest). Never the text
+        itself: a prompt may hold user notes.
     @throws KeyError When the field is not a registered prompt.
     """
     item = entry(field)
-    return tx("Prompt inviato «{title}»: {status}, sha256 {digest}.",
-              title=tx(item.title), status=tx(log_status_label(entry_status(item, text))),
-              digest=text_digest(text)[:8])
+    status = tx(log_status_label(entry_status(item, text)))
+    if number is None:
+        return tx("Prompt inviato «{title}»: {status}, sha256 {digest}.",
+                  title=tx(item.title), status=status, digest=text_digest(text)[:8])
+    return tx("Prompt inviato «{title}»: {status}, n. {number}.",
+              title=tx(item.title), status=status, number=number)
+
+
+def prompt_machine_line(field: str, text: str, number: Optional[int]) -> str:
+    """@brief The machine line of a prompt sent, for the analysis log file only.
+
+    @param field Profile prompt field.
+    @param text The text sent.
+    @param number Registry number, or None.
+    @return «AI_PROMPT_SENT number=17 field=... sha256=<64 hex>»: the marker
+        keeps it out of the progress card (analysis_overlay.is_machine_line),
+        the full digest stays in the file for whoever compares logs.
+    """
+    shown = "-" if number is None else str(number)
+    return f"AI_PROMPT_SENT number={shown} field={field} sha256={text_digest(text)}"
+
+
+def register_sent(field: str, text: str) -> Optional[int]:
+    """@brief Register a prompt text sent (sent_prompts registry) and return its number.
+
+    @param field Profile prompt field.
+    @param text The text sent.
+    @return The registry number, or None when the registry cannot be
+        written: the log then names the prompt by its digest, and the
+        analysis goes on (a log line must never stop a paid run).
+    @note The registry is its own untracked file, not the committed profile
+        database (sent_prompts module note).
+    """
+    import sqlite3
+    from . import sent_prompts
+    try:
+        return sent_prompts.register(field, text, entry_status(entry(field), text))
+    except (sqlite3.Error, OSError):
+        return None
 
 
 #: Prompt fields a request being built declares it sends, {field: text sent},
@@ -650,15 +690,18 @@ class SentPromptLog:
     @note Each field is reported once per run, in the order the requests use them.
     """
 
-    def __init__(self, prompts, log):
+    def __init__(self, prompts, log, register=None):
         """@brief Prepare the texts to look for.
 
         @param prompts Mapping field -> profile text (see `profile_prompts`);
             every in_profile PROMPTS field missing from it is looked for with
             its default text.
         @param log Callable(str) receiving the lines; None writes nothing.
+        @param register Callable(field, text) -> registry number or None;
+            None uses `register_sent` (the profile database).
         """
         self._log = log
+        self._register = register or register_sent
         self._pending = {}
         for item in PROMPTS:
             if not item.in_profile or item.field == "image_instructions":
@@ -674,7 +717,9 @@ class SentPromptLog:
         """Write the line of `field` once, with the status of `text`."""
         del self._pending[field]
         if self._log is not None:
-            self._log(prompt_log_line(field, text))
+            number = self._register(field, text)
+            self._log(prompt_machine_line(field, text, number))
+            self._log(prompt_log_line(field, text, number))
 
     def _found_alone(self, field: str, texts) -> bool:
         """Whether the text of `field` occurs in a request text OUTSIDE every other registered prompt containing it."""
