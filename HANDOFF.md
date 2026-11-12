@@ -1,6 +1,6 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
-## STATO 13/11/2026 — COMMITTATO su FOOTPRINT-ADVANCE come `HASHHERE` e pushato (utente: «Ok»), NON mergiato in main. Suite wb23: A 8397/9/19, B 5434/4 + 1 rosso corretto e rilanciato da solo.
+## STATO 13/11/2026 — COMMITTATO su FOOTPRINT-ADVANCE come `b0e94fa` e pushato (utente: «Ok»), NON mergiato in main. Suite wb23: A 8397/9/19, B 5434/4 + 1 rosso corretto e rilanciato da solo.
 
 ## (era IN CORSO 12/11/2026 notte) PC appena installato (utente: «cosa succede se dopo il setup non trovo kicad, freecad o una key? devi simularlo», poi «Ok» alla proposta)
 
