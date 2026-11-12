@@ -1,6 +1,6 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
-## STATO 12/11/2026 — quattro modifiche della giornata COMMITTATE e PUSHATE su FOOTPRINT-ADVANCE (utente: «ok committa e pusha»), NON mergiate in main
+## STATO 12/11/2026 — quattro modifiche della giornata COMMITTATE e PUSHATE su FOOTPRINT-ADVANCE (utente: «ok committa e pusha»), MERGIATE in main come `965eccd` e pushate (utente: «fai il merge in main e poi pusha»)
 
 Suite completa a codice fermo: A 8298 passati 9 saltati 19 sottotest, B 5332 passati 4 saltati 1 fallito (elenco del
 menu «Strumenti» senza «Prompt inviati...», contratto aggiornato, file rilanciato da solo: verde) = 13630 passati,
@@ -9,7 +9,7 @@ CONTENUTO: (1) passo «Revisione corpi» nascosto per i componenti singoli; (2) 
 colonna del footprint senza riquadri vuoti; (3) finestra dei dettagli dei controlli (footprint e KLC); (4) numero del
 prompt inviato (registro data/sent_prompts.sqlite3, non versionato) e «Strumenti > Prompt inviati...».
 DA DECIDERE CON L'UTENTE (invariato): prompt personalizzati nel DB, difetti non autorizzati della revisione completa,
-merge in main. Segnalati e NON autorizzati oggi: provenienza «estimated» su pad 2 e 5 del rele' SRD; Invio tenuto
+Segnalati e NON autorizzati oggi: provenienza «estimated» su pad 2 e 5 del rele' SRD; Invio tenuto
 premuto sulla lista dei controlli riapre la finestra.
 
 ### Dettaglio del 12/11 (scritto durante il lavoro)
