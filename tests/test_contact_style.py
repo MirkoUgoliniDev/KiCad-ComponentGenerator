@@ -738,7 +738,8 @@ def test_the_schema_asks_the_model_for_the_style_from_the_photo():
     item = _openai_tool()["function"]["parameters"]["properties"]["castellated_sides"]["items"]
     field = item["properties"]["contact_style"]
     assert field["enum"] == list(CONTACT_STYLES)
-    assert "FOTO" in field["description"] and "bordo" in field["description"]
+    # CONTRACT CHANGED 2026-11-12: prompts in English.
+    assert "PHOTO" in field["description"] and "edge" in field["description"]
     assert "contact_style" not in item["required"]
     assert "contact_style" in DEFAULT_SYSTEM_PROMPT
 

@@ -687,10 +687,68 @@ class ProfileStore:
         @param values Mapping of default names to their new values.
         @throws ProfileError When a value fails validation.
         """
-        self._validate_values(values)
-        values = {k: v.strip() if k.endswith('model') else v for k, v in values.items()}
+        self.save_models(defaults=values)
+
+    def step_models_stored(self):
+        """@brief The model choices saved for the analysis steps, {prompt field: model or ""}.
+
+        @return Only the steps with a saved choice (prompt_models.STEPS);
+            "" means «the single model». Global: never per component type.
+        @note Kept in the `metadata` table under «step_model:<field>» (user
+            request 2026-11-12, «Modello AI» table), not among the AI
+            defaults, so the code reading those defaults is unaffected.
+        """
+        from .prompt_models import STEP_KEY_PREFIX
+        def load():
+            with self._connect() as db:
+                rows = db.execute('SELECT name,value FROM metadata WHERE name LIKE ?',
+                                  (STEP_KEY_PREFIX + '%',)).fetchall()
+            return {name[len(STEP_KEY_PREFIX):]: value for name, value in rows}
+        return dict(self._cached('step_models', None, load))
+
+    def step_models(self):
+        """@brief The model of every analysis step, {prompt field: model or "" for the single model}.
+
+        @return prompt_models.step_models of the saved choices, the two pad
+            steps falling back on the old «Posizioni pad» model (pad_model).
+        """
+        from .prompt_models import step_models
+        return step_models(self.step_models_stored(), self.defaults().get('pad_model'))
+
+    def save_step_models(self, values):
+        """@brief Save the model of some analysis steps.
+
+        @param values {prompt field of a step: model identifier, or "" for the single model}.
+        @throws ProfileError When a field is not a step or a value is not text.
+        """
+        self.save_models(steps=values)
+
+    def save_models(self, defaults=None, steps=None):
+        """@brief Save global AI defaults and analysis-step models in ONE transaction.
+
+        @param defaults Mapping of default names to their new values, validated
+            as `save_defaults` does (model ids stripped), or None for none.
+        @param steps {prompt field of a step: model identifier, or "" for the
+            single model}, validated as `save_step_models` does, or None.
+        @throws ProfileError When any value fails validation: nothing is written.
+        @note Both mappings are validated before the write and stored in one
+            `_writing()` block, so the «Modello AI» dialog never leaves the
+            defaults saved and the step table not (review finding 7, 2026-11-12).
+        """
+        from .prompt_models import STEPS, step_key
+        defaults = dict(defaults or {})
+        steps = dict(steps or {})
+        self._validate_values(defaults)
+        defaults = {k: v.strip() if k.endswith('model') else v for k, v in defaults.items()}
+        fields = {item.field for item in STEPS}
+        for field, value in steps.items():
+            if field not in fields or not isinstance(value, str):
+                raise ProfileError(tx("Campo profilo non riconosciuto."))
         with self._writing() as db:
-            db.executemany('UPDATE ai_defaults SET value=? WHERE name=?',[(v,k) for k,v in values.items()])
+            db.executemany('UPDATE ai_defaults SET value=? WHERE name=?',
+                           [(v, k) for k, v in defaults.items()])
+            db.executemany('INSERT OR REPLACE INTO metadata(name,value) VALUES (?,?)',
+                           [(step_key(field), value.strip()) for field, value in steps.items()])
 
     def list_types(self,include_inactive=False):
         """@brief Return the component types ordered by position and label, only active ones unless `include_inactive`.
@@ -802,8 +860,12 @@ class ProfileStore:
         values = self.resolve(key)
         extra = values['image_instructions'].strip()
         if extra:
+            # Header in English since 2026-11-12 (every prompt sent to a
+            # model is in English, user decision). It is part of the photo
+            # prompts, hence of the photo cache keys: answers cached with the
+            # former Italian header are asked again once (accepted).
             for field in PHOTO_PROMPT_FIELDS:
-                values[field] += '\n\nIstruzioni specifiche per le immagini:\n'+extra
+                values[field] += '\n\nImage-specific instructions:\n'+extra
         return values
 
     def prompt_statuses(self, key=''):
@@ -903,6 +965,66 @@ class ProfileStore:
         with self._writing() as db:
             if db.execute('DELETE FROM component_types WHERE key=?',(key,)).rowcount != 1:
                 raise ProfileError(tx("Tipologia da eliminare non trovata."))
+
+    def contents_signature(self):
+        """@brief Identity of the database contents now (file change counter, size, time, WAL stamp).
+
+        @return An opaque value equal for unchanged contents; None when the
+            file cannot be read. Compared by `restore_from` to refuse
+            overwriting a database another program changed meanwhile.
+        """
+        return self._database_signature()
+
+    def restore_from(self, source, expected_signature=None):
+        """@brief Replace the whole contents of this database with those of `source`.
+
+        @param source Path of a profile database (the working copy of the
+            profile manager, user request 2026-11-12: changes applied only
+            on «Applica»).
+        @param expected_signature `contents_signature()` taken when the copy
+            was made; None skips the check.
+        @throws ProfileError When this database changed since
+            `expected_signature` (another window or program wrote it: its
+            changes would be lost), or when a file cannot be opened.
+        @note The SQLite backup API writes every page under the database's
+            own lock, so a reader never sees half of it; the read caches of
+            every store of this process are dropped after it.
+        """
+        if expected_signature is not None and self._database_signature() != expected_signature:
+            raise ProfileError(tx("Il database dei profili {path} è stato modificato da un'altra finestra o "
+                                  "da un altro programma mentre la gestione era aperta: le modifiche non "
+                                  "sono state salvate, per non cancellare le sue. Chiudi senza salvare "
+                                  "e ripeti le modifiche.", path=self.path))
+        source = Path(source)
+        refused = ProfileError(tx("Copia di lavoro dei profili {path} mancante o non valida: il database "
+                                  "dei profili non è stato toccato.", path=source))
+        # Read-only and never created: sqlite3.connect on a vanished working
+        # copy (a temp cleaner) made an EMPTY database and the backup wiped
+        # the real one (review 2026-11-12, finding 2).
+        if not source.is_file():
+            raise refused
+        try:
+            origin = sqlite3.connect(f"{source.resolve().as_uri()}?mode=ro", uri=True, timeout=5)
+        except sqlite3.DatabaseError as exc:
+            raise refused from exc
+        try:
+            try:
+                version = origin.execute('PRAGMA user_version').fetchone()[0]
+                tables = {row[0] for row in origin.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'")}
+            except sqlite3.DatabaseError as exc:
+                raise refused from exc
+            if version != SCHEMA_VERSION or not {'ai_defaults', 'component_types', 'ai_overrides',
+                                                  'metadata', 'translations'} <= tables:
+                raise refused
+            # Declared limit (review finding 4): the signature is compared,
+            # then the backup takes the lock; a write by another process in
+            # those milliseconds would be overwritten.
+            with self._connect() as target:
+                origin.backup(target)
+        finally:
+            origin.close()
+            self._invalidate_cache()
 
     def backup(self,destination):
         """@brief Copy the database into a new file with the SQLite backup API.

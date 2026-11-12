@@ -302,41 +302,17 @@ def test_a_version_5_database_gains_the_prompts_without_touching_the_rest(tmp_pa
 
 # -- settings dialog ----------------------------------------------------------------------
 
-def test_the_selector_holds_three_independent_prompts(qapp):
+def test_the_model_window_has_no_prompt_selector(qapp):
+    """@brief CONTRACT CHANGED 2026-11-12: the three datasheet prompts (boards, single part,
+    numbering) are edited in the profile manager only; the model window holds no selector."""
     from kicadgen.gui.settings_dialog import LlmSettingsDialog
     d = LlmSettingsDialog("board text", "vendor/m", current_single_prompt="single text",
                           current_numbering_prompt="numbering text", current_family="single_tht")
     try:
-        assert [d.combo_prompt_kind.itemText(i) for i in range(d.combo_prompt_kind.count())] == [
-            "Schede e moduli", "Componente singolo", "Numerazione dei pin (chiamata dedicata)"]
-        assert d.editor.toPlainText() == "board text"
-        assert "componente singolo" in d.prompt_usage.text()
-        d.combo_prompt_kind.setCurrentIndex(1)
-        assert d.editor.toPlainText() == "single text"
-        d.editor.setPlainText("single edited")
-        d.combo_prompt_kind.setCurrentIndex(2)
-        assert d.editor.toPlainText() == "numbering text"
-        d.tabs.setCurrentIndex(1)
-        d._restore_defaults()
-        assert d.numbering_prompt() == DEFAULT_PIN_NUMBERING_PROMPT
-        assert d.single_prompt() == "single edited", "restoring one entry never touches the others"
-        assert d.prompt() == "board text"
-        d.combo_prompt_kind.setCurrentIndex(0)
-        assert d.editor.toPlainText() == "board text"
-        d.editor.setPlainText("   ")
-        assert d.prompt() == "" and d.single_prompt() == "single edited"
+        assert not hasattr(d, "combo_prompt_kind") and not hasattr(d, "prompt_usage")
+        assert not hasattr(d, "single_prompt") and not hasattr(d, "numbering_prompt")
     finally:
         d.deleteLater()
-
-
-def test_the_usage_line_follows_the_family(qapp):
-    from kicadgen.gui.settings_dialog import LlmSettingsDialog
-    for family, fragment in (("aggregate_tht", "scheda o modulo"), (None, "dipende dalla tipologia")):
-        d = LlmSettingsDialog("b", "m", current_family=family)
-        try:
-            assert fragment in d.prompt_usage.text()
-        finally:
-            d.deleteLater()
 
 
 # -- the window picks the prompt by family ----------------------------------------------
@@ -612,18 +588,19 @@ def test_a_board_never_checks_the_pad_model(offline, monkeypatch):
 
 
 def test_the_settings_dialog_edits_the_pad_model(qapp, monkeypatch):
+    """@brief CONTRACT CHANGED 2026-11-12: the old «Posizioni pad» field is the pad-position row
+    of the step table; `pad_model()` still answers for it."""
     from kicadgen.gui import settings_dialog
     from kicadgen.gui.settings_dialog import LlmSettingsDialog
     d = LlmSettingsDialog("b", "deepseek-api/deepseek-flash")
     try:
         assert d.pad_model() == ext.DEFAULT_PAD_POSITIONS_MODEL, "factory default when unset"
         monkeypatch.setattr(settings_dialog, "pick_model", lambda *a, **k: "vendor/reader")
-        d._pick_pad_model()
+        d._pick_step_model("pad_positions_prompt")
         assert d.pad_model() == "vendor/reader" and d.model() == "deepseek-api/deepseek-flash"
-        d._pad_model_follows_main()
+        d._step_follows_single("pad_positions_prompt")
         assert d.pad_model() == ""
-        d.tabs.setCurrentIndex(0)
-        d._restore_defaults()
+        d._restore_step_defaults()
         assert d.pad_model() == ext.DEFAULT_PAD_POSITIONS_MODEL
     finally:
         d.deleteLater()

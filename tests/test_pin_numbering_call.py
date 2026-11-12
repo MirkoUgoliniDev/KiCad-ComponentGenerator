@@ -61,7 +61,8 @@ def test_the_call_sends_the_drawing_alone_with_the_grid_and_validates_the_answer
     assert kwargs["tool"]["function"]["name"] == "report_pin_numbering"
     assert kwargs["system_prompt"] == ext.DEFAULT_PIN_NUMBERING_PROMPT
     texts = [b["text"] for b in kwargs["content_blocks"] if b["type"] == "text"]
-    assert any("2 file" in t and "8 posizioni" in t for t in texts)
+    # CONTRACT CHANGED 2026-11-12: prompts in English.
+    assert any("2 rows" in t and "8 positions" in t for t in texts)
     assert sum(1 for b in kwargs["content_blocks"] if b["type"] == "image_url") == 1
 
 

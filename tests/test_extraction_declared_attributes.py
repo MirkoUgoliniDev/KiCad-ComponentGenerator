@@ -393,11 +393,13 @@ def test_the_single_schema_requires_the_printed_quotes_and_not_the_coordinates()
     assert "printed_vertical_quotes" in required
     assert "printed_vertical_quotes" in ext._BODY_DIMENSIONS_TOOL["input_schema"]["required"]
     assert "leads_point" in ext._single_component_tool()["function"]["parameters"]["properties"]
-    assert "larghezze delle viste frontale" not in ext.DEFAULT_SINGLE_SYSTEM_PROMPT
-    assert "larghezze delle viste frontale" not in ext.DEFAULT_BODY_DIMENSIONS_PROMPT
+    # CONTRACT CHANGED 2026-11-12: prompts in English (the same rules, the
+    # English wording of the former Italian ones).
+    assert "widths of the front" not in ext.DEFAULT_SINGLE_SYSTEM_PROMPT
+    assert "widths of the front" not in ext.DEFAULT_BODY_DIMENSIONS_PROMPT
     assert ext._LEAD_RULE in ext.DEFAULT_SINGLE_SYSTEM_PROMPT and ext._LEAD_RULE in ext.DEFAULT_BODY_DIMENSIONS_PROMPT
-    assert "PERPENDICOLARMENTE AL PIANO DI APPOGGIO" in ext._HEIGHT_RULE
-    assert "DIREZIONE DEI TERMINALI" not in ext._HEIGHT_RULE
+    assert "PERPENDICULAR TO THE SEATING PLANE" in ext._HEIGHT_RULE
+    assert "ALONG THE DIRECTION OF THE" not in ext._HEIGHT_RULE.upper()
 
 
 # ── B: questions and answers ─────────────────────────────────────────────

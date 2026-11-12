@@ -109,17 +109,20 @@ KiCad-Bibliothek, die nach ähnlichen Maßen ausgewählt werden.</p>
   <strong>DeepSeek (direkte API)</strong> (Modelle <code>deepseek-api/...</code>;
   beim Start aus den Quellen ist der Standard <code>deepseek-api/deepseek-flash</code>).
   Das Modell wählen Sie in der Oberfläche: <span class="ui">Konfiguration</span> →
-  <span class="ui">Allgemeine KI-Standards …</span>, Registerkarte <span class="ui">Modell</span>,
+  <span class="ui">KI-Modell...</span>,
   oder für die Sitzung im Bereich <span class="ui">KI-Modell</span>.
   Den Schlüssel geben Sie unter <span class="ui">Konfiguration</span> →
   <span class="ui">KI-Konto...</span> ein: Das Fenster listet jeden Anbieter mit
   der Herkunft des verwendeten Schlüssels (Umgebungsvariable, Anmeldeinformationsverwaltung,
   Datei <code>.env</code> oder keiner) und dem aktuellen Guthaben auf; wählen Sie den
-  Anbieter, fügen Sie den Schlüssel ein, klicken Sie auf <span class="ui">Prüfen</span>
-  (kein Aufruf eines Modells, keine Kosten) und dann auf <span class="ui">Speichern</span>;
-  er wird in der Windows-Anmeldeinformationsverwaltung abgelegt (<code>KiCadGen/OpenRouter</code>,
-  <code>KiCadGen/DeepSeek</code>). <span class="ui">Schlüssel entfernen</span> löscht
-  nur diesen Eintrag. Die Datei <code>.env</code> im Ordner
+  Anbieter, fügen Sie den Schlüssel ein (das Auge im Feld, oder Alt+F8, zeigt ihn) und klicken
+  Sie auf <span class="ui">Prüfen und speichern</span>: Der Schlüssel wird geprüft (kein Aufruf
+  eines Modells, keine Kosten) und nur wenn er gültig ist, in der
+  Windows-Anmeldeinformationsverwaltung abgelegt (<code>KiCadGen/OpenRouter</code>,
+  <code>KiCadGen/DeepSeek</code>). Steht der verwendete Schlüssel in einer
+  <code>.env</code>-Datei, prüft <span class="ui">In Windows verschieben</span> ihn, speichert ihn
+  in der Anmeldeinformationsverwaltung und fragt, ob nur seine Zeile aus der Datei entfernt werden soll.
+  <span class="ui">Entfernen</span> löscht nur den Eintrag der Anmeldeinformationsverwaltung. Die Datei <code>.env</code> im Ordner
   <code>%LOCALAPPDATA%\KiCadGen</code> (Zeilen <code>OPENROUTER_API_KEY=sk-or-...</code>
   und/oder <code>DEEPSEEK_API_KEY=...</code>) bleibt gültig; ein mit
   „KI-Konto...“ gespeicherter Schlüssel hat Vorrang vor dem aus der Datei. Fehlt der
@@ -247,11 +250,21 @@ um die übrigen Einstellungen zu sehen oder zu ändern:</p>
     daher wird sie nur geprüft, wenn Sie
     <span class="ui">Kompatibilität prüfen</span> klicken. Fehlt die Datei oder ist sie nicht
     kompatibel, hält die Analyse an, bevor Kosten entstehen.</li>
-  <li><span class="ui">KI-Modell</span>: das eine Modell, das für Dokumente,
+  <li><span class="ui">KI-Modell (diese Sitzung)</span>: das eine Modell, das für Dokumente,
   Fotos und Prüfung verwendet wird. Die Schaltfläche daneben wählt ein anderes Modell (filterbar nach
   Kosten, Quelle OpenRouter oder DeepSeek) <em>nur für diese Sitzung</em>;
   den Standard und seine Quelle legen Sie unter <span class="ui">Konfiguration →
-  Allgemeine KI-Standards …</span> fest, die Prompts je Typ unter <span class="ui">Konfiguration →
+  KI-Modell...</span> fest. Dasselbe Fenster enthält im Abschnitt <span class="ui">Andere Modelle für einzelne
+  Schritte</span> (beim Öffnen geschlossen, der Titel zählt die Schritte mit eigenem Modell)
+  eine Tabelle mit dem Modell
+  jedes Analyseschritts (Dokumentlesung, Padpositionen, Gehäusemaße, Inventar
+  und Ausschnitte des Fotos, Beschriftungen, Anschlüsse, Pin-Typen): Jeder
+  Schritt folgt dem einzigen Modell, bis <span class="ui">Ändern…</span> ihm
+  ein eigenes zuweist; <span class="ui">Einziges verwenden</span> setzt ihn auf das
+  einzige Modell zurück und <span class="ui">Standardschritte wiederherstellen</span>
+  setzt nur die Tabelle auf die ursprüngliche Wahl zurück, ohne das einzige Modell
+  zu ändern; das Sitzungsmodell ersetzt nur das einzige Modell.
+  Alle Prompts (allgemein und je Typ) bearbeiten Sie unter <span class="ui">Konfiguration →
   KI-Typen und -Profile verwalten …</span>.</li>
 </ul>
 

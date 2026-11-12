@@ -288,7 +288,8 @@ def _attachment_decision(body, box, stated):
     return record
 
 
-def observe_terminals(photo_png, components, model, call, log, cache_dir=None, system_prompt=None):
+def observe_terminals(photo_png, components, model, call, log, cache_dir=None, system_prompt=None,
+                      step_models=None):
     """@brief Enrich fixed components independently; missing evidence retains envelopes.
 
     @param photo_png Encoded PNG bytes of the calibrated board photo.
@@ -299,6 +300,10 @@ def observe_terminals(photo_png, components, model, call, log, cache_dir=None, s
     @param log Callable receiving one progress line at a time.
     @param cache_dir Directory of the response cache, or None for no cache.
     @param system_prompt Optional system prompt replacing the module PROMPT.
+    @param step_models The model of every analysis step (prompt_models.step_models),
+        or None (`model`, the behaviour before 2026-11-12). The step 'terminal_prompt'
+        uses its own model when one is chosen and usable, resolved before any
+        crop is sent, so it keys the cache (photo_grounding.cached_call).
     @return A deep copy of ``components`` in which each observed body gained a
         ``terminal_geometry`` dict (coordinate_frame ``target_image_v2``);
         envelopes and every other field are unchanged.
@@ -310,6 +315,9 @@ def observe_terminals(photo_png, components, model, call, log, cache_dir=None, s
     import numpy as np
     from .photo_grounding import cached_call
     from .photo_inventory import image_block
+    from .prompt_models import usable_model
+    # The step's own model, before the cache key and the first request.
+    model = usable_model('terminal_prompt', step_models, model, log)
     image = cv2.imdecode(np.frombuffer(photo_png, np.uint8), cv2.IMREAD_COLOR)
     if image is None:
         raise ValueError(tx("foto terminali non leggibile"))

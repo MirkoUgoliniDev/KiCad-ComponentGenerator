@@ -290,20 +290,22 @@ def test_a_fit_carries_the_stretch_it_shows():
 #: OLD digest to its superseded set (prompt_catalog.SUPERSEDED_DIGESTS, or the
 #: owning module's set; component_types.SUPERSEDED_INSTRUCTION_DIGESTS for a
 #: type), THEN update the digest here.
+#: 2026-11-12: every Italian default translated to English (prompts in one
+#: language, user decision); each old digest is registered as a former default.
 PINNED_DEFAULT_DIGESTS = {
-    "system_prompt": "b36d2b0ce7572f3e65c599d2a3336420f773bb444200e914b2a945048b602dbe",
-    "system_prompt_single": "f583c8284cfd15465458c77c2e08677adf9a1e55b930de3b3b36dd0bb43fa0ae",
-    "numbering_prompt": "96eb92c3c0237c138a5a4f64b2784636d338392f1b1d5c2be3861a0d2e26cb25",
-    "pad_positions_prompt": "66d8c5031f37678716871cce7dabd2ec9b7c35268ba3bcd2493feb805fd42f43",
-    "body_dimensions_prompt": "48186de1fadf1d61a85eb397a6eeb0a18f16f6755564f89db025cd8668d62abe",
+    "system_prompt": "57abf7a6024746011314768b5f9dde6af2c4eaecebd89144c70b5ebd4da6cef2",
+    "system_prompt_single": "bf708c59329d60d496b67f1a0c82d7651c9c59a3c0c3ba658e00edbd7dc4aca5",
+    "numbering_prompt": "f06548f8dc636b32d64cc92235e44d5ad0315030132eb71fb0d8f44a6ad35e5a",
+    "pad_positions_prompt": "e565032585e69d85129d3b8ff1eee72fe54c0d2be273eb8c99106a14f14b504a",
+    "body_dimensions_prompt": "ee5bbe4bb854f6a5c0f3d6a790d84ab8e4963813d74de67d6eed77a5a433354b",
     "contact_style_prompt": "ea0e1707ab43a1b89b6bcb5082e17cba38713f4b94dec19d67d5ec8d2482ffdd",
-    "role_prompt_pinout": "2a1aef67340f53bc0918b47df13187af9e2ed0ab1f4cab7df10cd410bb49e620",
-    "role_prompt_top": "32bb5dfd41bad33182947e263180ee54848810e56e394746352f39d9851e89ed",
-    "role_prompt_hires": "449089d29e64d3f3d4d38770fef09922fe14940fc032c397ddd48d6b17a4b342",
-    "role_prompt_land_pattern": "f242b42508b07d82d369087a0e22abe6bfd4a1bcbee00c6f561a0dbccb794649",
-    "role_prompt_side_view": "775c78a07eaf45299036b8ae20345bece4690fa565d3513f939246e2d1dcea88",
-    "role_prompt_datasheet": "cb0f333eb10c3e5ad24a51caad148e1e49b3aa75d1f14fcbdcf6f13112f678bc",
-    "pin_type_prompt": "d896ef4b07b6c8c11c1733d4f275c09f3b9bf3bb4b761c1f4205fa7a9634edfb",
+    "role_prompt_pinout": "3bc308855fd9d35e3253ef84b9aa7f7dde85006ac83bbdbd4498a748f5f71e98",
+    "role_prompt_top": "9040a4a941513fdd8c16109e418bc964cb76f6ecba8f5d8b2ecad57c1dec4182",
+    "role_prompt_hires": "e5029c4fffe1c2182f001c2e2ba63400ee7e1d27b7ad135582e511f55a1c54b7",
+    "role_prompt_land_pattern": "57b50af37532d38d9cdd9a5e00539e2f3b095f13f6ff03e773118663e33449eb",
+    "role_prompt_side_view": "32df70b7e418af5ad0a6fca211d5aeb43231859051d5ee3f7b63d9ca23c664a0",
+    "role_prompt_datasheet": "07b5c7262dd7b0586aea8b46cb131db71e89dd6834e8152c226265aeec403ef7",
+    "pin_type_prompt": "64cce1f386941e9a583a1d5d76d0afe91369c6ada27400304ea631a52628da07",
     "grounding_prompt": "94054f8d3c319bf2976bbd042cfd094d29e1672959fa9e5c26d21ac213ac0244",
     "mechanical_evidence_prompt": "e263114e5bf1aff8c5a2e5cc30b99d5df89c9d3779c2bfc40476608a540a0862",
     "image_instructions": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -315,10 +317,10 @@ PINNED_DEFAULT_DIGESTS = {
     "inventory_enumerate_empty_prompt": "adcbdf10779234138233709679afc11e99140b97cbbe942336bf33aeaef9bbf8",
     "marking_prompt": "ce724a8731e650122668092a30438ed686afefb1ff90701767e4bf72d9fdd9b7",
     "verification_prompt": "4c48ef66f734290c8932888c0ffe62d357c3328193c045be5eebdc6cd1b0173b",
-    "instructions:single_tht": "2c530c27fd10541e97f9d6ff0754d4451f5f7a54567491b0e17bc3e5c4e24c28",
-    "instructions:single_smd": "44ab2ff72c479a4ee66bf6f24c42e537fa29b14ba5d3e1c1c676010c35afa5ac",
-    "instructions:aggregate_tht": "b1feb1a399e1631eef001b5e43176ab6a654dd6b3ad93c650a8de46b08810591",
-    "instructions:aggregate_castellated": "f12d82a1b9f68517a7e0ab67be3d14bed2e948fbd335a0273ade6b1edce173fb",
+    "instructions:single_tht": "56e5dcf1c88270b8153428740c5ab43b59cd9041170d2aacbdc70235124c74b6",
+    "instructions:single_smd": "46f56d032e075a235aa1e18eb467262eb10f4f005c566a6bb5e9f87df64698bb",
+    "instructions:aggregate_tht": "26b997aefda8c650c25dd1c0cdea02aaa321ee77b7b4042adbd58c238d495226",
+    "instructions:aggregate_castellated": "301177746018b9e6fb4d362602426cc9341c2e5e49ba4a8c2c3a78bec7374e49",
 }
 
 

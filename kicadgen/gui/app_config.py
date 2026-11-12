@@ -60,8 +60,8 @@ def _prompt_hash(prompt: str) -> str:
 
 DEFAULTS = {
     "system_prompt": DEFAULT_SYSTEM_PROMPT,
-    # Default model of the AI extraction: an OpenRouter id, chosen from the
-    # "Modello e prompt di sistema LLM" (LLM model and system prompt) window.
+    # Single model of the AI analysis (a DeepSeek or OpenRouter id), chosen from the
+    # «Modello AI...» (AI model) window of the «Configurazione» menu.
     # A single extraction can use another one without touching this value.
     "model": DEFAULT_MODEL,
     "vision_model": DEFAULT_VISION_MODEL,

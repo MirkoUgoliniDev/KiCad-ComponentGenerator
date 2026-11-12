@@ -3,41 +3,66 @@
 PIANO-FIX item 2: a freshly installed user must reach the first analysis
 without editing any file. With a second provider (DeepSeek's direct API,
 HANDOFF 121) the window lists every provider on one row: where its key in use
-comes from (environment variable, Windows Credential Manager, `.env` file or
-none) and its current balance, read in the background with the providers'
+comes from (Windows Credential Manager, `.env` file, environment variable or
+missing) and its current balance, read in the background with the providers'
 free status endpoints (user, 2026-09-27: «elencare le varie chiavi presenti e
 la possibilità di editarle; mostrerei di lato anche il balance corrente»).
-Below the list, the key of the selected provider is pasted into a masked
-field, verified (no model call, no cost) and saved in the Windows Credential
-Manager (`services.credentials`), or removed from it.
+
+Layout approved by the user on 2026-11-12, after «troppo confusionaria» (too
+confusing): one intro line, the table «Servizio | Chiave | Saldo», then one
+titled panel for the selected service with, in this order, the warning about
+a key read from a `.env` file and its «Spostala in Windows» button, the
+«Nuova chiave» field with ONE «Verifica e salva» button, the link where a key
+is created, «Rimuovi» when a key is saved in Windows, and the result line.
 
 @note The key never reaches the log, a message box, a tooltip or the list.
     It lives in the password field until it is saved, then the field is
     cleared.
-@note Saving requires a successful verification of exactly the text in the
-    field. When the provider cannot judge the key (network down, timeout,
-    server error) saving is still possible, after an explicit confirmation;
-    a key that the provider refused (HTTP 401/403) cannot be saved.
-@note «Rimuovi chiave» only deletes the Credential Manager entry: keys in the
+@note «Verifica e salva» saves only what the provider accepted. When the
+    provider cannot judge the key (network down, timeout, server error) the
+    key is saved only after an explicit confirmation; a key that the provider
+    refused, or answered about without a verdict (HTTP 400/404/429), is not
+    saved. With the field empty the button checks the key already in use
+    (user, 2026-09-27) and saves nothing.
+@note «Rimuovi» only deletes the Credential Manager entry: keys in the
     environment or in a `.env` file are never touched, the row says where
     they are.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
+from html import escape
+from pathlib import Path
 from typing import Callable, Optional
+from urllib.parse import urlparse
 
 from PyQt6 import sip
 from PyQt6.QtCore import QThread, Qt, pyqtSignal
+from PyQt6.QtGui import QIcon, QKeySequence
 from PyQt6.QtWidgets import (
-    QAbstractItemView, QApplication, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout,
+    QAbstractItemView, QApplication, QDialog, QDialogButtonBox, QGroupBox, QHBoxLayout,
     QHeaderView, QLabel, QLineEdit, QMessageBox, QProgressBar, QPushButton, QTableWidget,
-    QTableWidgetItem,
-    QToolButton, QVBoxLayout, QWidget,
+    QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
-from ..services import credentials, openrouter, providers
+from ..services import credentials, dotenv_keys, openrouter, providers
 from ..services.messages import tx
+
+#: Folder of the window icons.
+_ASSETS = Path(__file__).parent / "assets"
+#: Keyboard shortcut of the eye that shows or masks the key (the Windows
+#: sign-in screen uses the same key to reveal a password).
+_SHOW_KEY_SHORTCUT = "Alt+F8"
+
+
+def _ICON_EYE() -> QIcon:  # noqa: N802 - reads like a constant at the call site
+    """The open eye: a click shows the key."""
+    return QIcon(str(_ASSETS / "eye.svg"))
+
+
+def _ICON_EYE_OFF() -> QIcon:  # noqa: N802 - reads like a constant at the call site
+    """The crossed eye: a click masks the key again."""
+    return QIcon(str(_ASSETS / "eye-off.svg"))
 
 
 class _KeyCheckWorker(QThread):
@@ -116,6 +141,11 @@ class ProviderAccount:
     rejected: Callable
 
 
+#: The variable each provider's key has in a `.env` file.
+_KEY_ENV = {providers.PROVIDER_OPENROUTER: openrouter.API_KEY_ENV,
+            providers.PROVIDER_DEEPSEEK: providers.DEEPSEEK_KEY_ENV}
+
+
 def default_accounts() -> list:
     """@brief The providers «Account AI» lists, in the pickers' order.
 
@@ -181,7 +211,7 @@ class AiAccountDialog(QDialog):
                  source: Optional[Callable] = None,
                  accounts: Optional[list] = None,
                  read_balances: bool = False):
-        """@brief Build the list of providers and the editor of the selected one.
+        """@brief Build the list of providers and the panel of the selected one.
 
         @param parent Parent window; its `i18n` translates the texts.
         @param checker OpenRouter key checker (key -> CreditStatus, raises
@@ -207,7 +237,7 @@ class AiAccountDialog(QDialog):
         self._worker: Optional[_KeyCheckWorker] = None
         #: Running balance reads: worker -> (provider, generation). A result
         #: whose generation is older than the provider's latest request is
-        #: ignored: after «Salva» or «Rimuovi» a late read of the previous key
+        #: ignored: after a save or «Rimuovi» a late read of the previous key
         #: must not overwrite the row.
         self._balance_workers = {}
         self._balance_generation = {}
@@ -216,29 +246,38 @@ class AiAccountDialog(QDialog):
         self._verified_key: Optional[str] = None
         self._unverified_key: Optional[str] = None
         self._checking_key: Optional[str] = None
+        #: The running check of a pasted key was started by «Verifica e
+        #: salva»: its outcome saves the key (after a confirmation when the
+        #: provider could not judge it).
+        self._save_requested = False
         #: Whether the Credential Manager holds a key for the selected provider.
         self._stored = False
         #: Whether the selected provider has a key in use (any source).
         self._in_use = False
         #: The running check is of the key in use, not of a pasted one.
         self._checking_in_use = False
+        #: The running check is the key read from a .env file to move:
+        #: (key, file, variable name), or None.
+        self._moving: Optional[tuple] = None
+        #: Source of the selected provider's key (openrouter.ApiKeySource), or None.
+        self._source = None
 
         self.setWindowTitle(self._tr("Account AI"))
         self.setModal(True)
         self.setMinimumWidth(640)
         layout = QVBoxLayout(self)
+        # Same air as the other reworked dialogs (model_dialog, settings_dialog).
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(12)
 
         intro = QLabel(self._tr(
-            "Le chiavi API servono per le analisi con l'AI. Scegli il fornitore nell'elenco, "
-            "incolla la sua chiave e premi «Verifica»: la verifica legge il saldo e non "
-            "consuma credito. «Salva» la conserva nel Gestore credenziali di Windows del tuo "
-            "utente, non in un file."))
+            "Le chiavi dei servizi AI. Sono salvate in Windows, non nei file del progetto."))
         intro.setWordWrap(True)
         layout.addWidget(intro)
 
         self.table = QTableWidget(len(rows), 3)
         self.table.setObjectName("ai_accounts")
-        self.table.setHorizontalHeaderLabels([self._tr("Fornitore"), self._tr("Chiave in uso"),
+        self.table.setHorizontalHeaderLabels([self._tr("Servizio"), self._tr("Chiave"),
                                               self._tr("Saldo")])
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -249,73 +288,101 @@ class AiAccountDialog(QDialog):
         header.setSectionResizeMode(_COLUMN_SOURCE, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(_COLUMN_BALANCE, QHeaderView.ResizeMode.ResizeToContents)
         self.table.setToolTip(self._tr(
-            "Un fornitore per riga: da dove arriva la sua chiave (mai mostrata) e il saldo "
-            "attuale, letto gratis. Selezionane uno per modificarne la chiave."))
+            "Un servizio per riga: dove si trova la sua chiave (mai mostrata) e il saldo "
+            "attuale, letto gratis. Selezionane uno per gestirne la chiave."))
         layout.addWidget(self.table)
 
-        self.label_provider = QLabel()
-        self.label_provider.setObjectName("ai_key_provider")
-        self.label_provider.setWordWrap(True)
-        self.label_provider.setOpenExternalLinks(True)
-        layout.addWidget(self.label_provider)
+        # The panel of the selected service: its title is the service name.
+        self.panel = QGroupBox()
+        self.panel.setObjectName("ai_account_panel")
+        panel = QVBoxLayout(self.panel)
+        panel.setContentsMargins(14, 14, 14, 12)
+        panel.setSpacing(10)
 
+        # Where the key in use is, when that needs attention: a .env file
+        # (with the one-click move, user 2026-11-12: «non puoi mettere un
+        # pulsante per trasferire la key?»), an environment variable that wins
+        # over a saved key, no key, or an unreadable Credential Manager.
+        source_row = QHBoxLayout()
+        source_row.setSpacing(10)
         self.label_source = QLabel()
         self.label_source.setObjectName("ai_key_source")
         self.label_source.setTextFormat(Qt.TextFormat.PlainText)
         self.label_source.setWordWrap(True)
-        self.label_source.setToolTip(self._tr(
-            "Da dove arriva la chiave usata adesso dalle analisi. La chiave non viene "
-            "mai mostrata."))
-        layout.addWidget(self.label_source)
+        source_row.addWidget(self.label_source, 1)
+        self.btn_move = QPushButton(self._tr("Spostala in Windows"))
+        self.btn_move.setObjectName("ai_key_move")
+        self.btn_move.setToolTip(self._tr(
+            "Legge la chiave dal file .env, la verifica (senza consumare credito), la salva "
+            "nel Gestore credenziali di Windows e poi chiede se toglierla dal file."))
+        self.btn_move.clicked.connect(self.move_key)
+        source_row.addWidget(self.btn_move, 0, Qt.AlignmentFlag.AlignTop)
+        panel.addLayout(source_row)
 
-        form = QFormLayout()
-        row = QWidget()
-        row_layout = QHBoxLayout(row)
-        row_layout.setContentsMargins(0, 0, 0, 0)
+        key_row = QHBoxLayout()
+        key_row.setSpacing(10)
+        key_label = QLabel(self._tr("Nuova chiave:"))
+        key_row.addWidget(key_label)
         self.field_key = QLineEdit()
         self.field_key.setEchoMode(QLineEdit.EchoMode.Password)
         self.field_key.setToolTip(self._tr(
-            "Chiave API del fornitore selezionato. Resta nascosta finché non premi «Mostra»."))
+            "Chiave API del fornitore selezionato. Resta nascosta finché non premi l'occhio."))
         self.field_key.textChanged.connect(self._on_key_edited)
-        self.field_key.setAccessibleName(self._tr("Chiave API:"))
-        row_layout.addWidget(self.field_key, 1)
-        self.btn_show = QToolButton()
-        self.btn_show.setCheckable(True)
-        self.btn_show.setText(self._tr("Mostra"))
-        self.btn_show.setToolTip(self._tr("Mostra o nasconde i caratteri della chiave."))
-        self.btn_show.toggled.connect(self._on_show_toggled)
-        row_layout.addWidget(self.btn_show)
-        form.addRow(self._tr("Chiave API:"), row)
-        layout.addLayout(form)
+        self.field_key.setAccessibleName(self._tr("Nuova chiave:"))
+        key_label.setBuddy(self.field_key)
+        key_row.addWidget(self.field_key, 1)
+        # The classic eye inside the field (user, 2026-11-12) instead of a
+        # «Mostra» (show) button beside it: open eye = show, crossed eye = hide.
+        self.action_show = self.field_key.addAction(
+            _ICON_EYE(), QLineEdit.ActionPosition.TrailingPosition)
+        self.action_show.setCheckable(True)
+        # The eye is not reachable with Tab: Alt+F8 toggles it, the same key
+        # that shows the password on the Windows sign-in screen.
+        self.action_show.setShortcut(QKeySequence(_SHOW_KEY_SHORTCUT))
+        self.action_show.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
+        self.field_key.setAccessibleDescription(self._tr(
+            "Alt+F8 mostra o nasconde la chiave."))
+        self.action_show.toggled.connect(self._on_show_toggled)
+        self._on_show_toggled(False)
+        # ONE button: verify, then save what the provider accepted.
+        self.btn_save = QPushButton(self._tr("Verifica e salva"))
+        self.btn_save.setObjectName("ai_key_save")
+        self.btn_save.setToolTip(self._tr(
+            "Verifica la chiave incollata leggendo il saldo (nessun modello chiamato, nessun "
+            "credito consumato) e, se è valida, la salva nel Gestore credenziali di Windows. "
+            "Se il servizio non risponde chiede conferma prima di salvarla. Con il campo "
+            "vuoto verifica la chiave già in uso."))
+        self.btn_save.clicked.connect(self.verify_and_save)
+        key_row.addWidget(self.btn_save)
+        panel.addLayout(key_row)
 
+        link_row = QHBoxLayout()
+        link_row.setSpacing(10)
+        self.label_keys_link = QLabel()
+        self.label_keys_link.setObjectName("ai_keys_link")
+        self.label_keys_link.setTextFormat(Qt.TextFormat.RichText)
+        self.label_keys_link.setOpenExternalLinks(True)
+        link_row.addWidget(self.label_keys_link)
+        # The stretch keeps «Rimuovi» on the right when the link is hidden.
+        link_row.addStretch(1)
+        self.btn_remove = QPushButton(self._tr("Rimuovi"))
+        self.btn_remove.setObjectName("ai_key_remove")
+        self.btn_remove.setToolTip(self._tr(
+            "Cancella la chiave salvata nel Gestore credenziali di Windows. Non tocca "
+            "il file .env né le variabili d'ambiente."))
+        self.btn_remove.clicked.connect(self.remove_key)
+        link_row.addWidget(self.btn_remove)
+        panel.addLayout(link_row)
+
+        result_row = QHBoxLayout()
+        result_row.setSpacing(10)
         self.label_result = QLabel()
         self.label_result.setObjectName("ai_key_result")
         # Plain text: a provider's error message must never render as markup.
         self.label_result.setTextFormat(Qt.TextFormat.PlainText)
         self.label_result.setWordWrap(True)
         self.label_result.setToolTip(self._tr("Esito dell'ultima verifica o operazione."))
-        layout.addWidget(self.label_result)
-
-        actions = QHBoxLayout()
-        self.btn_verify = QPushButton(self._tr("Verifica"))
-        self.btn_verify.setToolTip(self._tr(
-            "Controlla la chiave con il fornitore leggendo il saldo: nessun modello viene "
-            "chiamato e non si consuma credito. Con il campo vuoto controlla la chiave già "
-            "in uso."))
-        self.btn_verify.clicked.connect(self.start_check)
-        self.btn_save = QPushButton(self._tr("Salva"))
-        self.btn_save.setToolTip(self._tr(
-            "Salva la chiave nel Gestore credenziali di Windows. Si attiva dopo una "
-            "verifica riuscita, oppure con conferma se il fornitore non era raggiungibile."))
-        self.btn_save.clicked.connect(self.save_key)
-        self.btn_remove = QPushButton(self._tr("Rimuovi chiave"))
-        self.btn_remove.setToolTip(self._tr(
-            "Cancella la chiave salvata nel Gestore credenziali di Windows. Non tocca "
-            "il file .env né le variabili d'ambiente."))
-        self.btn_remove.clicked.connect(self.remove_key)
-        for button in (self.btn_verify, self.btn_save, self.btn_remove):
-            actions.addWidget(button)
-        actions.addStretch(1)
+        result_row.addWidget(self.label_result, 1)
         # Activity indicator (user, 27/09:
         # «fai partire un loader per far capire che fai la chiamata»
         # (start a loader to show that you are making the call)):
@@ -328,8 +395,9 @@ class AiAccountDialog(QDialog):
         self.busy.setFixedWidth(140)
         self.busy.setToolTip(self._tr("Chiamata al fornitore in corso (gratuita)."))
         self.busy.setVisible(False)
-        actions.addWidget(self.busy)
-        layout.addLayout(actions)
+        result_row.addWidget(self.busy, 0, Qt.AlignmentFlag.AlignTop)
+        panel.addLayout(result_row)
+        layout.addWidget(self.panel)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, self)
         close = buttons.button(QDialogButtonBox.StandardButton.Close)
@@ -358,9 +426,11 @@ class AiAccountDialog(QDialog):
         return self.i18n.text(source) if self.i18n is not None else source
 
     def _label(self, provider: str) -> str:
+        """The provider's display name in the interface language."""
         return self._tr(providers.PROVIDER_LABELS.get(provider, provider))
 
     def _short(self) -> str:
+        """The selected provider's short name, used inside sentences."""
         return providers.PROVIDER_SHORT_LABELS.get(self._account.provider,
                                                    self._account.provider)
 
@@ -372,52 +442,58 @@ class AiAccountDialog(QDialog):
             return openrouter.ApiKeySource(openrouter.KEY_SOURCE_NONE,
                                            credential_error=str(exc))
 
-    def _short_source(self, source) -> str:
-        """One line for the list: where the key comes from, never the key."""
+    def _short_source(self, source) -> tuple:
+        """The «Chiave» cell for `source`: (text, tooltip), never the key.
+
+        The cell stays short; the file path or the variable name, which can be
+        long, goes in the tooltip.
+        """
         kind = source.kind
         if kind == openrouter.KEY_SOURCE_ENVIRONMENT:
-            return tx("Variabile d'ambiente {name}", name=source.location)
+            return (self._tr("⚠ variabile d'ambiente"),
+                    tx("Chiave letta dalla variabile d'ambiente {name}.", name=source.location))
         if kind == openrouter.KEY_SOURCE_CREDENTIAL_MANAGER:
-            return self._tr("Gestore credenziali di Windows")
+            return (self._tr("✓ salvata in Windows"),
+                    self._tr("Chiave salvata nel Gestore credenziali di Windows."))
         if kind == openrouter.KEY_SOURCE_DOTENV:
-            return tx("File {path}", path=source.location)
-        return self._tr("Non configurata")
+            return (self._tr("⚠ nel file .env"),
+                    tx("Chiave letta dal file {path}.", path=source.location))
+        return (self._tr("✗ mancante"),
+                self._tr("Nessuna chiave configurata: le analisi con l'AI non partono."))
 
     def refresh_source(self) -> None:
         """@brief Say where each provider's key comes from, never the key itself.
 
         @note Reads the same sources as the providers' key lookups, in the
-            same order; no network. Also decides whether «Rimuovi chiave»
-            applies to the selected provider.
+            same order; no network. Also decides which actions of the panel
+            apply to the selected provider.
         """
         for index, account in enumerate(self._accounts):
             source = self._probe(account)
             item = self.table.item(index, _COLUMN_SOURCE)
-            item.setText(self._short_source(source))
-            item.setToolTip(item.text())
-            # A long .env path is elided in the cell; the tooltip keeps it whole.
+            text, tip = self._short_source(source)
+            item.setText(text)
+            item.setToolTip(tip)
             if account is self._account:
                 self._describe_source(source)
         self._update_buttons()
 
     def _describe_source(self, source) -> None:
-        """The detailed source lines of the selected provider."""
+        """The attention line of the selected provider: empty when nothing needs saying."""
         self._stored = bool(source.stored)
         self._in_use = source.kind != openrouter.KEY_SOURCE_NONE
+        self._source = source
         kind = source.kind
+        lines = []
+        tip = ""
         if kind == openrouter.KEY_SOURCE_ENVIRONMENT:
-            lines = [tx("Chiave in uso: variabile d'ambiente {name}.", name=source.location)]
-            if source.stored:
-                lines.append(self._tr(
-                    "La chiave salvata nel Gestore credenziali resta inutilizzata finché la "
-                    "variabile d'ambiente è impostata."))
-        elif kind == openrouter.KEY_SOURCE_CREDENTIAL_MANAGER:
-            lines = [self._tr("Chiave in uso: Gestore credenziali di Windows.")]
+            lines.append(tx("La variabile d'ambiente {name} ha la precedenza su una chiave "
+                            "salvata qui.", name=source.location))
         elif kind == openrouter.KEY_SOURCE_DOTENV:
-            lines = [tx("Chiave in uso: file {path}.", path=source.location),
-                     self._tr("Una chiave salvata qui avrà la precedenza sul file.")]
-        else:
-            lines = [self._tr("Nessuna chiave configurata: le analisi con l'AI non partono.")]
+            lines.append(self._tr("⚠ La chiave è scritta in un file .env."))
+            tip = tx("Chiave letta dal file {path}.", path=source.location)
+        elif kind == openrouter.KEY_SOURCE_NONE:
+            lines.append(self._tr("Nessuna chiave configurata: le analisi con l'AI non partono."))
         if source.credential_error:
             lines.append(tx("Gestore credenziali di Windows non leggibile: {error}",
                             error=source.credential_error))
@@ -426,18 +502,26 @@ class AiAccountDialog(QDialog):
                 "Il Gestore credenziali di Windows non è disponibile su questo sistema: "
                 "usa la variabile d'ambiente o il file .env."))
         self.label_source.setText("\n".join(lines))
+        self.label_source.setToolTip(tip)
+        self.label_source.setVisible(bool(lines))
+        # «Non hai una chiave? Creala su …» ("No key? Create one at …") only for a
+        # provider with no key at all (user, 2026-11-12).
+        self.label_keys_link.setVisible(kind == openrouter.KEY_SOURCE_NONE)
 
     def _show_account(self) -> None:
-        """Point the editor at the selected provider."""
+        """Point the panel at the selected provider."""
         account = self._account
-        self.label_provider.setText(tx(
-            "<b>{provider}</b> — crea la chiave su <a href=\"{url}\">{url}</a>",
-            provider=self._label(account.provider), url=account.keys_url))
+        self.panel.setTitle(self._label(account.provider))
+        host = urlparse(account.keys_url).netloc or account.keys_url
+        link = f'<a href="{escape(account.keys_url, quote=True)}">{escape(host)}</a>'
+        self.label_keys_link.setText(tx("Non hai una chiave? Creala su {link}", link=link))
+        self.label_keys_link.setToolTip(account.keys_url)
         self.field_key.setPlaceholderText(tx("Incolla qui la chiave {provider}",
                                              provider=self._short()))
         self.refresh_source()
 
     def _set_result(self, text: str) -> None:
+        """Write the result line (plain text)."""
         self.label_result.setText(text)
 
     def _fit_table(self) -> None:
@@ -531,9 +615,11 @@ class AiAccountDialog(QDialog):
     # ── State ──────────────────────────────────────────────────────────
 
     def _key(self) -> str:
+        """The pasted key, without surrounding blanks."""
         return self.field_key.text().strip()
 
     def _checking(self) -> bool:
+        """Whether a key check (pasted, in use or moving) is running."""
         return self._worker is not None
 
     def _update_busy(self) -> None:
@@ -541,15 +627,21 @@ class AiAccountDialog(QDialog):
         self.busy.setVisible(self._alive() and (self._checking() or bool(self._balance_workers)))
 
     def _update_buttons(self) -> None:
-        """Enable each action only when it can do something sensible now."""
+        """Enable or show each action only when it can do something sensible now."""
         self._update_busy()
         supported = credentials.is_supported()
         key = self._key()
         checking = self._checking()
-        self.btn_verify.setEnabled((bool(key) or self._in_use) and not checking)
-        self.btn_save.setEnabled(supported and bool(key) and not checking
-                                 and key in (self._verified_key, self._unverified_key))
+        # A pasted key needs the Credential Manager to be saved; with the
+        # field empty the button checks the key in use, if there is one.
+        self.btn_save.setEnabled(not checking and ((bool(key) and supported)
+                                                   or (not key and self._in_use)))
+        self.btn_remove.setVisible(supported and self._stored)
         self.btn_remove.setEnabled(supported and not checking and self._stored)
+        from_file = (self._source is not None
+                     and self._source.kind == openrouter.KEY_SOURCE_DOTENV)
+        self.btn_move.setVisible(supported and from_file)
+        self.btn_move.setEnabled(not checking)
 
     def _on_key_edited(self, _text: str) -> None:
         """A different key voids the previous verification."""
@@ -560,14 +652,30 @@ class AiAccountDialog(QDialog):
         self._update_buttons()
 
     def _on_show_toggled(self, shown: bool) -> None:
+        """Show or mask the key; the eye icon and its tooltip say what a click will do."""
         self.field_key.setEchoMode(QLineEdit.EchoMode.Normal if shown
                                    else QLineEdit.EchoMode.Password)
-        self.btn_show.setText(self._tr("Nascondi") if shown else self._tr("Mostra"))
+        self.action_show.setIcon(_ICON_EYE_OFF() if shown else _ICON_EYE())
+        text = self._tr("Nascondi la chiave") if shown else self._tr("Mostra la chiave")
+        # The text names the action for screen readers; the tooltip adds the key.
+        self.action_show.setText(text)
+        shortcut = self.action_show.shortcut().toString(QKeySequence.SequenceFormat.NativeText)
+        self.action_show.setToolTip(f"{text} ({shortcut})" if shortcut else text)
 
     # ── Verification ───────────────────────────────────────────────────
 
+    def verify_and_save(self) -> None:
+        """@brief «Verifica e salva»: verify the pasted key and save it if the provider accepts it.
+
+        @note With the field empty the key already in use is checked and
+            nothing is saved. A key that the provider could not judge is
+            saved only after the same confirmation as `save_key`; a refused
+            key is never saved and the reason stays in the result line.
+        """
+        self._start_check(save=bool(self._key()))
+
     def start_check(self) -> None:
-        """@brief Verify a key in the background (free: no model call).
+        """@brief Verify a key in the background (free: no model call), without saving it.
 
         @note With a key in the field, that key is checked. With the field
             empty, the key already in use for the selected provider is
@@ -575,6 +683,10 @@ class AiAccountDialog(QDialog):
             updates the window only if it is still open and, for a pasted
             key, the field still holds the key that was checked.
         """
+        self._start_check(save=False)
+
+    def _start_check(self, save: bool) -> None:
+        """Start the check of the pasted key (saving it afterwards when `save`) or of the key in use."""
         key = self._key()
         if self._closed or self._checking():
             return
@@ -592,6 +704,7 @@ class AiAccountDialog(QDialog):
             return
         self._verified_key = self._unverified_key = None
         self._checking_key = key
+        self._save_requested = save
         self._set_result(self._tr("Verifica in corso…"))
         # Owned by QApplication, not by this window: see _KeyCheckWorker.
         worker = _KeyCheckWorker(key, self._account.checker, parent=QApplication.instance())
@@ -602,9 +715,10 @@ class AiAccountDialog(QDialog):
         worker.start()
 
     def _start_in_use_check(self) -> None:
-        """Check the key in use by reading its balance; never enables «Salva»."""
+        """Check the key in use by reading its balance; never saves anything."""
         self._verified_key = self._unverified_key = None
         self._checking_key = None
+        self._save_requested = False
         self._checking_in_use = True
         self._set_result(self._tr("Verifica della chiave in uso…"))
         reader = self._account.balance
@@ -633,20 +747,26 @@ class AiAccountDialog(QDialog):
         self._update_buttons()
 
     def _alive(self) -> bool:
+        """Whether the window is still open and its C++ object exists."""
         return not self._closed and not sip.isdeleted(self)
 
     def _on_checked(self, status, error) -> None:
-        """Show the balance, or why the key could not be verified."""
+        """Show the balance, or why the key could not be verified; save it when asked."""
         if not self._alive():
             return
         if self._checking_in_use:
             self._checking_in_use = False
             self._on_in_use_checked(status, error)
             return
+        if self._moving is not None:
+            moving, self._moving = self._moving, None
+            self._finish_move(moving, status, error)
+            return
         key, self._checking_key = self._checking_key, None
+        save, self._save_requested = self._save_requested, False
         if key != self._key():
             # The field changed while the check ran: its outcome is about a
-            # key no longer on screen, so it neither shows nor enables Save.
+            # key no longer on screen, so it neither shows nor saves.
             self._set_result("")
             self._update_buttons()
             return
@@ -669,16 +789,24 @@ class AiAccountDialog(QDialog):
                       error=error)
         elif isinstance(error, openrouter.OpenRouterError):
             # Not judged (network down, timeout, server error): not a refusal.
-            if key:
-                self._unverified_key = key
-            text = tx("Chiave non verificabile adesso: {error}. Puoi salvarla comunque, "
-                      "dopo una conferma.", error=error)
+            self._unverified_key = key
+            text = tx("Chiave non verificabile adesso: {error}.", error=error)
         else:
             text = tx("Errore inatteso: {exc}", exc=error)
         self._set_result(text)
         self._update_buttons()
+        if not save:
+            return
+        if key not in (self._verified_key, self._unverified_key):
+            self._set_result(text + " " + self._tr("Chiave non salvata."))
+            return
+        outcome = self._store_pasted(key, text + " " + self._tr("Salvata in Windows."))
+        if outcome is None:
+            # The user declined to save a key the provider could not judge.
+            self._set_result(text + " " + self._tr("Chiave non salvata."))
 
     def _on_worker_finished(self) -> None:
+        """The check thread ended: the buttons can act again."""
         self._worker = None
         if self._alive():
             self._update_buttons()
@@ -688,6 +816,8 @@ class AiAccountDialog(QDialog):
         worker, self._worker = self._worker, None
         self._checking_key = None
         self._checking_in_use = False
+        self._save_requested = False
+        self._moving = None
         if worker is None or sip.isdeleted(worker):
             return
         for signal, slot in ((worker.checked, self._on_checked),
@@ -706,20 +836,32 @@ class AiAccountDialog(QDialog):
         @note Without a successful verification the key is saved only if the
             provider could not judge it and the user confirms. On success the
             field is cleared, the credit cache is invalidated, the balances
-            are read again and `key_changed` is emitted.
+            are read again and `key_changed` is emitted. «Verifica e salva»
+            reaches the same store through `verify_and_save`.
         """
         key = self._key()
         if not key or self._checking() or key not in (self._verified_key, self._unverified_key):
             return False
-        if providers.key_text_problem(key):
-            return False
+        return self._store_pasted(
+            key, self._tr("Chiave salvata nel Gestore credenziali di Windows.")) is True
+
+    def _store_pasted(self, key: str, message: str) -> Optional[bool]:
+        """Write `key` to the Credential Manager, asking first when it was not judged.
+
+        @return True when saved (the result line shows `message`), False when
+            the store failed (the result line says why), None when the user
+            declined, the system has no Credential Manager or the key cannot
+            be a key.
+        """
+        if not credentials.is_supported() or providers.key_text_problem(key):
+            return None
         if key != self._verified_key:
             answer = QMessageBox.question(
                 self, self._tr("Account AI"),
                 tx("{provider} non ha potuto verificare la chiave. Salvarla comunque nel "
                    "Gestore credenziali di Windows?", provider=self._short()))
             if answer != QMessageBox.StandardButton.Yes:
-                return False
+                return None
         try:
             credentials.write_secret(self._account.target, key)
         except credentials.CredentialError as exc:
@@ -727,8 +869,97 @@ class AiAccountDialog(QDialog):
             return False
         self._verified_key = self._unverified_key = None
         self.field_key.clear()
-        self._key_changed(self._tr("Chiave salvata nel Gestore credenziali di Windows."))
+        self._key_changed(message)
         return True
+
+    def move_key(self) -> bool:
+        """@brief Start moving the key of a .env file into the Credential Manager: verify it first.
+
+        @return True when the verification started.
+        @note The key is never shown: it is read from the file the key in
+            use comes from, verified like a pasted key (balance, no credit),
+            and saved by `_finish_move` only if the provider accepts it.
+        """
+        source = self._source
+        if (self._closed or self._checking() or source is None
+                or source.kind != openrouter.KEY_SOURCE_DOTENV or not credentials.is_supported()):
+            return False
+        name = _KEY_ENV.get(self._account.provider)
+        key = dotenv_keys.read_key(source.location, name) if name else ""
+        if not key or providers.key_text_problem(key):
+            self._set_result(tx("Nessuna chiave {provider} leggibile nel file {path}.",
+                                provider=self._short(), path=source.location))
+            return False
+        self._moving = (key, source.location, name)
+        self._set_result(self._tr("Verifica della chiave del file .env…"))
+        # Owned by QApplication, not by this window: see _KeyCheckWorker.
+        worker = _KeyCheckWorker(key, self._account.checker, parent=QApplication.instance())
+        worker.checked.connect(self._on_checked)
+        worker.finished.connect(self._on_worker_finished)
+        self._worker = worker
+        self._update_buttons()
+        worker.start()
+        return True
+
+    def _finish_move(self, moving, status, error) -> None:
+        """Save the verified key of the .env file, then offer to remove it from the file."""
+        key, path, name = moving
+        provider = self._short()
+        if error is not None:
+            if isinstance(error, openrouter.OpenRouterError) and self._account.rejected(error):
+                text = tx("Chiave del file rifiutata da {provider}: non spostata. {error}",
+                          provider=provider, error=error)
+            else:
+                text = tx("Chiave del file non verificabile adesso: non spostata. {error}",
+                          error=error)
+            self._set_result(text)
+            self._update_buttons()
+            return
+        try:
+            credentials.write_secret(self._account.target, key)
+        except credentials.CredentialError as exc:
+            self._set_result(str(exc))
+            self._update_buttons()
+            return
+        message = self._tr("Chiave spostata nel Gestore credenziali di Windows.")
+        # An editor holding the file open would write the key back on its
+        # next save: the question says so before anything is removed.
+        answer = QMessageBox.question(
+            self, self._tr("Account AI"),
+            tx("Togliere la chiave anche dal file {path}? Verrà tolta solo la riga {name}; il "
+               "resto del file resta com'è. Se il file è aperto in un editor, ricaricalo "
+               "prima di salvarlo: altrimenti la chiave tornerebbe nel file.",
+               path=path, name=name))
+        if answer == QMessageBox.StandardButton.Yes:
+            message += " " + self._removal_outcome(path, name)
+        self._key_changed(message)
+
+    def _removal_outcome(self, path: str, name: str) -> str:
+        """Remove `name` from the .env file `path` and say exactly what happened.
+
+        Success is claimed only when the line was really removed; the other
+        `.env` files the program reads that still set `name` are named, since
+        the key would keep coming from them.
+        """
+        try:
+            outcome = dotenv_keys.remove_key_result(path, name)
+        except OSError as exc:
+            text = tx("Il file .env non è stato modificato: {error}", error=exc)
+        else:
+            if outcome == dotenv_keys.REMOVED:
+                text = self._tr("Riga tolta dal file .env.")
+            elif outcome == dotenv_keys.INDIRECT:
+                text = tx("Nel file .env la riga {name} rimanda a un'altra variabile con "
+                          "{syntax}: non è stato tolto nulla e la chiave resta in quella "
+                          "variabile.", name=name, syntax="«${…}»")
+            else:
+                text = tx("Nessuna riga {name} trovata nel file .env: non è stato tolto nulla "
+                          "e la chiave potrebbe essere ancora nel file.", name=name)
+        others = dotenv_keys.other_files_setting(name, path)
+        if others:
+            text += " " + tx("La chiave è ancora in questi file .env: {paths}",
+                             paths="; ".join(others))
+        return text
 
     def remove_key(self) -> bool:
         """@brief Delete the selected provider's key from the Credential Manager, after confirmation.
@@ -754,6 +985,7 @@ class AiAccountDialog(QDialog):
         return deleted
 
     def _key_changed(self, message: str) -> None:
+        """A key was saved or removed: re-read sources and balances, report, notify."""
         openrouter.invalidate_credit_cache()
         self.refresh_source()
         self.refresh_balances()

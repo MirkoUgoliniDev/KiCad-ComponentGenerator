@@ -38,6 +38,46 @@ def test_call_uses_documents_and_only_pin_metadata(tmp_path, monkeypatch):
     assert result[0]['electrical_type'] == 'power_in'
 
 
+def _pin_type_call(tmp_path, monkeypatch, **kwargs):
+    """Run suggest_pin_types with the main model 'vendor/main'; return (models called, logs)."""
+    source = tmp_path / 'sheet.pdf'
+    source.write_bytes(b'PDF')
+    monkeypatch.setattr(ai, 'ensure_providers_ready', lambda *a, **k: None)
+    monkeypatch.setattr(ai, '_file_to_content_block', lambda p: {'type': 'file', 'file': {'filename': p.name}})
+    models = []
+    monkeypatch.setattr(ai, 'call_tool', lambda **kw: models.append(kw['model']) or {'pins': [proposal()]})
+    logs = []
+    ai.suggest_pin_types('Demo', ROWS, [source], 'vendor/main', progress=logs.append, **kwargs)
+    return models, logs
+
+
+def test_the_pin_type_call_uses_its_step_model(tmp_path, monkeypatch):
+    """Step 'pin_type_prompt' of the «Modello AI» table (user request, 2026-11-12)."""
+    models, _ = _pin_type_call(tmp_path, monkeypatch,
+                               step_models={'pin_type_prompt': 'vendor/types', 'system_prompt': 'vendor/x'})
+    assert models == ['vendor/types']
+
+
+@pytest.mark.parametrize('step_models', [None, {}, {'pin_type_prompt': ''},
+                                         {'system_prompt': 'vendor/other'}])
+def test_the_pin_type_call_keeps_its_model_without_its_own_choice(tmp_path, monkeypatch, step_models):
+    models, _ = _pin_type_call(tmp_path, monkeypatch, step_models=step_models)
+    assert models == ['vendor/main']
+
+
+def test_an_unusable_pin_type_step_model_falls_back_with_a_log_line(tmp_path, monkeypatch):
+    from kicadgen.services import providers
+
+    def refuse(models, progress=None, **kwargs):
+        raise providers.ProviderError('no key')
+
+    monkeypatch.setattr(providers, 'ensure_providers_ready', refuse)
+    models, logs = _pin_type_call(tmp_path, monkeypatch,
+                                  step_models={'pin_type_prompt': 'deepseek-api/types'})
+    assert models == ['vendor/main']
+    assert any('deepseek-api/types' in line and 'no key' in line for line in logs)
+
+
 def test_accept_is_one_undoable_draft_preserving_geometry(qapp):
     tab = SymbolTab()
     tab.set_data('Demo', ROWS)

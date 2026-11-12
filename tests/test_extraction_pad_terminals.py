@@ -289,7 +289,9 @@ def test_the_former_single_prompt_that_estimated_holes_is_superseded():
     assert ("ed685f00b13bfc7e7e6702815de750fbc54117b2202bb28fc560202175a062e3"
             in ext.SUPERSEDED_SINGLE_PROMPT_DIGESTS)
     assert component_types.text_digest(ext.DEFAULT_SINGLE_SYSTEM_PROMPT) not in ext.SUPERSEDED_SINGLE_PROMPT_DIGESTS
-    assert "stima il foro" not in ext.DEFAULT_SINGLE_SYSTEM_PROMPT
+    # CONTRACT CHANGED 2026-11-12: prompts in English.
+    assert "estimate the hole" not in ext.DEFAULT_SINGLE_SYSTEM_PROMPT
+    assert "If the hole is NOT printed do not estimate it" in ext.DEFAULT_SINGLE_SYSTEM_PROMPT
 
 
 def test_the_three_constants_have_one_definition():

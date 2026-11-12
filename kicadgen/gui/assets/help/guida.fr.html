@@ -109,17 +109,20 @@ KiCad choisis par similitude de dimensions.</p>
   <strong>DeepSeek (API directe)</strong> (modèles <code>deepseek-api/...</code> ;
   en lançant depuis les sources, le modèle par défaut est <code>deepseek-api/deepseek-flash</code>).
   Le modèle se choisit depuis l’interface : <span class="ui">Configuration</span> →
-  <span class="ui">Paramètres IA généraux…</span>, onglet <span class="ui">Modèle</span>,
+  <span class="ui">Modèle IA...</span>,
   ou le panneau <span class="ui">Modèle IA</span> pour la session.
   La clé se saisit depuis <span class="ui">Configuration</span> →
   <span class="ui">Compte IA...</span> : la fenêtre liste chaque fournisseur avec
   l’origine de la clé utilisée (variable d’environnement, Gestionnaire d’identification, fichier
   <code>.env</code> ou aucune) et le solde actuel ; choisissez le fournisseur, collez
-  la clé, appuyez sur <span class="ui">Vérifier</span> (aucun appel à un modèle,
-  aucun coût) puis sur <span class="ui">Enregistrer</span> ; elle est conservée dans le Gestionnaire
+  la clé (l’œil dans le champ, ou Alt+F8, l’affiche) et appuyez sur
+  <span class="ui">Vérifier et enregistrer</span> : la clé est vérifiée (aucun appel à un modèle,
+  aucun coût) et elle n’est conservée dans le Gestionnaire
   d’identification de Windows (<code>KiCadGen/OpenRouter</code>,
-  <code>KiCadGen/DeepSeek</code>). <span class="ui">Supprimer la clé</span> efface
-  seulement cette entrée. Le fichier <code>.env</code> du dossier
+  <code>KiCadGen/DeepSeek</code>) que si elle est valide. Si la clé utilisée est écrite dans un fichier
+  <code>.env</code>, <span class="ui">La déplacer dans Windows</span> la vérifie, l’enregistre
+  dans le Gestionnaire d’identification et demande s’il faut retirer du fichier sa seule ligne.
+  <span class="ui">Supprimer</span> efface seulement l’entrée du Gestionnaire d’identification. Le fichier <code>.env</code> du dossier
   <code>%LOCALAPPDATA%\KiCadGen</code> (lignes <code>OPENROUTER_API_KEY=sk-or-...</code>
   et/ou <code>DEEPSEEK_API_KEY=...</code>) reste valable ; une clé enregistrée avec
   « Compte IA... » a priorité sur celle du fichier. Si la clé manque,
@@ -247,11 +250,21 @@ voir ou modifier les autres choix :</p>
     il est chargé ; il n’est donc vérifié qu’en appuyant sur
     <span class="ui">Vérifier la compatibilité</span>. Si le fichier manque ou n’est pas
     compatible, l’analyse s’arrête avant toute dépense.</li>
-  <li><span class="ui">Modèle IA</span> : le modèle unique utilisé pour les documents, la
+  <li><span class="ui">Modèle IA (cette session)</span> : le modèle unique utilisé pour les documents, la
   photo et la vérification. Le bouton voisin choisit un autre modèle (filtrable par
   coût, source OpenRouter ou DeepSeek) <em>pour cette session uniquement</em> ;
   le modèle par défaut et sa source se règlent dans <span class="ui">Configuration →
-  Paramètres IA généraux…</span>, les prompts par type dans <span class="ui">Configuration →
+  Modèle IA...</span>. La même fenêtre, dans la section <span class="ui">Modèles différents pour certaines
+  étapes</span> (fermée à l’ouverture, son titre compte les étapes avec un modèle propre),
+  contient un tableau avec le modèle de
+  chaque étape de l’analyse (lecture des documents, positions des pastilles, cotes
+  du boîtier, inventaire et découpes de la photo, marquages, bornes, types des
+  broches) : chaque étape suit le modèle unique jusqu’à ce que
+  <span class="ui">Changer…</span> lui en attribue un propre ;
+  <span class="ui">Utiliser l’unique</span> la ramène au modèle unique et
+  <span class="ui">Rétablir les étapes par défaut</span> ne ramène que le tableau au
+  choix initial, sans changer le modèle unique ; le modèle de la
+  session ne remplace que le modèle unique. Tous les prompts (généraux et par type) se modifient dans <span class="ui">Configuration →
   Gérer les types et profils IA…</span>.</li>
 </ul>
 

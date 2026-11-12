@@ -596,7 +596,7 @@ def test_the_chosen_smd_network_is_checked_and_forwarded(window, monkeypatch, tm
     monkeypatch.setattr(smd, "validate_smd_setup", lambda path=None: checked.append(path))
     _fake_yolo(monkeypatch, lambda path: None)
     monkeypatch.setattr(window, "_selected_documents", lambda: ([Path("board.png")], None))
-    monkeypatch.setattr(window, "_ensure_api_key", lambda: True)
+    monkeypatch.setattr(window, "_ensure_api_key", lambda *args, **kwargs: True)
     monkeypatch.setattr(gui.ExtractWorker, "start", lambda self: None)
     window.combo_photo_detector.setCurrentIndex(window.combo_photo_detector.findData("yolo_smd"))
     chosen = tmp_path / "other_network.pt"

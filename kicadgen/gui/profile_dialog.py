@@ -1,6 +1,9 @@
 """@brief SQLite profile CRUD. Editors stage changes locally until explicit Save."""
 from pathlib import Path
+import atexit
+import shutil
 import sqlite3
+import tempfile
 
 from PyQt6.QtCore import Qt, QSize
 from PyQt6.QtGui import QFontDatabase, QIcon
@@ -11,8 +14,10 @@ from PyQt6.QtWidgets import (
 )
 
 from ..services import prompt_catalog
-from ..services.analysis_profiles import FAMILIES, ProfileError
+from ..services.analysis_profiles import FAMILIES, ProfileError, ProfileStore
 from ..services.messages import tx
+from ..services.prompt_models import STEPS as PROMPT_STEPS, step as prompt_step
+from .theme import SUBTEXT
 
 ASSETS = Path(__file__).parent / 'assets'
 STAGES = (
@@ -24,19 +29,37 @@ HELP = (
     'Legge quote e parametri dai documenti. Il prompt base definisce il comportamento '
     'dell’analisi; le istruzioni specifiche della tipologia vengono aggiunte al prompt '
     'del componente nel tab Progetto, dove puoi aggiungere note per la singola estrazione.',
-    'Localizza gli ingombri nelle foto calibrate. Tutte le chiamate usano il modello unico '
-    'del tab «Modello» delle Impostazioni; il profilo sceglie solo i prompt. Le istruzioni foto '
+    'Localizza gli ingombri nelle foto calibrate. Il modello di ogni chiamata si sceglie in '
+    'Configurazione → «Modello AI...» (il modello unico, oppure uno proprio per ogni passo); il '
+    'profilo sceglie solo i prompt. Le istruzioni foto '
     'sono aggiunte ai prompt fotografici, inclusa la verifica, '
-    'ma non al prompt Lettura ritagli: descrivono la scheda intera, non il singolo corpo. '
-    'I prompt tecnici Terminali e Reofori sono avanzati: modificarli non riattiva i pulsanti '
-    'manuali nascosti. Il prompt Lettura ritagli guida la rilettura di ogni corpo dal suo '
+    'ma non al prompt Lettura dei ritagli: descrivono la scheda intera, non il singolo corpo. '
+    'I prompt tecnici Terminali e Piedini sono avanzati: modificarli non riattiva i pulsanti '
+    'manuali nascosti. Il prompt Lettura dei ritagli guida la rilettura di ogni corpo dal suo '
     'ritaglio ingrandito (corpi che la rete SMD locale non risolve; rilevatori «YOLO locale + '
     'verifica AI» e «Solo modello di visione»). '
     'XY sono stime calibrate e le altezze richiedono conferma. '
     'La cache nella cartella photo-cache del progetto distingue input, modello e prompt.',
     'Verifica la presenza dei corpi nei rettangoli proposti, senza spostare coordinate '
-    'o aggiungere ID. Usa il modello unico del tab «Modello» delle Impostazioni.',
+    'o aggiungere ID. Il modello si sceglie in Configurazione → «Modello AI...» (passo «Verifica '
+    'dei corpi»).',
 )
+
+
+#: Caption of the prompts that ARE an analysis step: the step's title, the
+#: same words as the «Modello AI» table (UX review 2026-11-12, finding 5).
+#: Prompts riding inside a step, and those of no step, keep their own caption.
+STEP_CAPTIONS = {item.field: item.title for item in PROMPT_STEPS}
+
+
+def caption(field, fallback):
+    """@brief The tab caption of the prompt `field`: its step title when it owns a step, else `fallback`.
+
+    @param field Profile prompt field.
+    @param fallback Caption used when the field is not a step (registry title, «Istruzioni foto»...).
+    @return Italian catalogue source.
+    """
+    return STEP_CAPTIONS.get(field, fallback)
 
 
 def _find_i18n(widget):
@@ -146,6 +169,15 @@ class ProfileEditor(QDialog):
         self._overrides = overrides
         row = store.get_type(key) if key else None
         self.fields, self.inherit = {}, {}
+        #: Line above each prompt of a type saying where its text comes from
+        #: (the general defaults, or the type's own text), by field.
+        self.source_labels = {}
+        #: True while the program itself rewrites an editor (inherit ticked
+        #: again): that rewrite is not the user typing.
+        self._syncing = False
+        #: Prompts this session unticked because the user typed in them:
+        #: ticked back when the text returns to the general one.
+        self._detached_by_typing = set()
         # Prompt status widgets, by field («instructions» for the built-in
         # type's instructions): the label, «Mostra differenze» (show the
         # differences) and «Ripristina predefinito» (restore the default),
@@ -156,6 +188,9 @@ class ProfileEditor(QDialog):
         if self.is_type:
             form = QFormLayout()
             self.name = QLineEdit(row['label'] if row else '')
+            # The source lines above the prompts name the type: they follow the name.
+            self.name.textChanged.connect(
+                lambda _text: [self._refresh_source(field) for field in self.source_labels])
             self.family = QComboBox()
             for family, label in FAMILIES.items():
                 localized = self.i18n.component_type(family, label) if self.i18n else label
@@ -171,6 +206,8 @@ class ProfileEditor(QDialog):
         self.tabs = QTabWidget()
         self.info_buttons = []
         layout.addWidget(self.tabs, 1)
+        #: The models the steps use, for the line under each prompt editor.
+        self._step_models = self._read_step_models()
         for index, (title, model, prompt) in enumerate(STAGES):
             page = QWidget()
             column = QVBoxLayout(page)
@@ -193,23 +230,23 @@ class ProfileEditor(QDialog):
             if index == 1:
                 sub = QTabWidget()
                 column.addWidget(sub, 1)
-                for field, caption in ((prompt, 'Prompt base'), ('image_instructions', 'Istruzioni foto'),
-                                       ('terminal_prompt', 'Terminali'), ('lead_prompt', 'Reofori'),
-                                       ('crop_prompt', 'Lettura ritagli')):
+                for field, fallback in ((prompt, 'Prompt base'), ('image_instructions', 'Istruzioni foto'),
+                                        ('terminal_prompt', 'Terminali'), ('lead_prompt', 'Piedini'),
+                                        ('crop_prompt', 'Lettura dei ritagli')):
                     child = QWidget()
                     inner = QVBoxLayout(child)
-                    sub.addTab(child, caption)
+                    sub.addTab(child, caption(field, fallback))
                     self._add_field(inner, field, overrides)
                 self._add_registry_fields(sub, None, prompt_catalog.STAGE_PHOTO, overrides)
             elif index == 0:
                 sub = QTabWidget()
                 column.addWidget(sub, 1)
-                for field, caption in ((prompt, 'Schede e moduli'),
-                                       ('system_prompt_single', 'Componente singolo'),
-                                       ('numbering_prompt', 'Numerazione pin')):
+                for field, fallback in ((prompt, 'Schede e moduli'),
+                                        ('system_prompt_single', 'Componente singolo'),
+                                        ('numbering_prompt', 'Numerazione pin')):
                     child = QWidget()
                     inner = QVBoxLayout(child)
-                    sub.addTab(child, caption)
+                    sub.addTab(child, caption(field, fallback))
                     self._add_field(inner, field, overrides)
                 self._add_registry_fields(sub, None, prompt_catalog.STAGE_DATASHEET, overrides)
                 if self.is_type:
@@ -230,7 +267,7 @@ class ProfileEditor(QDialog):
                         self._add_status_row(inner, 'instructions', self.instructions, entry)
                         sub.addTab(child, 'Istruzioni tipologia')
             else:
-                column.addWidget(QLabel('Prompt base:'))
+                column.addWidget(QLabel(caption(prompt, 'Prompt base:')))
                 self._add_field(column, prompt, overrides)
                 self._add_registry_fields(None, column, prompt_catalog.STAGE_VERIFICATION, overrides)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
@@ -259,8 +296,15 @@ class ProfileEditor(QDialog):
             inherit.setChecked(key not in overrides)
             self.inherit[key] = inherit
             layout.addWidget(inherit)
-            # Read-only rather than disabled: inherited prompts remain scrollable/copyable.
-            editor.setReadOnly(inherit.isChecked())
+            # Always editable (user, 2026-11-12: «se scelgo di modificare il
+            # prompt per quel componente non deve ereditarlo»): typing in an
+            # inherited prompt detaches it (`_typed_in_prompt`); the line
+            # below says where the text comes from.
+            source = QLabel()
+            source.setWordWrap(True)
+            source.setProperty('i18n_skip', True)
+            self.source_labels[key] = source
+            layout.addWidget(source)
         layout.addWidget(editor, 1)
         try:
             entry = prompt_catalog.entry(key)
@@ -268,9 +312,47 @@ class ProfileEditor(QDialog):
             entry = None
         if entry is not None:
             self._add_status_row(layout, key, editor, entry)
+        self._add_model_line(layout, key)
         if self.is_type:
             inherit.toggled.connect(lambda checked, field=editor, name=key:
                                     self._inherit_changed(name, checked, field))
+            editor.textChanged.connect(lambda name=key: self._typed_in_prompt(name))
+            self._refresh_source(key)
+
+    def _read_step_models(self):
+        """The single model and the step table, or (None, None) when the database cannot be read."""
+        try:
+            return self.defaults.get('model') or '', self.store.step_models()
+        except (ProfileError, sqlite3.Error, OSError, AttributeError):
+            return None, None
+
+    def _add_model_line(self, layout, key):
+        """Muted, read-only line under a prompt: which model sends it, and where that is changed.
+
+        Shown for the prompts that belong to an analysis step (their own, or
+        the step they ride in: prompt_models.step); the others are sent by no
+        model of their own (photo instructions, type instructions) and get no
+        line. The model is chosen only in «Modello AI...» (finding 5).
+        """
+        single, steps = self._step_models
+        try:
+            owner = prompt_step(key).field
+        except KeyError:
+            return
+        if single is None:
+            return
+        own = (steps or {}).get(owner, '')
+        text = (tx("Modello: {model} — si cambia in Configurazione → «Modello AI...».", model=own)
+                if own else
+                tx("Modello: modello unico ({model}) — si cambia in Configurazione → «Modello AI...».",
+                   model=single))
+        label = QLabel(text)
+        label.setObjectName(f'{key}_model')
+        label.setWordWrap(True)
+        # Composed and translated here: not a catalogue source.
+        label.setProperty('i18n_skip', True)
+        label.setStyleSheet(f'color: {SUBTEXT};')
+        layout.addWidget(label)
 
     def _add_registry_fields(self, tabs, column, stage, overrides):
         """Editors of the registry prompts of `stage` that the hand-made layout does not place.
@@ -301,10 +383,10 @@ class ProfileEditor(QDialog):
                         tabs.addTab(target, entry.group)
                 child = QWidget()
                 inner = QVBoxLayout(child)
-                target.addTab(child, entry.title)
+                target.addTab(child, caption(entry.field, entry.title))
                 self._add_field(inner, entry.field, overrides)
             else:
-                column.addWidget(QLabel(entry.title))
+                column.addWidget(QLabel(caption(entry.field, entry.title)))
                 self._add_field(column, entry.field, overrides)
         code_only = [entry for entry in prompt_catalog.CODE_ONLY_PROMPTS if entry.stage == stage]
         if code_only and tabs is not None:
@@ -390,8 +472,13 @@ class ProfileEditor(QDialog):
         label.setStyleSheet('font-weight: bold;' if status == prompt_catalog.OUTDATED else '')
         editor = self._status_editor(key)
         self.diff_buttons[key].setEnabled(status != prompt_catalog.CURRENT)
-        self.restore_buttons[key].setEnabled(
-            status != prompt_catalog.CURRENT and not editor.isReadOnly())
+        restore = self.restore_buttons[key]
+        restore.setEnabled(status != prompt_catalog.CURRENT and not editor.isReadOnly())
+        # On an inherited prompt the default becomes the TYPE's own text: the
+        # general one is left alone (review 2026-11-12, finding 4).
+        inherited = key in self.inherit and self.inherit[key].isChecked()
+        restore.setToolTip(self._t('Usa il predefinito di questa versione come testo proprio della '
+                                   'tipologia: i Default generali non cambiano') if inherited else '')
 
     def _show_diff(self, key):
         """Read-only dialog with the diff from the editor's text to the current default."""
@@ -405,23 +492,112 @@ class ProfileEditor(QDialog):
     def _restore_default(self, key):
         """Put the current default in the editor of `key`; saved on OK like any edit, dropped by Cancel."""
         editor = self._status_editor(key)
+        # The instructions of a built-in type stay read-only: nothing to restore there.
         if editor.isReadOnly():
             return
         editor.setPlainText(self._entries[key].current_default())
 
+    def _type_name(self):
+        """The type's name as typed in the form, or «questa tipologia» while it is blank."""
+        name = self.name.text().strip() if hasattr(self, 'name') else ''
+        return name or self._t('questa tipologia')
+
+    def _refresh_source(self, name):
+        """Say above the prompt `name` whether its text is the general default or the type's own."""
+        label = self.source_labels.get(name)
+        if label is None:
+            return
+        if self.inherit[name].isChecked():
+            text = self._t('Testo dei Default generali: se lo modifichi diventa un testo proprio di '
+                           '«{type}».')
+        else:
+            text = self._t('Testo proprio di «{type}»: non segue più i Default generali. Rimetti la '
+                           'spunta per tornare al testo generale.')
+        label.setText(text.format(type=self._type_name()))
+
+    @staticmethod
+    def _comparable(text):
+        """A prompt text as compared with the general one: line ends, special spaces and outer blanks ignored.
+
+        QTextEdit turns CR/CRLF, U+2028/U+2029 into LF and U+00A0 into a
+        space, and `_stored_text` saves an unchanged default without its
+        outer blanks: none of those differences is a user edit (review
+        2026-11-12, finding 2).
+        """
+        text = (text or '').replace('\r\n', '\n').replace('\r', '\n')
+        text = text.replace('\u2028', '\n').replace('\u2029', '\n').replace('\u00a0', ' ')
+        return text.strip()
+
+    def _same_as_general(self, name):
+        """Whether the editor of `name` holds the general text (`_comparable`)."""
+        return self._comparable(self.fields[name].toPlainText()) == self._comparable(self.defaults[name])
+
+    def _typed_in_prompt(self, name):
+        """The user changed a prompt: unticked when it leaves the general text, ticked back when it returns.
+
+        @note Ticked back only when this session unticked it by typing: a
+            key and Backspace, Ctrl+Z or an added blank line would otherwise
+            save an override equal to the general text that silently stops
+            following it (review 2026-11-12, finding 1). A box the user
+            unticked by hand is the user's choice and stays unticked.
+        """
+        if self._syncing:
+            return
+        inherit = self.inherit[name]
+        same = self._same_as_general(name)
+        if inherit.isChecked() and not same:
+            self._set_inherit_quietly(name, False)
+            self._detached_by_typing.add(name)
+        elif not inherit.isChecked() and same and name in self._detached_by_typing:
+            self._set_inherit_quietly(name, True)
+            self._detached_by_typing.discard(name)
+        else:
+            return
+        self._refresh_source(name)
+        if name in self.status_labels:
+            self._refresh_status(name)
+
+    def _set_inherit_quietly(self, name, checked):
+        """Tick or untick the inherit box of `name` without running `_inherit_changed`."""
+        inherit = self.inherit[name]
+        inherit.blockSignals(True)
+        inherit.setChecked(checked)
+        inherit.blockSignals(False)
+
     def _inherit_changed(self, name, checked, editor):
-        editor.setReadOnly(checked)
+        """Ticking inherit again puts back the general text, after a confirmation when the type's text differs."""
+        self._detached_by_typing.discard(name)
+        if checked and not self._same_as_general(name):
+            answer = QMessageBox.question(
+                self, self._t('Tornare al testo generale?'),
+                self._t('Il testo proprio di «{type}» per questo prompt andrà perso e verrà usato '
+                        'quello dei Default generali.').format(type=self._type_name()),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if answer != QMessageBox.StandardButton.Yes:
+                inherit = self.inherit[name]
+                inherit.blockSignals(True)
+                inherit.setChecked(False)
+                inherit.blockSignals(False)
+                return
         if checked:
-            editor.setPlainText(self.defaults[name])
+            self._syncing = True
+            try:
+                editor.setPlainText(self.defaults[name])
+            finally:
+                self._syncing = False
+        self._refresh_source(name)
         if name in self.status_labels:
             self._refresh_status(name)
 
     def _info(self, index):
         show_info(self, STAGES[index][0], HELP[index] + '\n\n'
                   'I default generali valgono per tutti i profili che li ereditano. '
-                  'Togli “Eredita default generale” per salvare un valore custom nella tipologia. '
+                  'Se scrivi in un prompt ereditato, “Eredita default generale” si toglie da sola e il '
+                  'testo diventa proprio della tipologia; rimetti la spunta per tornare al testo generale. '
                   'Le scelte di modello nel tab Progetto valgono solo per la sessione. '
-                  'Salva conferma le modifiche; Annulla le scarta. '
+                  'Salva conferma le modifiche nella gestione; vanno nel database con Salva della '
+                  'finestra «Gestione tipologie e profili AI»; Annulla le scarta. '
                   'La famiglia geometrica deve essere una di quelle supportate dal generatore. '
                   'Gli schemi JSON e i controlli geometrici sono gestiti dal codice, non dai prompt. '
                   'La chiave OpenRouter resta nel Gestore credenziali di Windows (o nel file .env), '
@@ -475,26 +651,72 @@ class ProfileEditor(QDialog):
         self.accept()
 
 
-class ProfilesDialog(QDialog):
-    """@brief Provide CRUD management for AI analysis profiles."""
-    def __init__(self, store, parent=None):
-        """@brief Build the list of profiles with its new/edit/delete commands.
+#: Working-copy folders of profile managers not cleaned yet; whatever is left
+#: when the program ends is removed by `_remove_left_work_folders`.
+_WORK_FOLDERS: set = set()
 
-        @param store Profile store the list is read from and written to.
+
+def _remove_left_work_folders():
+    """Remove the working copies a dialog could not clean (program closed while it was open)."""
+    for folder in list(_WORK_FOLDERS):
+        shutil.rmtree(folder, ignore_errors=True)
+        _WORK_FOLDERS.discard(folder)
+
+
+atexit.register(_remove_left_work_folders)
+
+
+class ProfilesDialog(QDialog):
+    """@brief Provide CRUD management for AI analysis profiles, written on «Salva».
+
+    @note User request (2026-11-12, option 2 of two proposed): Nuova,
+        Modifica, Duplica and Elimina no longer write the database at once.
+        They work on a WORKING COPY (`store`, a SQLite backup in a temporary
+        folder); «Salva» copies it over the real database (`real_store`)
+        and closes, «Annulla» discards and closes; closing with pending
+        changes asks. ONE saving button (user, 2026-11-12: «serve applica e
+        salva? io ne lascerei uno solo»). The editor and every
+        command keep their code: only the store they write changes.
+    """
+    def __init__(self, store, parent=None):
+        """@brief Make the working copy and build the list with its commands.
+
+        @param store The real profile store; it is written only on «Salva».
         @param parent Owner window; its ``i18n`` translates the labels.
-        @note `changed` tells the caller whether anything was written, so
+        @throws ProfileError When the working copy cannot be made.
+        @throws OSError When the temporary folder cannot be created.
+        @note `changed` tells the caller whether anything was APPLIED, so
             that the main window reloads its profile cache only when needed.
         """
         super().__init__(parent)
         self.i18n = _find_i18n(parent)
-        self.store = store
+        self.real_store = store
+        #: Folder of the working copy, removed when the dialog finishes.
+        self._work_dir = tempfile.mkdtemp(prefix='kicadgen-profiles-')
+        try:
+            # The signature before the copy: a write by someone else after
+            # it is seen by `restore_from`, never overwritten.
+            self._base_signature = store.contents_signature()
+            work = Path(self._work_dir) / 'profiles-working-copy.sqlite3'
+            store.backup(work)
+            self.store = ProfileStore(work)
+        except BaseException:
+            shutil.rmtree(self._work_dir, ignore_errors=True)
+            raise
+        # Every path removes it (review 2026-11-12, finding 5): `done()`, the
+        # caller's `discard_working_copy()` in its finally, a failure of the
+        # rest of this constructor, or, last, the program's exit. NOT the
+        # `destroyed` signal: a Python slot run while the garbage collector
+        # frees the dialog crashed the process (access violation in the suite).
+        _WORK_FOLDERS.add(self._work_dir)
+        #: Operations done on the working copy and not applied yet.
+        self.pending = 0
         self.changed = False
         self.setWindowTitle('Gestione tipologie e profili AI')
         self.resize(840, 500)
         self.setModal(True)
         layout = QVBoxLayout(self)
         self.list = QListWidget()
-        self.list.itemDoubleClicked.connect(lambda item: self._edit())
         self.list.currentRowChanged.connect(self._selection_changed)
         layout.addWidget(self.list, 1)
         row = QHBoxLayout()
@@ -510,12 +732,152 @@ class ProfilesDialog(QDialog):
         info.setAccessibleName('Informazioni gestione profili')
         info.setToolTip('Informazioni gestione profili')
         row.addWidget(info)
+        # One row of buttons (user, 2026-11-12: «perché pulsanti su due
+        # linee»): the commands, then Salva / Annulla; the pending count is
+        # in «Salva (n)», not on a line of its own.
+        Button = QDialogButtonBox.StandardButton
+        self.buttons = QDialogButtonBox(Button.Save | Button.Cancel)
+        self.save_button = self.buttons.button(Button.Save)
+        self.cancel_button = self.buttons.button(Button.Cancel)
+        # Texts and tooltips composed by `_refresh_pending` in the interface
+        # language: the window's i18n pass must not read «Salva (2)» back.
+        for button in (self.save_button, self.cancel_button):
+            button.setProperty('i18n_skip', True)
+        # Enter in the list must never apply and close (review 2026-11-12,
+        # finding 3): no button of the box is the dialog's default; Enter on
+        # a type opens it, as a double click does.
+        for button in (self.save_button, self.cancel_button):
+            button.setAutoDefault(False)
+            button.setDefault(False)
+        # Double click opens a type; Enter is handled by `keyPressEvent`.
+        self.list.itemDoubleClicked.connect(lambda item: self._edit())
+        self.save_button.clicked.connect(self._save)
+        self.cancel_button.clicked.connect(self._discard)
+        row.addSpacing(12)
+        row.addWidget(self.buttons)
         layout.addLayout(row)
-        close = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        close.button(QDialogButtonBox.StandardButton.Close).setText('Chiudi')
-        close.rejected.connect(self.reject)
-        layout.addWidget(close)
-        self._reload()
+        try:
+            self._reload()
+            self._refresh_pending()
+        except BaseException:
+            self.discard_working_copy()
+            raise
+
+    def keyPressEvent(self, event):  # noqa: N802 - Qt override
+        """@brief Enter opens the selected type; it never applies or closes the manager.
+
+        @param event Qt key event.
+        @note QDialog turns an Enter the list does not consume into an accept,
+            which would close the manager with its changes still pending or
+            applied by a default button (review 2026-11-12, finding 3).
+        """
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            if self.list.currentItem() is not None:
+                self._edit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def discard_working_copy(self):
+        """@brief Remove the working copy and its folder; pending changes are lost.
+
+        @note Called by `done()` and by the caller after the dialog, whatever
+            happened; calling it twice is harmless.
+        """
+        shutil.rmtree(self._work_dir, ignore_errors=True)
+        _WORK_FOLDERS.discard(self._work_dir)
+
+    def _text(self, source, **values):
+        """The interface-language text of an Italian source, with its placeholders filled."""
+        text = self.i18n.text(source) if self.i18n is not None else source
+        return text.format(**values) if values else text
+
+    def _changed_copy(self):
+        """Count one more operation done on the working copy and refresh the buttons."""
+        self.pending += 1
+        self._refresh_pending()
+
+    def _refresh_pending(self):
+        """Enable «Salva» only with pending changes; the count in «Salva (n)», the reason in the tooltip."""
+        waiting = self.pending > 0
+        self.save_button.setEnabled(waiting)
+        self.save_button.setText(self._text('Salva ({count})', count=self.pending) if waiting
+                                 else self._text('Salva'))
+        self.cancel_button.setText(self._text('Annulla'))
+        # A disabled button says why (Qt shows tooltips of disabled widgets).
+        self.save_button.setToolTip(
+            self._text('Modifiche non salvate: {count}', count=self.pending) + '. '
+            + self._text('Scrivi le modifiche nel database dei profili e chiudi')
+            if waiting else self._text('Nessuna modifica in sospeso: niente da salvare'))
+        self.cancel_button.setToolTip(self._text('Scarta le modifiche non salvate e chiudi'))
+
+    def apply(self):
+        """@brief Copy the working copy over the real database (used by «Salva» and the close question).
+
+        @return True when applied (or nothing was pending); False when the
+            real database changed meanwhile or cannot be written: a message
+            says why and the working copy is kept.
+        """
+        if not self.pending:
+            return True
+        try:
+            self.real_store.restore_from(self.store.path, self._base_signature)
+        except (ProfileError, sqlite3.Error, OSError) as exc:
+            QMessageBox.warning(self, self._text('Modifiche non salvate'), str(exc))
+            return False
+        self._base_signature = self.real_store.contents_signature()
+        self.pending = 0
+        self.changed = True
+        self._refresh_pending()
+        return True
+
+    def _save(self):
+        """«Salva»: apply, then close only when it worked."""
+        if self.apply():
+            self.accept()
+
+    def _discard(self):
+        """«Annulla»: close dropping the pending changes, without asking (the button says so)."""
+        self.pending = 0
+        super().reject()
+
+    def reject(self):  # noqa: D401 - Qt override
+        """@brief Esc or the window's close box: ask before losing pending changes.
+
+        @note «Salva» writes and closes, «Scarta» closes without writing,
+            «Resta» keeps the window open. Nothing pending: it just closes.
+        """
+        if not self.pending:
+            super().reject()
+            return
+        box = QMessageBox(QMessageBox.Icon.Question, self._text('Modifiche non salvate'),
+                          self._text('Ci sono {count} modifiche non salvate nel database dei profili. '
+                                     'Salvarle prima di chiudere?', count=self.pending),
+                          QMessageBox.StandardButton.NoButton, self)
+        apply = box.addButton(self._text('Salva'), QMessageBox.ButtonRole.AcceptRole)
+        discard = box.addButton(self._text('Scarta'), QMessageBox.ButtonRole.DestructiveRole)
+        stay = box.addButton(self._text('Resta'), QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(apply)
+        box.setEscapeButton(stay)
+        try:
+            box.exec()
+            choice = box.clickedButton()
+        finally:
+            box.deleteLater()
+        if choice is apply:
+            if self.apply():
+                super().reject()
+        elif choice is discard:
+            self.pending = 0
+            super().reject()
+
+    def done(self, result):  # noqa: D401 - Qt override
+        """@brief Finish the dialog and remove the working copy.
+
+        @param result The dialog result code.
+        """
+        super().done(result)
+        self.discard_working_copy()
 
     def _key(self):
         item = self.list.currentItem()
@@ -549,7 +911,8 @@ class ProfilesDialog(QDialog):
             if self.i18n is not None:
                 self.i18n.retranslate_widgets(dialog)
             if dialog.exec() == QDialog.DialogCode.Accepted:
-                self.changed = True
+                # Saved in the working copy; written with «Salva».
+                self._changed_copy()
                 self._reload(dialog.key)
         except (ProfileError, sqlite3.Error, OSError) as exc:
             title = self.i18n.text('Profilo non disponibile') if self.i18n else 'Profilo non disponibile'
@@ -568,7 +931,7 @@ class ProfilesDialog(QDialog):
         if self._key():
             try:
                 key = self.store.duplicate(self._key())
-                self.changed = True
+                self._changed_copy()
                 self._reload(key)
             except (ProfileError, sqlite3.Error, OSError) as exc:
                 title = self.i18n.text('Duplicazione non riuscita') if self.i18n else 'Duplicazione non riuscita'
@@ -593,7 +956,7 @@ class ProfilesDialog(QDialog):
             return
         try:
             self.store.delete_type(key)
-            self.changed = True
+            self._changed_copy()
             self._reload()
         except (ProfileError, sqlite3.Error, OSError) as exc:
             title = self.i18n.text('Eliminazione non riuscita') if self.i18n else 'Eliminazione non riuscita'
@@ -605,7 +968,9 @@ class ProfilesDialog(QDialog):
         if not path:
             return
         try:
-            self.store.backup(path)
+            # The real database: the working copy's pending changes are not
+            # part of a backup until applied.
+            self.real_store.backup(path)
             title = self.i18n.text('Backup completato') if self.i18n else 'Backup completato'
             QMessageBox.information(self, title, path)
         except (ProfileError, sqlite3.Error, OSError) as exc:
@@ -616,7 +981,8 @@ class ProfilesDialog(QDialog):
         show_info(self, 'Gestione profili',
             'Crea, modifica, duplica o elimina le tipologie di componente. '
             'Per disattivare una tipologia senza cancellarla, apri Modifica e togli Attiva. '
-            'Ogni operazione confermata viene salvata subito in SQLite; Chiudi non annulla '
-            'le operazioni già salvate. I default generali non si possono eliminare. '
-            'Per conservare una copia usa Backup DB.\n\nDatabase: ' + str(self.store.path),
-            text_key='help.profile.management', database=str(self.store.path))
+            'Le modifiche restano in sospeso finché non premi Salva, che le scrive nel database '
+            'e chiude; Annulla le scarta. I default generali non si possono eliminare. '
+            'Backup DB copia il database com\'è, senza le modifiche non salvate.'
+            '\n\nDatabase: ' + str(self.real_store.path),
+            text_key='help.profile.management', database=str(self.real_store.path))

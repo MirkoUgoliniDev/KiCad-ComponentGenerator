@@ -213,6 +213,11 @@ def test_saved_audit_replay_without_network(monkeypatch):
     assert len(calls) == 1
     assert 'Do not add IDs or alter rectangles' not in calls[0]['system_prompt']
     assert 'TIPOLOGIA:' not in calls[0]['system_prompt']
+    # CONTRACT CHANGED 2026-11-12: prompts in English. The type block, Italian
+    # text and markers (saved audit) or English ones, never reaches the call.
+    from kicadgen.services import component_types
+    assert 'TYPE: ' not in calls[0]['system_prompt']
+    assert not component_types.has_block(calls[0]['system_prompt'])
     assert not any(r.get('component_id') == 'R13' for r in result)
     rejected = next(r for r in audit['response']['components'] if r['component_id'] == 'R13')
     originals = {r['_id']: r for r in result if 'component_id' not in r}

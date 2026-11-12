@@ -150,14 +150,25 @@ def _crop(photo, component, length_mm, width_mm):
 
 
 def read_markings(photo, components, length_mm, width_mm, model, call, log,
-                  cache_dir=None, announce=None, prompt=None):
+                  cache_dir=None, announce=None, prompt=None, step_models=None,
+                  inventory_model=None):
     """@brief Re-read, on enlarged crops, the markings of the bodies that carry one.
 
     @param photo Calibrated BGR crop of the board.
     @param components Inventory components (modified in place).
     @param length_mm Board extent along X, in mm.
     @param width_mm Board extent along Y, in mm.
-    @param model Vision model identifier.
+    @param model Vision model identifier: the one sent when `step_models`
+        gives the step 'marking_prompt' no usable model of its own.
+    @param step_models The model of every analysis step
+        (prompt_models.step_models), or None (`model`, the behaviour before
+        2026-11-12). Resolved first: the step's model decides the skip, the
+        enlargement, the announcement and the cache key.
+    @param inventory_model The model that ran the global inventory, whose
+        markings are being re-read, or None (the same as the reading model,
+        the behaviour before 2026-11-12). Its image limits size the
+        resolution the inventory saw (inventory_px_per_mm), against which the
+        skip is decided.
     @param call Logged paid call (same contract as the inventory).
     @param log Progress callback.
     @param cache_dir Optional content-addressed cache folder.
@@ -184,13 +195,24 @@ def read_markings(photo, components, length_mm, width_mm, model, call, log,
     """
     height_px, width_px = photo.shape[:2]
     native = min(width_px / length_mm, height_px / width_mm)
-    limits = model_image_limits(model)
-    seen = inventory_px_per_mm(length_mm, width_mm, (width_px, height_px), limits)
     marked = [(index, c) for index, c in enumerate(components)
               if str(c.get('marking') or '').strip()]
     if not marked:
         log(tx("Lettura delle sigle: nessun corpo con una scritta, nessuna richiesta."))
         return 0
+    # The step's own model before the limits: the skip and the enlargement
+    # depend on the model that will read the crops. Resolved only when there
+    # is something to read, so a step model of another provider is not
+    # checked (key, credit) for a request that is never sent.
+    from .prompt_models import usable_model
+    model = usable_model('marking_prompt', step_models, model, log)
+    limits = model_image_limits(model)
+    # What the INVENTORY saw is sized by the inventory's model, which may now
+    # be another one (a step model of its own); the same model as before
+    # 2026-11-12 when the caller does not say.
+    seen_limits = (model_image_limits(inventory_model)
+                   if inventory_model and inventory_model != model else limits)
+    seen = inventory_px_per_mm(length_mm, width_mm, (width_px, height_px), seen_limits)
     # The skip applies only to a model that gains nothing from enlargement
     # (HANDOFF 144): one with coarse tokens, billed by area, spends more tokens
     # on an enlarged crop than it devotes to the same body in the board view,

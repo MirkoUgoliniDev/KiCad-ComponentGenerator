@@ -1,5 +1,14 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## STATO 12/11/2026 SERA — lavoro della serata COMMITTATO su FOOTPRINT-ADVANCE come `807375f` (base `4dde1e8`) e mergiato in main (utente: «committa e pusha, poi mergia in main e pusha, poi torna qui»)
+
+Suite completa a codice fermo (wb21): A 8353 passati 9 saltati 19 sottotest, B 5435 passati 4 saltati = 13788
+passati, 13 saltati, 19 sottotest, nessun rosso. CONTENUTO (dettagli nelle sezioni sotto): modello AI per passo
+dell'analisi (prompt_models, «Modello AI» semplificato con tabella dei passi), prompt tutti in inglese, scelta del
+modello con piu' aria, «Account AI» ridisegnata (Verifica e salva, Spostala in Windows con dotenv_keys, occhio
+Alt+F8, rimando «Creala su …» solo senza chiave), involucri PyQt obsoleti nell'anteprima (crash GitHub), guide in
+4 lingue, README e INSTALLATION-WINDOWS allineati. Branch di lavoro dopo il merge: FOOTPRINT-ADVANCE.
+
 ## STATO 12/11/2026 — quattro modifiche della giornata COMMITTATE e PUSHATE su FOOTPRINT-ADVANCE (utente: «ok committa e pusha»), MERGIATE in main come `965eccd` e pushate (utente: «fai il merge in main e poi pusha»)
 
 Suite completa a codice fermo: A 8298 passati 9 saltati 19 sottotest, B 5332 passati 4 saltati 1 fallito (elenco del
@@ -11,6 +20,247 @@ prompt inviato (registro data/sent_prompts.sqlite3, non versionato) e «Strument
 DA DECIDERE CON L'UTENTE (invariato): prompt personalizzati nel DB, difetti non autorizzati della revisione completa,
 Segnalati e NON autorizzati oggi: provenienza «estimated» su pad 2 e 5 del rele' SRD; Invio tenuto
 premuto sulla lista dei controlli riapre la finestra.
+
+GITHUB «Tests» su main (run 43188942383, commit bd7d973): ROSSO, prima meta' morta con 0xC0000005 (access violation)
+in `_style_drawing_item` -> `item.setPen(pen)`, chiamato da `_refresh_drawing_selection` <- `_commit_drawings` <-
+`_replace_drawing` <- `set_drawing_properties`, test tests/test_footprint_drawing_kicad.py::
+test_new_kinds_are_drawn_tagged_with_their_layer (riga `set_drawing_properties(3, {"frame": "rect", ...})`). DIFETTO
+PREESISTENTE E INTERMITTENTE: stesso stack nella run 42623377393 del 09/11 (commit e3eff26); codice non toccato il
+12/11; in locale passa. Seconda meta' verde. AUTORIZZATO («ok. correggi», 12/11).
+CAUSA (riprodotta in locale tenendo vivi gli involucri di 300 ridisegni): gli elementi che Qt crea da se' (addLine,
+addEllipse) hanno involucri PyQt che non sanno quando scene.clear() li distrugge; un involucro ancora referenziato
+(nel test la variabile `item` del ciclo) viene restituito da scene.items() per un elemento NUOVO allo stesso indirizzo,
+col tipo VECCHIO -> setPen di una linea su un testo -> access violation. CORREZIONE: `_refresh_drawing_selection`
+ricolora dagli elenchi propri `_fp_drawn_drawing_items` (riempito in `_tag_drawing_items`) e `_fp_drawn_pad_items`
+(drawer dei pad del package), svuotati in `_forget_preview_items` prima di ogni clear; test
+tests/test_preview_stale_wrappers.py (senza correzione: stesso crash; con: verde). Revisione read-only FATTA: correzione
+giusta e completa; stessa classe in `_end_preview_layer` (isinstance su scene.items() per i numeri dei pad) -> ora
+`item.type() == _QT_SIMPLE_TEXT_ITEM_TYPE` (9; ATTENZIONE: in PyQt6 `QGraphicsSimpleTextItem.Type` vale 1, e' quello
+di QGraphicsItem); scena gia' distrutta -> `_refresh_drawing_selection` esce (sip.isdeleted); regola scritta in
+.claude/rules/canvas.md («Never trust the Python type of an item from scene.items()»). Il test sui numeri e' un
+contratto, non una riproduzione del caso sbagliato. SUITE COMPLETA a codice fermo, VERDE: A 8298 passati 9 saltati
+19 sottotest, B 5337 passati 4 saltati = 13635 passati, 13 saltati, 19 sottotest. NON committato: serve l'OK.
+
+IN CORSO 12/11 (utente, scelta «2» fra due opzioni proposte): «Gestione tipologie e profili AI» con modifiche IN
+SOSPESO. Nuova/Modifica/Duplica/Elimina non scrivono subito nel database: lavorano su una COPIA temporanea (backup
+SQLite in una cartella temporanea), il dialogo la usa come store; «Applica» copia la copia sul database vero (API
+backup di SQLite) e resta aperto, «Salva» applica e chiude, «Annulla» scarta e chiude; chiudere con modifiche in
+sospeso chiede Applica/Scarta/Resta; una riga dice quante modifiche non sono applicate. Prima di applicare si
+controlla che il database vero non sia cambiato da quando la copia e' stata fatta (altrimenti si rifiuta e si
+spiega). «Backup DB…» copia il database vero. Testi in 4 lingue. File: kicadgen/gui/profile_dialog.py,
+analysis_profiles.py (copia/ripristino), main_window `_edit_profiles` (changed = applicato almeno una volta).
+FATTO + revisione read-only: (1) help.profile.management e help.profile.stage.0 vecchi nei DB esistenti -> testi
+vecchi in SUPERSEDED_DEFAULTS, test; (2) restore_from da copia sparita/vuota/estranea svuotava il DB vero -> apertura
+in sola lettura e controllo dello schema, rifiuto con ProfileError, test; (3) Invio chiudeva e applicava ->
+keyPressEvent: Invio apre la tipologia, mai chiude; (5) pulizia della copia: done(), discard_working_copy() nel
+finally di `_edit_profiles`, fallimento del costruttore, atexit (NON il segnale destroyed: uno slot Python durante il
+garbage collector mandava in crash il processo); (6) aiuto dell'editor. (4) DICHIARATO, non corretto: millisecondi
+fra il controllo della firma e il backup. Su richiesta dell'utente («perche' pulsanti su due linee», «perche' salva
+e applica non sono attivi»): una riga sola di pulsanti, conteggio in «Applica (n)», tooltip che dice perche' sono
+spenti. POI (utente: «serve applica e salva? io ne lascerei uno solo»): un solo pulsante che scrive, «Salva (n)»
+(scrive e chiude), piu' «Annulla»; domanda di chiusura Salva/Scarta/Resta; testi di aiuto e messaggio di conflitto
+riallineati a «Salva»; i testi intermedi della giornata aggiunti ai superati (un DB puo' averli gia' ricevuti).
+Test mirati 143 verdi. Suite completa: lanciata.
+RICHIESTA NUOVA (12/11), AUTORIZZATA («dobbiamo fare tutto in inglese»): OGNI testo inviato a un modello in
+inglese: i prompt di sistema italiani (system_prompt, system_prompt_single, pad_positions_prompt,
+body_dimensions_prompt, numbering_prompt, 6 role_prompt_*), le descrizioni dei campi degli schemi degli strumenti, i
+messaggi utente delle richieste, le istruzioni delle tipologie (component_types). Anche le note del modello in
+inglese («tutto»). Regole: contenuto e vincoli tradotti alla lettera (sono tarati su casi reali); digest dei vecchi
+predefiniti aggiunti ai SUPERSEDED_* perche' i profili salvati si aggiornino; i 3 prompt PERSONALIZZATI nel DB
+dell'utente restano com'erano (decide lui con «Ripristina predefinito»); test che citano frasi italiane dei prompt:
+contratto aggiornato capendo il perche'. DA FARE dopo il codice: un paio di analisi reali a pagamento SOLO con l'OK.
+Partenza dopo la suite in corso. POI l'utente ha chiesto «non possiamo farlo in tutte le lingue o in italiano?»:
+consigliata UNA lingua, inglese; CONFERMATO dall'utente («si», 12/11). IN CORSO: suite fermata (la
+rilancio una volta alla fine su tutto); agente 1 = datasheet_extractor.py + prompt_catalog.py + i suoi test; agente 2
+= component_types.py, photo_inventory.py, photo_grounding.py, analysis_profiles.py (solo l'intestazione ~806),
+pin_type_ai.py + i suoi test; coordinatore = tests/test_review_round7.py (PINNED_DEFAULT_DIGESTS), i18n.py,
+integrazione, revisione.
+AGENTE 2 FINITO: 4 istruzioni tipologia in inglese (digest vecchi in SUPERSEDED_INSTRUCTION_DIGESTS), marcatori nuovi
+inglesi con LEGACY_BLOCK_MARKERS/BLOCK_MARKERS/has_block (riconosce i vecchi, scrive i nuovi), photo_inventory
+(detection_tool, LEGACY_STRIP_PROMPT, note), PACKAGE_DESCRIPTION, intestazione immagini (cambia le chiavi cache foto),
+pin_type «reasons in English» (digest vecchio d896ef4b… da mettere in prompt_catalog: chiesto all'agente 1); suoi
+test 552 verdi. COORDINATORE: main_window 2981/9487 e photo_global_inventory._inventory_context riconoscono anche i
+marcatori italiani; test tests/test_type_block_legacy_markers.py. Nuovi digest correnti per PINNED_DEFAULT_DIGESTS:
+instructions single_tht 56e5dcf1…, single_smd 46f56d03…, aggregate_tht 26b997ae…, aggregate_castellated 30117774….
+AGENTE 1 FINITO: tutto datasheet_extractor.py in inglese (prompt, schemi, messaggi, didascalie ex tx(), ruoli: nome
+inglese per il modello separato dall'etichetta UI di document_roles.ROLES), digest vecchi registrati (anche
+pin_type_prompt in prompt_catalog), suoi 32 file di test 1191 verdi. COORDINATORE: PINNED_DEFAULT_DIGESTS
+ricalcolati dal codice (16 cambiati, ogni vecchio verificato come superato); EdgeCount.model_reason (gemello inglese
+di `reason`, via `_why`) usato nella richiesta di riconteggio, test; 6 voci di catalogo non piu' usate tolte
+(«FILE {name}: pagina intera», angoli, «riquadro {index} di 4»). Revisione: DUE agenti read-only in corso
+(fedelta' della traduzione del datasheet; tipologie/marcatori/foto/test). ESITO: traduzione FEDELE (controllo
+meccanico di numeri/campi/enfasi su 2596 righe), nessun test indebolito. Corretto: «ref:» = «a reference point or line
+(datum)» (prima solo «datum»), digest intermedi registrati (pad nel catalogo, single nel set del modulo). APERTI:
+(a) i 3 prompt PERSONALIZZATI nel DB (system_prompt, system_prompt_single, verifica foto) restano italiani e il single
+dice di stimare il foro, contro lo schema nuovo: domanda all'utente se ripristinarli; (b) descrizione KiCad, nomi dei
+pin e nomi dei solidi scritti dal modello ora in inglese (effetto di «tutto in inglese»); (c) note con due blocchi
+tipologia: aggiornato solo il primo (come prima); (d) DB del repository da aprire una volta prima del commit.
+Test mirati 220 verdi; suite completa NON ancora rilanciata.
+DECISIONE DELL'UTENTE su (a) («devi modificare tutto, non ci devono essere versioni italiane»): system_prompt e
+system_prompt_single del DB del repository riportati ai predefiniti inglesi (ProfileStore.save_defaults); copia del DB
+di prima in scratchpad/analysis_profiles.before-english.sqlite3; resta CUSTOM solo verification_prompt (gia' inglese);
+istruzioni tipologie CURRENT, nessun override. test_profile_prompt_status: contratto aggiornato (nessun prompt
+italiano nel DB committato). Le note dei progetti con il blocco italiano si aggiornano all'apertura del progetto.
+IN CORSO (utente «ok», 12/11): editor del profilo (ProfileEditor) — un prompt ereditato e' SEMPRE modificabile;
+appena si scrive, «Eredita default generale» si toglie da sola e una riga dice «Testo proprio di <tipologia>: non
+segue piu' i Default generali…»; rimettere la spunta con un testo modificato chiede conferma (il testo andrebbe
+perso); sopra un testo ereditato non toccato: «Testo dei Default generali». Suite fermata, da rilanciare alla fine.
+FATTO + revisione read-only: (1) una modifica annullata (tasto+Backspace, Ctrl+Z, a capo in fondo) lasciava la spunta
+tolta e salvava una copia identica al testo generale -> se il testo torna uguale la spunta si rimette da sola (solo se
+tolta scrivendo in questa sessione; tolta a mano resta tolta); (2) confronto su testo normalizzato (CRLF, U+2028/2029,
+NBSP, spazi esterni); (3) tedesco «diesem Typ»; (4) tooltip di «Ripristina predefinito» su un prompt ereditato; (5)
+controlli di sola lettura morti commentati. help.profile.stage.0 aggiornato in 4 lingue (testo precedente superato).
+Test mirati 110 verdi. SUITE COMPLETA a codice fermo (tutto il lavoro del pomeriggio: Salva unico, prompt in
+inglese, DB senza italiano, crash stale wrapper, eredita-su-modifica): A 8305 passati 9 saltati 19 sottotest, B 5352
+passati 4 saltati = 13657 passati, 13 saltati, 19 sottotest, VERDE. NON committato: serve l'OK.
+SUBITO (utente esasperato: «continuo a vedere prompt qui»), ANTICIPATO rispetto al modello per prompt: la finestra
+«Modello e prompt di sistema LLM» (menu Configurazione «Default generali AI...», nome uguale alla prima riga della
+gestione profili!) diventa «Modello AI» senza le schede dei prompt; voce di menu rinominata «Modello AI...»;
+`_edit_llm_settings` salva solo modello e pad_model; il campo «Posizioni pad» resta finche' non arriva il modello per
+prompt; nota del prompt del componente che rimandava a quella finestra corretta. La suite verde sopra NON copre
+questa modifica. FATTO: settings_dialog riscritto (niente QTextEdit di prompt, nota «I prompt si modificano in…»),
+`_edit_llm_settings` salva solo i modelli, voce di menu «Modello AI...» (4 lingue), guida d'uso nelle 4 lingue
+aggiornata, test adeguati (test_stage_prompt_settings, test_single_component_prompt, test_photo_inventory_gui:
+contratto «la finestra del modello non scrive prompt»). Suite completa e revisione read-only: lanciate.
+REVISIONE «Modello AI»: nessun crash/errore; DA FARE nel giro della tabella dei modelli (stessi testi): messaggio di
+log main_window ~6584 + i18n ~916 «tab Modello delle impostazioni LLM»; help.profile.stage.1/2 «tab Modello delle
+Impostazioni» (+ SUPERSEDED); README.md 166/210, README.it.md 170/216, docs/INSTALLATION-WINDOWS.md:51,
+docs/interactive-kicad-models.md:13, docs/photo-mechanical-workflow.md:43-47; commenti app_config.py:63 e
+main_window ~6929; codice morto settings_dialog (key_index/help.settings.stage, MODEL_TAB, alias SystemPromptDialog);
+`_edit_llm_settings` passa ancora i prompt al dialogo (inutile); test_stage_prompt_settings:28 asserire
+== DEFAULT_PAD_POSITIONS_MODEL.
+APPROVATA dall'utente («ok fai la modifica che proponi», 12/11) e IN CORSO; suite fermata, una sola alla fine.
+CONTRATTO (scritto dal coordinatore prima degli agenti): modulo NUOVO kicadgen/services/prompt_models.py con
+STEPS (campo del prompt che possiede il passo, titolo, gruppo), chiave DB «step_model:<campo>» in ai_defaults (solo
+globale, niente per tipologia, niente cambio di schema), `step_models(defaults)` -> {campo: modello o ''} ('' =
+modello unico; pad_positions/body_dimensions senza chiave propria ereditano il vecchio pad_model),
+`model_for(field, step_models, fallback)`; i campi «figli» (inventory_enumerate*, mechanical_evidence) usano il passo
+del padre; riconteggi e riparazioni usano il passo della lettura principale. Il modello di sessione (scheda
+Progetto) cambia solo il modello unico. Agenti: A = datasheet_extractor.py + pin_type_ai.py; B = photo_*.py;
+C = settings_dialog.py (tabella), main_window.py, workers.py, i18n.py, docs/README + i punti della revisione sopra.
+AGENTE A FINITO: extract_pin_header_params(..., step_models=None) (con tabella pad_model ignorato), reread_*(...,
+step_models=None, model = modello PRINCIPALE), pin_type_ai.suggest_pin_types(..., step_models=None); passo
+principale = system_prompt_single per le famiglie singole, system_prompt altrimenti; riconteggi/riparazioni col modello
+principale; passi risolti al primo uso (nessuna riga di ripiego per passi non eseguiti); tipo di contatto ricostruisce
+i documenti per il suo modello; test nuovi tests/test_step_models_extraction.py (26) + 3 in test_pin_type_ai. NOTA NON
+CORRETTA (preesistente): l'estrazione completa chiama apply_dedicated_body senza same_model (la rilettura si'): da
+decidere con l'utente. Coordinatore: pin_type_prompt images=True (manda i documenti).
+AGENTE B FINITO: extract_inventory / reconcile_saved_proposals / observe_terminals / refine_leads (+ funzioni interne)
+accettano step_models; ogni passo foto risolto prima del dimensionamento delle immagini e della chiave di cache (che
+contiene gia' il modello); crop_prompt sostituisce crop_model se c'e' la tabella; read_markings(inventory_model=);
+test nuovi tests/test_photo_step_models.py (30), 1261 verdi sui suoi 27 file. Stringa nuova passata all'agente C.
+AGENTE C FINITO: settings_dialog riscritto (spiegazione, riquadro «Modello unico», tabella dei passi a gruppi con
+[Cambia…]/[Unico], riga chiavi con rimando ad «Account AI», Ripristina predefiniti); `_edit_llm_settings` salva solo i
+passi cambiati (i due pad insieme + pad_model); step_models inoltrato a Extract/Reconcile/Reread/TerminalDetail worker
+e ai tipi dei pin; `_run_models` include i modelli dei passi scelti e usati dalla corsa; 50 voci di catalogo; aiuti
+help.settings.model e help.profile.stage.1/2 riscritti (vecchi superati); README/docs/guide aggiornati; test nuovi
+tests/test_model_ai_step_table.py (16). COORDINATORE: letterali di riserva HELP in profile_dialog allineati;
+pin_type_dialog mostra model_for. Revisioni read-only (collegamenti + usabilita') FATTE.
+DA CORREGGERE (in corso con 2 agenti): COLLEGAMENTI — (1) ALTO: la rilettura parziale confronta col modello unico, non
+col modello che ha prodotto la risposta principale (passo system_prompt_single) -> salvare il modello principale nella
+risposta e usarlo; (2) controllo chiavi per comando e rilevatore (oggi blocca comandi che non usano quel passo); (3) un
+pad mai scelto non deve diventare «scelta» al salvataggio; (4) terminal_prompt nei passi della corsa col rilevatore 'ai';
+(5) righe di ripiego doppie e nota del corpo superflua; (6) log che nominano il modello non risolto; (7) salvataggio non
+atomico. USABILITA' — intestazione «Passo» tradotta «Pitch»; titoli tagliati; righe sotto la piega e Tab che non scorre;
+«Unico» spento piu' evidente dell'attivo e nome criptico; nomi dei passi diversi fra le due finestre; Ripristina
+predefiniti che cambia sorgente in silenzio; chiave mancante poco visibile e senza i passi; spiegazioni solo al
+passaggio del mouse; gergo nelle spiegazioni; due «Modello AI» (finestra e riga di sessione); tooltip del menu;
+contrasto di «Modello unico (x)»; «Scegli modello...» contro «Cambia…»; messaggio «Impostazioni LLM (SQLite)».
+Utente: finestra «Modello AI» aperta di default alta abbastanza da mostrare tutte le righe (limitata allo schermo).
+F1 FINITO: risposta principale salva `_raw_main["_main_model"]` (RAW_MAIN_MODEL_KEY, stored_main_model); riletture
+confrontano col modello registrato (_reread_reader); lettori pad/corpo risolti pigramente e una volta per modello; nota
+del corpo saltata se uguale a quella dei pad; ProfileStore.save_models(defaults=None, steps=None) in una transazione;
+contratto cambiato test_review_round6b (unica chiave «_» ammessa in raw_main = _main_model). 15+2 test nuovi.
+RICHIESTE DELL'UTENTE PASSATE A F2 durante il lavoro: riga chiavi in fondo solo se manca una chiave; via la riga
+«Chiave:»; servizi senza chiave non proposti (Sorgente e «Cambia…»); nessuna chiave -> una riga con «Account AI...»;
+«Ripristina passi predefiniti» resta («per il momento lasciamo»); SEMPLIFICAZIONE («dobbiamo semplificare la UX», ok):
+in alto solo «Modello: <id> (<servizio>) [Cambia...]» senza combo Sorgente; tabella dei passi in un gruppo
+richiudibile CHIUSO di default «Modelli diversi per singoli passi (N passi con un modello proprio)»; finestra compatta
+da chiusa, si allarga aprendo.
+F2 FINITO: tutti i 13 punti di usabilita' + A/B/C + le richieste dell'utente. Finestra: riga modello «(servizio)
+[Cambia…]» senza Sorgente, pick_model(providers=) solo servizi con chiave, nota modello di sessione, sezione
+richiudibile chiusa con conteggio, delegate con spiegazione sotto il titolo, «Usa l'unico» solo se serve, Tab che scorre,
+finestra che cresce aprendo (limitata allo schermo), riga avviso solo se manca una chiave, stato «nessuna chiave»;
+`_run_steps(command, detector=, field=)` per comando e rilevatore; salvataggio solo dei passi cambiati con save_models,
+mai pad_model; profile_dialog: titoli dei passi da prompt_models e riga «Modello: …» sotto i prompt; tooltip del menu;
+riga di sessione «Modello AI (questa sessione):». Test: tests/test_model_ai_step_table.py (33) + contratti aggiornati.
+APERTI MINORI: la sezione richiudibile si apre solo col mouse (comportamento del componente comune); «Ripristina passi
+predefiniti» puo' salvare come scelta un pad uguale al predefinito (non c'e' cancellazione di una scelta); prompt dei
+ruoli senza riga «Modello». Suite completa: lanciata (poi fermata per i ritocchi sotto).
+RITOCCHI DELL'UTENTE: scelta del modello con piu' aria (margini, nota DeepSeek su riga sua, intro valida per ogni
+fornitore); «Modello AI» con margini e spazio prima della sezione dei passi; «Account AI»: occhio dentro il campo
+chiave al posto di «Mostra» (assets eye.svg / eye-off.svg).
+IN CORSO (utente «ok procedi»): pulsante «Sposta nel Gestore credenziali» in «Account AI», solo quando la chiave in uso
+viene da un file .env: legge la chiave dal file (senza mostrarla), la verifica (saldo, nessun credito), la salva nel
+Gestore credenziali di Windows, poi chiede «Togliere la chiave anche dal file .env?» (Si': toglie solo quella riga,
+resto del file intatto, scrittura atomica). Verifica fallita -> niente spostamento e il motivo. Per DeepSeek e
+OpenRouter. FATTO (services/dotenv_keys.py, btn_move/move_key/_finish_move, test).
+POI (utente «troppo confusionaria», ok alla proposta): «Account AI» RIDISEGNATA: intro di una riga; tabella Servizio |
+Chiave («✓ salvata in Windows» / «⚠ nel file .env» / «✗ mancante», percorso solo nel tooltip) | Saldo; pannello del
+servizio scelto: avviso «La chiave è nel file .env del progetto.» + [Spostala in Windows] solo se serve; «Nuova
+chiave: [campo 👁] [Verifica e salva]» (un pulsante: verifica, poi salva; servizio non raggiungibile -> conferma come
+oggi); «Non hai una chiave? Creala su …»; [Rimuovi] solo se c'e' una chiave salvata in Windows; [Chiudi]. Suite
+fermata; revisione di sicurezza dello spostamento FATTA: nessuna fuga della chiave; difetti medi/bassi (BOM, nome tra
+virgolette, rimando ${…}, valore su piu' righe, file non UTF-8, link, secondo .env) -> dotenv_keys riscritto dal
+coordinatore sul parser di python-dotenv (remove_key_result REMOVED/ABSENT/INDIRECT, BOM conservato, OSError anche per
+codifica, percorso risolto, other_files_setting), 28 test; messaggi e scorciatoia dell'occhio passati all'agente
+della riprogettazione.
+RIPROGETTAZIONE FATTA (12/11): agente + ritocchi del coordinatore — conftest isola anche app_paths.env_files (mai i
+.env veri), avviso «⚠ La chiave è scritta in un file .env.» (vale anche installato, non solo «del progetto»), guide
+in 4 lingue, README/README.it, docs/INSTALLATION-WINDOWS.md allineati («Verifica e salva», «Spostala in Windows»,
+«Rimuovi», occhio/Alt+F8). Test mirati 201 verdi (account, dotenv_keys, i18n, documentazione, guida).
+SUITE wb20: meta' B 5435/4 verde; meta' A 8351/9/19 con 2 ROSSI in tests/test_app_paths.py — CAUSA: il conftest
+sostituiva app_paths.env_files per tutti i test, anche per quelli che verificano env_files. CORRETTO: dotenv_keys
+importa env_files per nome (come openrouter/providers) e conftest/test sostituiscono dotenv_keys.env_files.
+INSIEME (utente: «se la key c'è perchè appare questo?»): «Non hai una chiave? Creala su …» visibile solo per un
+servizio senza chiave (stretch tiene «Rimuovi» a destra); test positivi/negativi in test_ai_account_dialog.
+Test mirati 123 verdi. PROSSIMO: suite completa wb21, poi chiedere l'OK al commit.
+PROPOSTA ALL'UTENTE (ora approvata): il modello per passo NON sotto ogni prompt ma in «Modello AI», come
+tabella «Passo dell'analisi → modello usato [Cambia] [Unico]», con spiegazione in testa, modello unico in alto,
+riga chiavi/credito con rimando ad «Account AI»; «Posizioni pad» diventa due righe (pad, quote del corpo).
+PROSSIMO (utente «ok», opzione A, 12/11; DOPO la suite e il commit del lavoro di oggi con il suo OK): MODELLO PER
+PROMPT. In «Default generali AI» → Modifica, sotto ogni prompt una riga «Modello: <modello unico (x)> [Scegli
+modello...] [Usa il modello unico]»; predefinito = modello unico; scritto con «Salva» come il resto. Negli editor
+delle tipologie la riga e' in sola lettura («si cambia in Default generali AI»): NIENTE modello per tipologia.
+«Modello e prompt di sistema LLM» resta per il modello unico e la sorgente; il campo «Posizioni pad» sparisce: il suo
+valore (pad_model) diventa il modello dei prompt pad_positions_prompt e body_dimensions_prompt (stesso comportamento
+di oggi). Controlli: immagini/strumenti/chiave e credito della sorgente, altrimenti modello unico con riga nel log.
+Visibile nella scheda di avanzamento e nel log. Nota: la cache foto distingue per modello.
+INSIEME (utente «ok», 12/11): «Modello e prompt di sistema LLM» (settings_dialog.LlmSettingsDialog, aperta da
+main_window `_edit_llm_settings`) era un DOPPIONE: modificava 5 degli stessi prompt globali dei «Default generali AI»,
+scrivendo subito con OK. Diventa «Modello AI»: solo modello unico + sorgente + chiave; via le schede Datasheet /
+Localizzazione foto / Verifica foto e il campo «Posizioni pad»; una riga rimanda a «Gestione tipologie e profili AI»
+per i prompt e il modello di ciascun prompt.
+PROGETTO TECNICO (mappa di un agente Explore, 12/11): NON sostituire il modello dentro SentPromptLog.wrap: le chiavi
+della cache foto (photo_grounding.cached_call, global-inventory, photo_crop_reading._cache_key) e la preparazione
+delle immagini (model_image_limits/fit_to_model, _file_to_content_block) usano il modello del punto di chiamata PRIMA
+del wrapper; nessuna chiamata foto dichiara `sending`; same_model e le righe «letto con X» si decidono al punto di
+chiamata; TerminalDetailWorker non ha wrapper. QUINDI: risolvere il modello per prompt AL PUNTO DI CHIAMATA con un
+helper comune (es. prompt_models.model_for(field, models, main)), passando un dict {campo: modello} lungo
+ExtractWorker/ReconcileWorker/RereadWorker/TerminalDetailWorker/pin_type. Proprietari: main_call -> system_prompt/
+system_prompt_single (anche riconteggi e riparazioni che riusano il prompt principale); numbering; pad_positions;
+body_dimensions (oggi entrambi col lettore pad_model: migrare pad_model a entrambi); contact_style; grounding;
+verification (anche mechanical evidence); inventory_* (il campo scelto); crop (sostituisce crop_model); marking;
+terminal; lead; pin_type. I ruoli e image_instructions NON hanno modello (parte di un'altra richiesta). Controllo:
+ensure_providers_ready + _pad_reading_model come modello di ripiego con riga nel log; aggiungere i modelli per prompt
+a MainWindow._run_models / _ensure_api_key.
+MAPPA (agente Explore, 12/11): ~85 kB in kicadgen/services/datasheet_extractor.py — prompt registrati
+DEFAULT_PIN_NUMBERING_PROMPT (~1103), DEFAULT_PAD_POSITIONS_PROMPT (~1288), DEFAULT_BODY_DIMENSIONS_PROMPT (~1519),
+DEFAULT_SINGLE_SYSTEM_PROMPT (~6277), _SYSTEM_PROMPT (~7397), _ROLE_PROMPTS (~9010; i NOMI dei ruoli sono legati a
+document_roles.ROLES = etichette UI: separare nome per il modello e etichetta); frammenti _HEIGHT_RULE, _LEAD_RULE,
+COMPONENT_KIND_DESCRIPTIONS, _PRINTED_QUOTES_SCHEMA, _PAD_TERMINAL_PROPERTIES; schemi _EXTRACTION_TOOL (316-1096,
+~21k), _PIN_NUMBERING_TOOL, _PAD_POSITIONS_TOOL, _BODY_DIMENSIONS_TOOL, _single_component_tool; messaggi utente e note
+di correzione (~1229, 2302, 2804, 7750, 8286, 9152, 9531, 10165, 10325, 10411, 10564); testi tx() mandati al modello
+(8478, 8496, 8503, 11661: oggi tradotti nella lingua UI!). component_types.py: 4 istruzioni + marcatori BLOCK_START/END
+(usati anche da photo_global_inventory e nelle note salvate dei progetti: attenzione). photo_inventory.py:
+detection_tool, LEGACY_STRIP_PROMPT (digest fissato in test_prompt_wiring 44-45), «Note dell'utente». photo_grounding.py
+PACKAGE_DESCRIPTION. analysis_profiles.py:806 intestazione «Istruzioni specifiche per le immagini» (cambia le chiavi
+della cache foto). pin_type_ai: «Write reasons in Italian». Digest dei vecchi testi da aggiungere ai SUPERSEDED_*;
+tabella PINNED_DEFAULT_DIGESTS in tests/test_review_round7.py:293-315; ~25 file di test citano frasi italiane.
+TROVATO, PREESISTENTE, NON AUTORIZZATO: tests/test_footprint_gesture_parity.py::
+test_f2_a_point_drag_steps_on_the_grid_with_one_ghost_per_node fallisce (nessuna maniglia al passaggio del mouse) se
+eseguito dopo test_footprint_back_anchor_zone_gui ... test_review_1029_mw nello stesso processo, ANCHE senza la
+correzione; da solo e nelle meta' della suite passa: dipendenza dall'ordine dei test.
 
 ### Dettaglio del 12/11 (scritto durante il lavoro)
 

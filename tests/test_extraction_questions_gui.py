@@ -353,13 +353,15 @@ class _FakeReread(gui.QThread):
 
     def __init__(self, stored, doc_paths, document_roles, *, field, model=None, pad_model=None,
                  component_family=None, system_prompt=None, extra_instructions=None,
-                 part_number=None, prompts=None):
+                 part_number=None, prompts=None, step_models=None):
         # `prompts`: workers.RereadWorker takes the profile's prompt texts
         # since step P2 (2026-11-11); a subclass that forwards **kwargs (the
         # answering fake of test_review_round3_gui) received it and failed.
+        # `step_models` (the «Modello AI» step table, 2026-11-12): same reason.
         super().__init__()
         self.stored, self.field, self.model = stored, field, model
         self.prompts = prompts
+        self.step_models = step_models
         self.component_family = component_family
         _FakeReread.created.append(self)
 
@@ -373,7 +375,7 @@ def _single_part(window, monkeypatch, tmp_path):
     prepare(window, monkeypatch, tmp_path, "RELAY")
     monkeypatch.setattr(workers, "RereadWorker", _FakeReread, raising=False)
     _FakeReread.created = []
-    monkeypatch.setattr(window, "_ensure_api_key", lambda: True)
+    monkeypatch.setattr(window, "_ensure_api_key", lambda *args, **kwargs: True)
     combo = window.combo_component_type
     combo.setCurrentIndex(combo.findData("single_tht"))
     params = header_extraction("RELAY", cols=2)

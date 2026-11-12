@@ -25,7 +25,7 @@ import numbers
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Optional, Sequence
+from typing import Callable, Mapping, Optional, Sequence
 
 from ..cad3d.annotations import EDGE_NAMES
 from ..core.footprint import KICAD_COORD_LIMIT_MM
@@ -52,6 +52,8 @@ from .messages import end_sentence, tx
 # The registry imports no owning module at load time, so no import cycle.
 from .prompt_catalog import effective_text
 from .prompt_catalog import sending as prompt_sending
+from .prompt_models import model_for, usable_model
+from .prompt_models import step as prompt_step
 
 MAX_FILES = 5
 
@@ -69,43 +71,43 @@ MAX_FILES = 5
 #: BUILDERS, which only runs inside FreeCAD): a kind it does not draw yet is
 #: drawn as the generic block.
 COMPONENT_KIND_DESCRIPTIONS: dict[str, str] = {
-    "generic": "corpo non riconoscibile: blocco semplice",
-    "ic": "integrato di package non riconoscibile",
-    "ic_soic": ("integrato rettangolare con reofori ad ala di gabbiano su due lati opposti "
+    "generic": "unrecognisable body: simple block",
+    "ic": "integrated circuit in an unrecognisable package",
+    "ic_soic": ("rectangular integrated circuit with gull-wing leads on two opposite sides "
                 "(SO, SOIC, SSOP, TSSOP, MSOP)"),
-    "ic_sot": ("piccolo package plastico con pochi reofori corti su uno o due lati (famiglia "
-               "SOT e SC-70, anche con linguetta)"),
-    "ic_qfn": ("integrato piatto senza reofori sporgenti, contatti sotto il bordo del corpo "
-               "(QFN, DFN, LGA)"),
-    "ic_qfp": "integrato con reofori ad ala di gabbiano su quattro lati (QFP, LQFP, TQFP)",
-    "ic_bga": "integrato con sfere sotto il corpo e nessun terminale visibile ai lati (BGA, CSP)",
-    "power_tab": ("package di potenza con linguetta metallica di dissipazione (TO-252/DPAK, "
+    "ic_sot": ("small plastic package with a few short leads on one or two sides (SOT and "
+               "SC-70 family, also with a tab)"),
+    "ic_qfn": ("flat integrated circuit without protruding leads, contacts under the edge of "
+               "the body (QFN, DFN, LGA)"),
+    "ic_qfp": "integrated circuit with gull-wing leads on four sides (QFP, LQFP, TQFP)",
+    "ic_bga": "integrated circuit with balls under the body and no terminal visible at the sides (BGA, CSP)",
+    "power_tab": ("power package with a metal heat-sinking tab (TO-252/DPAK, "
                   "TO-263/D2PAK, TO-220)"),
-    "transformer": "trasformatore o avvolgimento su nucleo, corpo alto",
-    "module": "sotto-modulo su una propria PCB montato sulla scheda",
-    "shield_can": "schermo metallico di lamiera sopra un gruppo di componenti",
-    "led": "LED a montaggio superficiale con lente",
-    "capacitor_tantalum": "condensatore stampato con striscia di polarita' (tantalio o polimero)",
-    "capacitor": "condensatore chip rettangolare con due terminazioni metalliche",
-    "capacitor_electrolytic": ("condensatore elettrolitico cilindrico (lattina su base plastica "
-                               "o radiale), in piedi sulla scheda"),
-    "resistor": "resistenza chip rettangolare con due terminazioni metalliche",
-    "inductor": "induttore chip o bobinato di piccole dimensioni",
-    "inductor_power": ("induttore di potenza stampato o schermato, quadrato o tondo, con "
-                       "altezza paragonabile al lato"),
-    "diode": "diodo in package plastico piatto con banda (SOD, SMA, SMB, SMC)",
-    "diode_melf": "diodo cilindrico di vetro con banda e cappucci metallici, da non confondere con un chip",
-    "connector": "connettore non meglio classificabile (USB, coassiale, morsettiera, FPC...)",
-    "pin_header": "fila o matrice di pin maschi a passo regolare su una base plastica",
-    "socket_header": "fila o matrice di contatti femmina in un corpo plastico chiuso",
-    "switch": "pulsante o interruttore",
-    "relay": "rele': blocco plastico chiuso, alto",
-    "potentiometer": "trimmer o potenziometro con vite o albero di regolazione",
-    "crystal": "quarzo o oscillatore piatto in contenitore ceramico o metallico",
-    "crystal_can": "quarzo in contenitore metallico ovale alto",
-    "battery": "batteria o portabatteria (a bottone o cilindrica)",
-    "display": "display piatto (vetro LCD od OLED), con o senza cornice",
-    "buzzer": "cicalino o trasduttore cilindrico",
+    "transformer": "transformer or winding on a core, tall body",
+    "module": "sub-module on its own PCB mounted on the board",
+    "shield_can": "sheet-metal shield over a group of components",
+    "led": "surface-mount LED with a lens",
+    "capacitor_tantalum": "moulded capacitor with a polarity stripe (tantalum or polymer)",
+    "capacitor": "rectangular chip capacitor with two metal terminations",
+    "capacitor_electrolytic": ("cylindrical electrolytic capacitor (can on a plastic base "
+                               "or radial), standing on the board"),
+    "resistor": "rectangular chip resistor with two metal terminations",
+    "inductor": "small chip or wound inductor",
+    "inductor_power": ("moulded or shielded power inductor, square or round, with a "
+                       "height comparable to its side"),
+    "diode": "diode in a flat plastic package with a band (SOD, SMA, SMB, SMC)",
+    "diode_melf": "cylindrical glass diode with a band and metal caps, not to be confused with a chip",
+    "connector": "connector not otherwise classifiable (USB, coaxial, terminal block, FPC...)",
+    "pin_header": "row or matrix of male pins at a regular pitch on a plastic base",
+    "socket_header": "row or matrix of female contacts in a closed plastic body",
+    "switch": "push button or switch",
+    "relay": "relay: closed plastic block, tall",
+    "potentiometer": "trimmer or potentiometer with an adjustment screw or shaft",
+    "crystal": "flat crystal or oscillator in a ceramic or metal case",
+    "crystal_can": "crystal in a tall oval metal can",
+    "battery": "battery or battery holder (coin or cylindrical)",
+    "display": "flat display (LCD or OLED glass), with or without a frame",
+    "buzzer": "buzzer or cylindrical transducer",
 }
 
 #: The kinds, in the order the schemas offer them.
@@ -124,33 +126,34 @@ _TOOL_NAME = "report_pin_header_params"
 #: pieces: 19.3 - 18.9 = 0.40 = the printed standoff of the T7N relay, for a
 #: printed 16.9). A quote is ONE printed number, transcribed, never summed.
 _HEIGHT_RULE = (
-    "body_height_mm e' UN SOLO numero STAMPATO: nella vista frontale o laterale del disegno "
-    "quotato (gruppo \"Dimensions\", \"Outline\" o simile, anche sullo stesso foglio del pinout) "
-    "e' la quota che misura il corpo PERPENDICOLARMENTE AL PIANO DI APPOGGIO SUL PCB, qualunque "
-    "sia il verso dei terminali sulla pagina (dritti sotto il corpo, piegati di lato come in un "
-    "SMD gull-wing, o disegnati verso sinistra o destra in una vista ruotata), dalla sua "
-    "sommita' al suo fondo (o al piano di appoggio, se il disegno la quota cosi'). In "
-    "leads_point dichiara verso dove puntano i terminali nella vista di profilo usata (down, up, "
-    "left, right): se puntano a sinistra o a destra la vista e' ruotata e l'altezza e' la quota "
-    "ORIZZONTALE, mentre la quota verticale e' una misura in pianta; gli assi li assegna il "
-    "programma. Trascrivila come e' scritta: NON sommare ne' sottrarre altre quote (un "
-    "distanziale o la sporgenza dei terminali quotati a parte non si aggiungono), non ricavarla "
-    "dalle proporzioni del disegno e non riusare un numero letto in pianta. In "
-    "printed_vertical_quotes elenca TUTTE le quote stampate nella vista di profilo "
-    "perpendicolari al piano di appoggio, nell'ordine in cui compaiono, e per ciascuna dichiara "
-    "in measures che cosa misura (body_height: il corpo; plan: una misura in pianta ripetuta nel "
-    "profilo; standoff: il distanziale fra corpo e PCB; lead: la sporgenza dei terminali; "
-    "overall: l'ingombro totale corpo piu' terminali o distanziale; other: altro): il programma "
-    "vi cerca l'altezza. Se nessuna vista stampa una quota del corpo in quella direzione, ometti "
-    "body_height_mm: un'altezza calcolata da altre quote e' \"derived\", mai \"read\"."
+    "body_height_mm is ONE SINGLE PRINTED number: in the front or side view of the dimensioned "
+    "drawing (group \"Dimensions\", \"Outline\" or similar, also on the same sheet as the pinout) "
+    "it is the dimension that measures the body PERPENDICULAR TO THE SEATING PLANE ON THE PCB, "
+    "whatever the direction of the terminals on the page (straight under the body, bent sideways "
+    "as in a gull-wing SMD, or drawn towards the left or right in a rotated view), from its "
+    "top to its bottom (or to the seating plane, if the drawing dimensions it that way). In "
+    "leads_point declare where the terminals point in the profile view used (down, up, "
+    "left, right): if they point left or right the view is rotated and the height is the "
+    "HORIZONTAL dimension, while the vertical dimension is a plan measure; the program assigns "
+    "the axes. Transcribe it as it is written: do NOT add or subtract other dimensions (a "
+    "standoff or the protrusion of the terminals dimensioned separately are not added), do not "
+    "derive it from the proportions of the drawing and do not reuse a number read in plan. In "
+    "printed_vertical_quotes list ALL the dimensions printed in the profile view "
+    "perpendicular to the seating plane, in the order in which they appear, and for each one "
+    "declare in measures what it measures (body_height: the body; plan: a plan measure repeated "
+    "in the profile; standoff: the standoff between body and PCB; lead: the protrusion of the "
+    "terminals; overall: the total envelope body plus terminals or standoff; other: anything "
+    "else): the program looks for the height among them. If no view prints a dimension of the "
+    "body in that direction, omit body_height_mm: a height computed from other dimensions is "
+    "\"derived\", never \"read\"."
 )
 
 #: The one definition of the lead protrusion (`pin_length_3d_mm`, `lead_length`),
 #: shared by every schema and prompt (review 2026-11-04, M7: two texts --
 #: «sotto il piano di appoggio» and «sotto il corpo» -- defined two different
 #: lengths when a standoff is printed).
-_LEAD_RULE = ("la sporgenza STAMPATA dei terminali sotto il fondo del corpo, un solo numero "
-              "trascritto, quota meccanica e NON il foro del footprint")
+_LEAD_RULE = ("the PRINTED protrusion of the terminals below the bottom of the body, one single "
+              "transcribed number, a mechanical dimension and NOT the hole of the footprint")
 
 #: Roles a printed profile quote may declare (`measures` of
 #: `printed_vertical_quotes`): what the number measures, as the reader sees it
@@ -164,18 +167,18 @@ _PRINTED_QUOTES_SCHEMA = {
     "type": "array",
     "items": {"type": "object", "properties": {
         "value": {"type": "number", "exclusiveMinimum": 0,
-                  "description": "La quota come stampata, nell'unita' di drawing_unit."},
+                  "description": "The dimension as printed, in the unit of drawing_unit."},
         "measures": {"type": "string", "enum": list(PRINTED_QUOTE_ROLES),
-                     "description": ("Che cosa misura: body_height (il corpo), plan (una misura "
-                                     "in pianta), standoff (distanziale corpo-PCB), lead "
-                                     "(sporgenza dei terminali), overall (ingombro totale), "
+                     "description": ("What it measures: body_height (the body), plan (a plan "
+                                     "measure), standoff (body-PCB standoff), lead "
+                                     "(protrusion of the terminals), overall (total envelope), "
                                      "other.")},
     }, "required": ["value", "measures"]},
-    "description": ("TUTTE le quote STAMPATE nella vista frontale o laterale del disegno quotato "
-                    "perpendicolari al piano di appoggio (lungo i terminali, qualunque sia il loro "
-                    "verso sulla pagina), nell'ordine in cui compaiono, nell'unita' di "
-                    "drawing_unit, senza sommarle, ognuna con il ruolo che dichiari in measures; "
-                    "lista vuota se nessuna vista di profilo e' quotata."),
+    "description": ("ALL the PRINTED dimensions in the front or side view of the dimensioned "
+                    "drawing perpendicular to the seating plane (along the terminals, whatever "
+                    "their direction on the page), in the order in which they appear, in the unit "
+                    "of drawing_unit, without adding them up, each with the role you declare in "
+                    "measures; empty list if no profile view is dimensioned."),
 }
 
 #: How a drawing qualifies the plan quotes of the body (`body_quote_kind`):
@@ -190,9 +193,9 @@ LEADS_POINT = ("down", "up", "left", "right")
 
 _LEADS_POINT_SCHEMA = {
     "type": "string", "enum": list(LEADS_POINT),
-    "description": ("Verso dei terminali sulla pagina nella vista di profilo da cui hai letto "
-                    "l'altezza: down o up (vista diritta: altezza verticale), left o right (vista "
-                    "ruotata: altezza orizzontale)."),
+    "description": ("Direction of the terminals on the page in the profile view from which you "
+                    "read the height: down or up (upright view: vertical height), left or right "
+                    "(rotated view: horizontal height)."),
 }
 
 #: Length fields of the answer, per level: every one is a length in the
@@ -240,13 +243,13 @@ def _value_sources_schema(keys, where: str) -> dict:
     return {
         "type": "object",
         "description": (
-            f"Provenienza di ogni quota che compili {where}, campo per campo (chiave = "
-            "nome del campo): \"read\" se e' scritta nel documento (quota del disegno, "
-            "tabella); \"derived\" se la calcoli SOLO da quote lette (somma, differenza, "
-            "meta'); \"estimated\" se la stimi: a occhio da una foto, in proporzione ad "
-            "altre quote o con una regola di progetto perche' il documento non la riporta. "
-            "Dichiarala per OGNI quota che compili: una quota senza provenienza viene "
-            "trattata come stimata e segnalata all'utente."
+            f"Provenance of every dimension you fill in {where}, field by field (key = "
+            "field name): \"read\" if it is written in the document (dimension of the drawing, "
+            "table); \"derived\" if you compute it ONLY from read dimensions (sum, difference, "
+            "half); \"estimated\" if you estimate it: by eye from a photo, in proportion to "
+            "other dimensions or with a design rule because the document does not give it. "
+            "Declare it for EVERY dimension you fill in: a dimension without provenance is "
+            "treated as estimated and flagged to the user."
         ),
         "properties": {key: {"type": "string", "enum": list(VALUE_SOURCES)} for key in keys},
     }
@@ -269,10 +272,10 @@ _PAD_TERMINAL_PROPERTIES = {
     "lead": {
         "type": "object",
         "description": (
-            "Sezione del TERMINALE (reoforo, pin, lamella) che entra in questo foro, come quotata "
-            "nel disegno, nell'unita' di drawing_unit: shape \"round\" con diameter_mm per un "
-            "terminale tondo, shape \"flat\" con width_mm e thickness_mm per una lamella. NON e' "
-            "il foro. Dichiarane la provenienza in value_sources.lead."),
+            "Cross-section of the TERMINAL (lead, pin, blade) that enters this hole, as dimensioned "
+            "in the drawing, in the unit of drawing_unit: shape \"round\" with diameter_mm for a "
+            "round terminal, shape \"flat\" with width_mm and thickness_mm for a blade. It is NOT "
+            "the hole. Declare its provenance in value_sources.lead."),
         "properties": {
             "shape": {"type": "string", "enum": ["round", "flat"]},
             "diameter_mm": {"type": "number", "exclusiveMinimum": 0},
@@ -283,25 +286,25 @@ _PAD_TERMINAL_PROPERTIES = {
     "hole_callout": {
         "type": "string",
         "description": (
-            "Il richiamo del FORO di questo pad come e' STAMPATO sul disegno del layout PCB o "
-            "della foratura (es. \"3-Ø1.2\", \"Ø1.3+0.1\"). Ometti se il disegno non stampa il "
-            "foro: allora non stimarlo, dai il terminale in lead."),
+            "The callout of the HOLE of this pad as it is PRINTED on the PCB layout or "
+            "drilling drawing (e.g. \"3-Ø1.2\", \"Ø1.3+0.1\"). Omit it if the drawing does not "
+            "print the hole: then do not estimate it, give the terminal in lead."),
     },
     "drill_length_mm": {
         "type": "number", "exclusiveMinimum": 0,
         "description": (
-            "Solo per un'ASOLA stampata nel disegno: il lato dell'asola lungo Y (l'asse di "
-            "pad_width_mm), nell'unita' di drawing_unit; drill_mm e' allora il suo lato lungo X "
-            "(l'asse di pad_length_mm). Un'asola orizzontale ha drill_mm maggiore di "
-            "drill_length_mm, una verticale il contrario. Mai stimato."),
+            "Only for a SLOT printed in the drawing: the side of the slot along Y (the axis of "
+            "pad_width_mm), in the unit of drawing_unit; drill_mm is then its side along X "
+            "(the axis of pad_length_mm). A horizontal slot has drill_mm greater than "
+            "drill_length_mm, a vertical one the opposite. Never estimated."),
     },
     "value_sources": {
         "type": "object",
         "description": (
-            "Provenienza dei valori di QUESTO pad: drill_mm \"read\" solo se il foro e' "
-            "stampato (hole_callout); pad_size \"read\" solo se la piazzola e' stampata (land "
-            "pattern); shape per la forma della piazzola; lead per il terminale. \"estimated\" "
-            "per tutto cio' che non e' stampato: i valori non stampati li ricava il programma."),
+            "Provenance of the values of THIS pad: drill_mm \"read\" only if the hole is "
+            "printed (hole_callout); pad_size \"read\" only if the land is printed (land "
+            "pattern); shape for the shape of the land; lead for the terminal. \"estimated\" "
+            "for everything that is not printed: the program derives the values not printed."),
         "properties": {key: {"type": "string", "enum": list(VALUE_SOURCES)}
                        for key in PAD_SOURCE_KEYS},
     },
@@ -316,10 +319,11 @@ PINOUT_FUNCTIONS = ("coil", "common", "nc", "no", "other")
 _EXTRACTION_TOOL = {
     "name": _TOOL_NAME,
     "description": (
-        "Riporta i parametri meccanici di un componente estratti dai documenti: "
-        "contatti (matrice di pin passanti, lati di un modulo castellated oppure "
-        "pad espliciti in package_geometry), corpo, pinout, unita' di misura e "
-        "vista del disegno letto."
+        "Reports the mechanical parameters of a component extracted from the documents: "
+        "contacts (matrix of through-hole pins, sides of a castellated module or "
+        "explicit pads in package_geometry), body, pinout, unit of measure and "
+        "view of the drawing read. Every free-text value (notes, reasons) is written "
+        "in English."
     ),
     "input_schema": {
         "type": "object",
@@ -328,68 +332,68 @@ _EXTRACTION_TOOL = {
                 "type": "string",
                 "enum": ["matrix", "castellated"],
                 "description": (
-                    "Come sono disposti i contatti del componente.\n"
-                    "- \"matrix\": pin a foro passante su una griglia regolare righe x "
-                    "colonne (pin header, moduli DIP-style, componenti THT). Compila "
-                    "rows, cols, pad_diameter_mm, drill_mm, pitch_mm se cols > 1 e "
-                    "row_spacing_mm se rows > 1. Usa \"matrix\" anche quando i pad "
-                    "sono descritti uno per uno in package_geometry (componenti SMD, "
-                    "package irregolari): allora package_geometry e' il footprint e i "
-                    "campi della matrice sono facoltativi.\n"
-                    "- \"castellated\": modulo su PCB con contatti metallizzati sul "
-                    "bordo (semi-fori). Compila castellated_sides e i campi body_*; NON "
-                    "forzare i contatti in una matrice, perche' lati diversi hanno "
-                    "spesso numero di contatti e passo diversi: in quel caso "
-                    "\"matrix\" darebbe un footprint sbagliato."
+                    "How the contacts of the component are arranged.\n"
+                    "- \"matrix\": through-hole pins on a regular grid of rows x "
+                    "columns (pin headers, DIP-style modules, THT components). Fill in "
+                    "rows, cols, pad_diameter_mm, drill_mm, pitch_mm if cols > 1 and "
+                    "row_spacing_mm if rows > 1. Use \"matrix\" also when the pads "
+                    "are described one by one in package_geometry (SMD components, "
+                    "irregular packages): then package_geometry is the footprint and the "
+                    "fields of the matrix are optional.\n"
+                    "- \"castellated\": module on a PCB with plated contacts on the "
+                    "edge (half holes). Fill in castellated_sides and the body_* fields; do NOT "
+                    "force the contacts into a matrix, because different sides often have "
+                    "a different number of contacts and a different pitch: in that case "
+                    "\"matrix\" would give a wrong footprint."
                 ),
             },
             "drawing_unit": {
                 "type": "string",
                 "enum": ["mm", "inch", "mil"],
                 "description": (
-                    "Unita' di misura delle quote del disegno che leggi: \"mm\" "
-                    "millimetri, \"inch\" pollici, \"mil\" millesimi di pollice. TUTTE "
-                    "le lunghezze di questa risposta (ogni campo con suffisso _mm, "
-                    "anche dentro castellated_sides, package_geometry, components_3d "
-                    "ed edge_fillets) vanno riportate in questa unita', con i numeri "
-                    "COSI' COME LI LEGGI, senza convertirli: la conversione in "
-                    "millimetri la fa il programma. Se il disegno riporta due unita' "
-                    "affiancate, usa i millimetri. Senza disegno quotato usa \"mm\"."
+                    "Unit of measure of the dimensions of the drawing you read: \"mm\" "
+                    "millimetres, \"inch\" inches, \"mil\" thousandths of an inch. ALL "
+                    "the lengths of this answer (every field with the _mm suffix, "
+                    "also inside castellated_sides, package_geometry, components_3d "
+                    "and edge_fillets) are given in this unit, with the numbers "
+                    "AS YOU READ THEM, without converting them: the program does the "
+                    "conversion to millimetres. If the drawing gives two units "
+                    "side by side, use millimetres. Without a dimensioned drawing use \"mm\"."
                 ),
             },
             "contacts_view": {
                 "type": "string",
                 "enum": ["top", "bottom", "unknown"],
                 "description": (
-                    "Da che lato e' visto il disegno (o la foto) da cui leggi la "
-                    "disposizione dei contatti: pin_map, l'ordine di numerazione della "
-                    "matrice, castellated_sides, body_offset_x_mm e body_offset_y_mm. "
-                    "\"bottom\" se e' etichettato BOTTOM VIEW o mostra il lato "
-                    "inferiore, \"top\" se e' una vista dall'alto o una foto del lato "
-                    "componenti, \"unknown\" se il documento non permette di "
-                    "stabilirlo. Riporta tutto COME LO VEDI, senza ribaltare nulla: il "
-                    "footprint KiCad si disegna visto dall'alto e la specchiatura "
-                    "sinistra-destra di una bottom view la fa il programma. "
-                    "package_geometry dichiara la sua vista in source_view."
+                    "From which side the drawing (or the photo) is seen from which you read the "
+                    "arrangement of the contacts: pin_map, the numbering order of the "
+                    "matrix, castellated_sides, body_offset_x_mm and body_offset_y_mm. "
+                    "\"bottom\" if it is labelled BOTTOM VIEW or shows the lower "
+                    "side, \"top\" if it is a view from above or a photo of the component "
+                    "side, \"unknown\" if the document does not allow it to be "
+                    "established. Report everything AS YOU SEE IT, without flipping anything: the "
+                    "KiCad footprint is drawn as seen from above and the program does the "
+                    "left-right mirroring of a bottom view. "
+                    "package_geometry declares its view in source_view."
                 ),
             },
             "package_geometry": {
                 "type": "object",
                 "description": (
-                    "Pad espliciti, uno per pin: il modo di descrivere i componenti SMD "
-                    "(pad senza foro, pad_type \"smd\") e i package non rappresentabili "
-                    "come matrice (SOIC, TSSOP, QFN, QFP, DIP irregolari, package "
-                    "custom). Quando e' presente e' la fonte del footprint. Coordinate "
-                    "locali del centro di ogni pad, come appaiono nella vista indicata "
-                    "da source_view (la specchiatura della vista dal basso la fa il "
-                    "programma). CONVENZIONE DEGLI ASSI, come il disegno appare sulla "
-                    "pagina: X cresce verso DESTRA e Y cresce verso il BASSO (un pad piu' "
-                    "in basso nel disegno ha y_mm MAGGIORE; non usare la convenzione "
-                    "matematica con Y verso l'alto, che specchierebbe il footprint e "
-                    "invertirebbe l'ordine dei pin). Ogni angolo (orientation_deg, "
-                    "rotation_deg) e' in gradi in senso ANTIORARIO come appare sulla "
-                    "pagina. Un pad esposto/termico e' un pin a se'. Non inventare "
-                    "coordinate non supportate dal documento."
+                    "Explicit pads, one per pin: the way to describe SMD components "
+                    "(pads without a hole, pad_type \"smd\") and the packages that cannot be "
+                    "represented as a matrix (SOIC, TSSOP, QFN, QFP, irregular DIP, custom "
+                    "packages). When present it is the source of the footprint. Local "
+                    "coordinates of the centre of every pad, as they appear in the view given "
+                    "by source_view (the program mirrors the bottom view). "
+                    "AXIS CONVENTION, as the drawing appears on the "
+                    "page: X grows to the RIGHT and Y grows DOWNWARDS (a pad lower "
+                    "in the drawing has a GREATER y_mm; do not use the mathematical "
+                    "convention with Y upwards, which would mirror the footprint and "
+                    "reverse the order of the pins). Every angle (orientation_deg, "
+                    "rotation_deg) is in degrees COUNTERCLOCKWISE as it appears on the "
+                    "page. An exposed/thermal pad is a pin of its own. Do not invent "
+                    "coordinates not supported by the document."
                 ),
                 "properties": {
                     "family": {"type": "string", "enum": [
@@ -398,51 +402,51 @@ _EXTRACTION_TOOL = {
                     "body_length_mm": {
                         "type": "number", "exclusiveMinimum": 0,
                         "description": (
-                            "Estensione del corpo lungo l'asse X di queste coordinate "
-                            "(orizzontale nella vista di source_view), qualunque nome le "
-                            "dia il datasheet (D, E, E1, length). Con i pin sui lati "
-                            "sinistro e destro (SOIC disegnato in verticale) e' la "
-                            "dimensione TRASVERSALE alle file di pin, non quella lungo le "
-                            "file."),
+                            "Extent of the body along the X axis of these coordinates "
+                            "(horizontal in the view of source_view), whatever name the "
+                            "datasheet gives it (D, E, E1, length). With the pins on the "
+                            "left and right sides (SOIC drawn vertically) it is the "
+                            "dimension ACROSS the pin rows, not the one along the "
+                            "rows."),
                     },
                     "body_width_mm": {
                         "type": "number", "exclusiveMinimum": 0,
                         "description": (
-                            "Estensione del corpo lungo l'asse Y di queste coordinate "
-                            "(verticale nella vista di source_view), qualunque nome le dia "
-                            "il datasheet. Con i pin sui lati sinistro e destro e' la "
-                            "dimensione LUNGO le file di pin."),
+                            "Extent of the body along the Y axis of these coordinates "
+                            "(vertical in the view of source_view), whatever name the "
+                            "datasheet gives it. With the pins on the left and right sides it is the "
+                            "dimension ALONG the pin rows."),
                     },
                     "body_height_mm": {"type": "number", "exclusiveMinimum": 0},
                     "lead_form": {
                         "type": "string", "enum": ["gull_wing", "j_lead", "unknown"],
                         "description": (
-                            "Forma dei terminali come appare nella vista laterale: "
-                            "\"gull_wing\" se escono dai fianchi e si piegano verso "
-                            "l'esterno ad ala di gabbiano, \"j_lead\" se si piegano a J "
-                            "sotto il bordo del corpo (le piazzole stanno sotto il bordo), "
-                            "\"unknown\" se il disegno non mostra la vista laterale. Non "
-                            "dedurlo dal nome del package."),
+                            "Shape of the terminals as it appears in the side view: "
+                            "\"gull_wing\" if they come out of the flanks and bend "
+                            "outwards like a gull wing, \"j_lead\" if they bend in a J "
+                            "under the edge of the body (the lands lie under the edge), "
+                            "\"unknown\" if the drawing does not show the side view. Do not "
+                            "deduce it from the name of the package."),
                     },
                     "origin": {"type": "string", "enum": ["body_center", "pin1", "custom"]},
                     "source_view": {"type": "string", "enum": ["top", "bottom"]},
                     "orientation_deg": {
                         "type": "number",
                         "description": (
-                            "Rotazione da applicare al disegno per ottenere il footprint, "
-                            "in gradi ANTIORARI come appare sulla pagina; 0 per disegnare "
-                            "il footprint come il disegno."),
+                            "Rotation to apply to the drawing to obtain the footprint, "
+                            "in COUNTERCLOCKWISE degrees as it appears on the page; 0 to draw "
+                            "the footprint like the drawing."),
                     },
                     "mirrored": {
                         "type": "boolean",
                         "description": (
-                            "true SOLO se il disegno stesso e' un'immagine speculare della "
-                            "vista dichiarata in source_view per un motivo DIVERSO dall'essere "
-                            "una vista dal basso (es. etichettato «mirror image» o «vista "
-                            "dall'alto in trasparenza»). Una BOTTOM VIEW si dichiara SOLO con "
-                            "source_view \"bottom\" e mirrored false: la specchiatura della "
-                            "vista dal basso la fa gia' il programma, e mirrored true la "
-                            "annullerebbe."),
+                            "true ONLY if the drawing itself is a mirror image of the "
+                            "view declared in source_view for a reason OTHER than being "
+                            "a bottom view (e.g. labelled «mirror image» or «top view "
+                            "seen through»). A BOTTOM VIEW is declared ONLY with "
+                            "source_view \"bottom\" and mirrored false: the program already "
+                            "mirrors the bottom view, and mirrored true would "
+                            "cancel that."),
                     },
                     "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
                     "needs_review": {"type": "boolean"},
@@ -450,9 +454,9 @@ _EXTRACTION_TOOL = {
                         "number": {"type": "string"}, "name": {"type": "string"},
                         "x_mm": {"type": "number"}, "y_mm": {"type": "number"},
                         "pad_length_mm": {"type": "number", "exclusiveMinimum": 0,
-                                          "description": "Dimensione del pad lungo X, prima di rotation_deg."},
+                                          "description": "Size of the pad along X, before rotation_deg."},
                         "pad_width_mm": {"type": "number", "exclusiveMinimum": 0,
-                                         "description": "Dimensione del pad lungo Y, prima di rotation_deg."},
+                                         "description": "Size of the pad along Y, before rotation_deg."},
                         "side": {"type": "string", "enum": ["left", "right", "top", "bottom", "center"]},
                         "pad_type": {"type": "string", "enum": ["smd", "thru_hole", "np_thru_hole", "connect"]},
                         # Only shapes a PinSpec can describe (review 2026-10-27,
@@ -460,11 +464,11 @@ _EXTRACTION_TOOL = {
                         # pin does not carry, and was written as a rectangle.
                         "shape": {"type": "string", "enum": ["circle", "rect", "oval", "roundrect"]},
                         "rotation_deg": {"type": "number",
-                                         "description": "Angolo del pad in gradi ANTIORARI come appare sulla pagina."},
+                                         "description": "Angle of the pad in COUNTERCLOCKWISE degrees as it appears on the page."},
                         "drill_mm": {"type": "number", "exclusiveMinimum": 0,
-                                     "description": ("Foro, solo per un pad con foro: il "
-                                                     "diametro STAMPATO (hole_callout); "
-                                                     "se non e' stampato ometti e dai lead.")},
+                                     "description": ("Hole, only for a pad with a hole: the "
+                                                     "PRINTED diameter (hole_callout); "
+                                                     "if it is not printed omit it and give lead.")},
                         # Terminal, printed hole and per-pad provenance (2026-11-10).
                         **_PAD_TERMINAL_PROPERTIES,
                     }, "required": ["number", "x_mm", "y_mm", "pad_length_mm", "pad_width_mm"]}},
@@ -474,183 +478,183 @@ _EXTRACTION_TOOL = {
             "top_photo_index": {
                 "type": "integer", "minimum": -1,
                 "description": (
-                    "Indice FILE (0-based, etichetta FILE nel messaggio) della migliore FOTO "
-                    "dall'alto del lato con componenti montati, asse lungo orizzontale. "
-                    "Escludi vista inferiore, laterale, prospettica e disegni. "
-                    "Usa -1 se nessuna foto e' adatta. Non scegliere solo per risoluzione."
+                    "FILE index (0-based, FILE label in the message) of the best top-view "
+                    "PHOTO of the side with the mounted components, long axis horizontal. "
+                    "Exclude bottom, side and perspective views and drawings. "
+                    "Use -1 if no photo is suitable. Do not choose on resolution alone."
                 ),
             },
             "name": {
                 "type": "string",
                 "description": (
-                    "Nome KiCad suggerito per il footprint, stile "
-                    "PinHeader_<righe>x<colonne>_P<passo>mm_THT"
+                    "Suggested KiCad name for the footprint, in the style "
+                    "PinHeader_<rows>x<columns>_P<pitch>mm_THT"
                 ),
             },
-            "description": {"type": "string", "description": "Descrizione breve del componente"},
-            "tags": {"type": "string", "description": "Tag separati da spazio"},
-            "rows": {"type": "integer", "description": "Numero di righe della matrice di pin (es. 2 per un componente a doppia fila)"},
+            "description": {"type": "string", "description": "Short description of the component, in English"},
+            "tags": {"type": "string", "description": "Space-separated tags"},
+            "rows": {"type": "integer", "description": "Number of rows of the pin matrix (e.g. 2 for a double-row component)"},
             "cols": {
                 "type": "integer",
                 "description": (
-                    "Numero di POSIZIONI per riga della griglia regolare a passo pitch_mm, "
-                    "comprese quelle vuote: non il numero di pin fisici. Due pin della "
-                    "stessa riga distanti un multiplo del passo sono tante colonne piu' "
-                    "in la' quanti sono i passi, e le posizioni fra loro contano anche se "
-                    "vuote (le vuote si escludono con populated_pins). Una griglia "
-                    "compressa ai soli pin fisici darebbe un footprint con i pin nel "
-                    "posto sbagliato."
+                    "Number of POSITIONS per row of the regular grid at pitch pitch_mm, "
+                    "empty ones included: not the number of physical pins. Two pins of the "
+                    "same row a multiple of the pitch apart are as many columns "
+                    "further on as there are pitches, and the positions between them count even if "
+                    "empty (the empty ones are excluded with populated_pins). A grid "
+                    "compressed to the physical pins alone would give a footprint with the pins in the "
+                    "wrong place."
                 ),
             },
             "pitch_mm": {
                 "type": "number",
                 "description": (
-                    "Passo tra pin ADIACENTI sulla STESSA riga, nell'unita' di "
-                    "drawing_unit. Ometti con una sola colonna."
+                    "Pitch between ADJACENT pins on the SAME row, in the unit of "
+                    "drawing_unit. Omit it with a single column."
                 ),
             },
             "row_spacing_mm": {
                 "type": "number",
                 "description": (
-                    "Distanza PERPENDICOLARE tra i centri di due file di pin adiacenti, "
-                    "nell'unita' di drawing_unit. Ometti con una sola riga (rows=1). "
-                    "IMPORTANTE: e' una quota distinta dal pitch e nei package "
-                    "DIP-style e' di norma molto maggiore: leggile separatamente, non "
-                    "riusare un numero per l'altro. "
-                    "Anche con layout=\"castellated\", se i contatti stanno su due lati "
-                    "opposti: distanza fra i CENTRI dei contatti delle due file, se quotata "
-                    "o leggibile sulla griglia; ometti se non la conosci."
+                    "PERPENDICULAR distance between the centres of two adjacent pin rows, "
+                    "in the unit of drawing_unit. Omit it with a single row (rows=1). "
+                    "IMPORTANT: it is a dimension distinct from the pitch and in DIP-style "
+                    "packages it is normally much greater: read them separately, do not "
+                    "reuse one number for the other. "
+                    "Also with layout=\"castellated\", if the contacts lie on two opposite "
+                    "sides: distance between the CENTRES of the contacts of the two rows, if dimensioned "
+                    "or readable on the grid; omit it if you do not know it."
                 ),
             },
             "pad_diameter_mm": {
                 "type": "number",
-                "description": "Diametro del pad a foro passante della matrice, nell'unita' di drawing_unit.",
+                "description": "Diameter of the through-hole pad of the matrix, in the unit of drawing_unit.",
             },
             "drill_mm": {
                 "type": "number",
                 "description": (
-                    "Diametro del foro (drill) dei pad della matrice, nell'unita' di "
-                    "drawing_unit: sempre maggiore di zero e minore di pad_diameter_mm. "
-                    "I pad SMD non hanno foro: per un componente SMD ometti questo "
-                    "campo e descrivi i pad in package_geometry."
+                    "Diameter of the hole (drill) of the pads of the matrix, in the unit of "
+                    "drawing_unit: always greater than zero and smaller than pad_diameter_mm. "
+                    "SMD pads have no hole: for an SMD component omit this "
+                    "field and describe the pads in package_geometry."
                 ),
             },
             "lead_diameter_mm": {
                 "type": "number",
                 "description": (
-                    "Diametro del TERMINALE (reoforo, pin) quotato nel disegno, "
-                    "nell'unita' di drawing_unit (es. \"Ø0.5\" accanto al pin nella "
-                    "vista laterale). NON e' il foro: il foro deve essere piu' largo "
-                    "del terminale, e il programma lo controlla. Ometti se non quotato."
+                    "Diameter of the TERMINAL (lead, pin) dimensioned in the drawing, "
+                    "in the unit of drawing_unit (e.g. \"Ø0.5\" next to the pin in the "
+                    "side view). It is NOT the hole: the hole must be wider "
+                    "than the terminal, and the program checks it. Omit it if not dimensioned."
                 ),
             },
             "lead_exit": {
                 "type": "string",
                 "enum": ["bottom", "side", "unknown"],
                 "description": (
-                    "Da quale faccia del corpo escono i terminali di un componente "
-                    "singolo a foro passante, guardando la vista laterale o la foto: "
-                    "\"bottom\" se escono dritti dal fondo (moduli incapsulati, "
-                    "trasformatori, rele', connettori: ogni pin sta dentro il contorno "
-                    "del corpo), \"side\" se escono dai fianchi e sono piegati verso "
-                    "il basso (DIP, TO-220: le file possono stare fuori dal corpo), "
-                    "\"unknown\" se non si vede. Non dedurlo dal nome del pezzo."
+                    "From which face of the body the terminals of a single "
+                    "through-hole component come out, looking at the side view or the photo: "
+                    "\"bottom\" if they come straight out of the bottom (potted modules, "
+                    "transformers, relays, connectors: every pin lies inside the outline "
+                    "of the body), \"side\" if they come out of the flanks and are bent "
+                    "downwards (DIP, TO-220: the rows may lie outside the body), "
+                    "\"unknown\" if it cannot be seen. Do not deduce it from the name of the part."
                 ),
             },
             "populated_pins": {
                 "type": "array",
                 "items": {"type": "string"},
                 "description": (
-                    "SOLO se il pinout del datasheet mostra che non tutte le posizioni "
-                    "della matrice rows x cols hanno un pin fisico (pinout parziale, "
-                    "tipico dei moduli DIP-style): elenca i numeri di pin EFFETTIVAMENTE "
-                    "presenti secondo la numerazione del datasheet. Se la matrice e' "
-                    "completamente popolata (es. un normale pin header), OMETTI questo campo."
+                    "ONLY if the pinout of the datasheet shows that not all the positions "
+                    "of the rows x cols matrix have a physical pin (partial pinout, "
+                    "typical of DIP-style modules): list the pin numbers ACTUALLY "
+                    "present according to the numbering of the datasheet. If the matrix is "
+                    "fully populated (e.g. an ordinary pin header), OMIT this field."
                 ),
             },
             "body_length_mm": {
                 "type": "number",
                 "description": (
-                    "SOLO se il datasheet ha un disegno meccanico (\"Outline Dimensions\" "
-                    "o simile) con l'ingombro del corpo del componente: estensione del "
-                    "corpo lungo l'asse X del footprint (orizzontale nella vista), "
-                    "nell'unita' di drawing_unit, qualunque nome le dia il datasheet. "
-                    "In una matrice di pin X e' la direzione delle colonne, quindi del "
-                    "pitch; con pad espliciti (package_geometry, o pads) X e' l'asse X delle loro "
-                    "coordinate, anche quando le file di pin corrono in verticale (pin a "
-                    "sinistra e a destra: e' la dimensione trasversale alle file). Ometti se "
-                    "il disegno meccanico non e' presente."
+                    "ONLY if the datasheet has a mechanical drawing (\"Outline Dimensions\" "
+                    "or similar) with the envelope of the body of the component: extent of the "
+                    "body along the X axis of the footprint (horizontal in the view), "
+                    "in the unit of drawing_unit, whatever name the datasheet gives it. "
+                    "In a pin matrix X is the direction of the columns, hence of the "
+                    "pitch; with explicit pads (package_geometry, or pads) X is the X axis of their "
+                    "coordinates, even when the pin rows run vertically (pins on the "
+                    "left and on the right: it is the dimension across the rows). Omit it if "
+                    "the mechanical drawing is not present."
                 ),
             },
             "body_width_mm": {
                 "type": "number",
                 "description": (
-                    "Larghezza del corpo, estensione lungo l'asse Y del footprint "
-                    "(verticale nella vista; stessa convenzione di body_length_mm), "
-                    "dalla vista dall'alto o dal basso del disegno meccanico: e' la "
-                    "dimensione del CONTORNO ESTERNO del case. In una matrice di pin NON "
-                    "e' la distanza tra le due righe di pin: e' quasi sempre "
-                    "un valore diverso e leggermente maggiore di row_spacing_mm, "
-                    "perche' il case e' piu' largo della sola distanza tra i pin."
+                    "Width of the body, extent along the Y axis of the footprint "
+                    "(vertical in the view; same convention as body_length_mm), "
+                    "from the top or bottom view of the mechanical drawing: it is the "
+                    "dimension of the OUTER OUTLINE of the case. In a pin matrix it is NOT "
+                    "the distance between the two rows of pins: it is almost always "
+                    "a different value, slightly greater than row_spacing_mm, "
+                    "because the case is wider than the distance between the pins alone."
                 ),
             },
             "pcb_thickness_mm": {
                 "type": "number", "exclusiveMinimum": 0,
-                "description": "Spessore del solo PCB, esclusi componenti e pin. Ometti se non quotato; non confonderlo con l'altezza totale.",
+                "description": "Thickness of the PCB alone, components and pins excluded. Omit it if not dimensioned; do not confuse it with the total height.",
             },
             "body_height_mm": {
                 "type": "number",
                 "description": (
-                    "Altezza del corpo lungo l'asse Z (perpendicolare al PCB), nell'unita' di "
-                    "drawing_unit -- una quota COMPLETAMENTE DIVERSA da row_spacing_mm e "
-                    "body_width_mm (quote della vista dall'alto, assi X/Y). " + _HEIGHT_RULE
+                    "Height of the body along the Z axis (perpendicular to the PCB), in the unit of "
+                    "drawing_unit -- a dimension COMPLETELY DIFFERENT from row_spacing_mm and "
+                    "body_width_mm (dimensions of the top view, X/Y axes). " + _HEIGHT_RULE
                 ),
             },
             "body_offset_x_mm": {
                 "type": "number",
                 "description": (
-                    "Posizione del bordo del corpo lungo X rispetto al pin 1 (che e' "
-                    "sempre nell'origine x=0 del footprint). Tipicamente un valore "
-                    "negativo pari alla distanza dal bordo sinistro del corpo al pin 1, "
-                    "presa dalla quota del disegno meccanico (se il pin 1 dista d dal "
-                    "bordo sinistro, body_offset_x_mm = -d). Leggilo sullo STESSO "
-                    "disegno da cui leggi i pin, cosi' come lo vedi: se contacts_view e' "
-                    "\"bottom\" lo ribalta il programma insieme alle colonne."
+                    "Position of the edge of the body along X relative to pin 1 (which is "
+                    "always at the origin x=0 of the footprint). Typically a negative "
+                    "value equal to the distance from the left edge of the body to pin 1, "
+                    "taken from the dimension of the mechanical drawing (if pin 1 is d away from "
+                    "the left edge, body_offset_x_mm = -d). Read it on the SAME "
+                    "drawing from which you read the pins, as you see it: if contacts_view is "
+                    "\"bottom\" the program flips it together with the columns."
                 ),
             },
             "body_offset_y_mm": {
                 "type": "number",
                 "description": (
-                    "Posizione del bordo del corpo lungo Y rispetto alla PRIMA riga di "
-                    "pin (y=0), stessa logica di body_offset_x_mm ma per l'asse "
-                    "perpendicolare: valore negativo pari alla distanza fra il bordo del "
-                    "corpo dal lato della prima riga e la prima riga stessa. Si misura "
-                    "dalla prima riga, NON dal centro del corpo: con piu' righe centrate "
-                    "nel corpo vale -(body_width_mm - distanza fra prima e ultima riga)/2, "
-                    "non -body_width_mm/2. Meta' della larghezza col segno meno e' giusta "
-                    "solo con UNA "
-                    "sola riga centrata. Tutti i centri dei pin devono cadere dentro il "
-                    "corpo."
+                    "Position of the edge of the body along Y relative to the FIRST row of "
+                    "pins (y=0), same logic as body_offset_x_mm but for the perpendicular "
+                    "axis: negative value equal to the distance between the edge of the "
+                    "body on the side of the first row and the first row itself. It is measured "
+                    "from the first row, NOT from the centre of the body: with several rows centred "
+                    "in the body it is -(body_width_mm - distance between first and last row)/2, "
+                    "not -body_width_mm/2. Half the width with a minus sign is right "
+                    "only with ONE "
+                    "single centred row. All the pin centres must fall inside the "
+                    "body."
                 ),
             },
             "pin_length_3d_mm": {
                 "type": "number",
-                "description": ("pin_length_3d_mm e' " + _LEAD_RULE
-                                + ", nell'unita' di drawing_unit."),
+                "description": ("pin_length_3d_mm is " + _LEAD_RULE
+                                + ", in the unit of drawing_unit."),
             },
             "edge_fillets": {
                 "type": "array",
                 "description": (
-                    "Se una foto reale del componente (non il disegno meccanico quotato) "
-                    "mostra spigoli arrotondati/smussati sul case, elenca quali spigoli "
-                    "del parallelepipedo appaiono arrotondati con un raggio STIMATO A "
-                    "OCCHIO. Le foto prodotto non riportano MAI un valore quotato per "
-                    "questi raggi: e' normale e atteso stimarlo visivamente (es. 0.5-1.5mm "
-                    "per un case plastico stampato con spigoli visibilmente smussati), "
-                    "NON serve una quota esplicita per compilare questo campo -- una stima "
-                    "ragionevole e' meglio di ometterlo quando l'arrotondamento e' visibile. "
-                    "Se il case in foto ha chiaramente spigoli vivi (angoli a 90 gradi "
-                    "netti), o non c'e' nessuna foto del prodotto, ometti il campo."
+                    "If a real photo of the component (not the dimensioned mechanical drawing) "
+                    "shows rounded/chamfered edges on the case, list which edges "
+                    "of the box appear rounded, with a radius ESTIMATED BY "
+                    "EYE. Product photos NEVER give a dimensioned value for "
+                    "these radii: it is normal and expected to estimate it visually (e.g. 0.5-1.5mm "
+                    "for a moulded plastic case with visibly chamfered edges), "
+                    "an explicit dimension is NOT needed to fill in this field -- a reasonable "
+                    "estimate is better than omitting it when the rounding is visible. "
+                    "If the case in the photo clearly has sharp edges (crisp 90-degree "
+                    "corners), or there is no product photo, omit the field."
                 ),
                 "items": {
                     "type": "object",
@@ -659,28 +663,28 @@ _EXTRACTION_TOOL = {
                             "type": "string",
                             "enum": list(EDGE_NAMES),
                             "description": (
-                                "Nome dello spigolo, fra due facce del parallelepipedo. "
-                                "Convenzione, vista dall'alto con l'asse lungo "
-                                "orizzontale: left/right = lati sinistro/destro, front = "
-                                "lato in BASSO della vista, back = lato in alto, top = "
-                                "faccia superiore, bottom = faccia di appoggio. Gli angoli "
-                                "arrotondati del contorno VISTO DALL'ALTO (es. scheda con "
-                                "angoli tondi) sono gli spigoli verticali front-left, "
-                                "front-right, back-left, back-right. top-*/bottom-* sono "
-                                "invece gli spigoli orizzontali della faccia superiore o "
-                                "inferiore (bordo arrotondato visto di profilo): NON "
-                                "usarli per gli angoli visti dall'alto. Su un corpo sottile "
-                                "(es. una PCB) i raccordi di due spigoli opposti della "
-                                "stessa faccia devono sommare meno del suo spessore."
+                                "Name of the edge, between two faces of the box. "
+                                "Convention, seen from above with the long axis "
+                                "horizontal: left/right = left/right sides, front = "
+                                "BOTTOM side of the view, back = top side, top = "
+                                "upper face, bottom = seating face. The rounded "
+                                "corners of the outline SEEN FROM ABOVE (e.g. a board with "
+                                "round corners) are the vertical edges front-left, "
+                                "front-right, back-left, back-right. top-*/bottom-* are "
+                                "instead the horizontal edges of the upper or "
+                                "lower face (rounded edge seen in profile): do NOT "
+                                "use them for the corners seen from above. On a thin body "
+                                "(e.g. a PCB) the fillets of two opposite edges of the "
+                                "same face must add up to less than its thickness."
                             ),
                         },
                         "radius_mm": {
                             "type": "number",
                             "description": (
-                                "Raggio stimato dalla foto, nell'unita' di drawing_unit "
-                                "(nessuna quota "
-                                "disponibile per un raggio visivo: usa una stima standard "
-                                "plausibile, es. 0.5-1.5mm per un case plastico stampato)."
+                                "Radius estimated from the photo, in the unit of drawing_unit "
+                                "(no dimension "
+                                "is available for a visual radius: use a plausible standard "
+                                "estimate, e.g. 0.5-1.5mm for a moulded plastic case)."
                             ),
                         },
                     },
@@ -690,33 +694,33 @@ _EXTRACTION_TOOL = {
             "pin_map": {
                 "type": "array",
                 "description": (
-                    "Posizione di ogni pin nella matrice, ESATTAMENTE COME APPARE NEL "
-                    "DISEGNO: non ribaltare e non ruotare nulla, riporta solo cio' che "
-                    "vedi (dell'eventuale specchiatura si occupa il programma, in base "
-                    "a contacts_view). Serve quando la numerazione NON segue, nel "
-                    "disegno letto, l'ordine colonna per colonna (1,2 poi 3,4...) "
-                    "tipico dei pin header: i package DIP-style numerano a U (1..N "
-                    "lungo una fila, poi a ritroso sull'altra). Se la numerazione segue "
-                    "l'ordine delle colonne puoi ometterla: contacts_view vale comunque, "
-                    "e una bottom view viene specchiata anche senza pin_map. Elenca SOLO "
-                    "i pin il cui numero e' SCRITTO nel disegno accanto alla posizione: "
-                    "non estendere la numerazione alle posizioni senza numero e non "
-                    "applicare una convenzione (pin header o DIP) al posto della lettura; "
-                    "una posizione senza numero nel disegno non va in pin_map."
+                    "Position of every pin in the matrix, EXACTLY AS IT APPEARS IN THE "
+                    "DRAWING: do not flip and do not rotate anything, report only what you "
+                    "see (the program takes care of any mirroring, based "
+                    "on contacts_view). It is needed when the numbering does NOT follow, in the "
+                    "drawing read, the column-by-column order (1,2 then 3,4...) "
+                    "typical of pin headers: DIP-style packages number in a U (1..N "
+                    "along one row, then backwards along the other). If the numbering follows "
+                    "the order of the columns you may omit it: contacts_view still applies, "
+                    "and a bottom view is mirrored even without pin_map. List ONLY "
+                    "the pins whose number is WRITTEN in the drawing next to the position: "
+                    "do not extend the numbering to the positions without a number and do not "
+                    "apply a convention (pin header or DIP) instead of the reading; "
+                    "a position without a number in the drawing does not go in pin_map."
                 ),
                 "items": {
                     "type": "object",
                     "properties": {
                         "pin": {"type": "string", "description": (
-                            "Numero del pin COME E' STAMPATO nel disegno o nella "
-                            "tabella, come testo: 1, 11, A1, B12, EP.")},
+                            "Number of the pin AS IT IS PRINTED in the drawing or in the "
+                            "table, as text: 1, 11, A1, B12, EP.")},
                         "row": {
                             "type": "integer",
-                            "description": "Indice riga, 0 = prima fila (y=0), 1 = fila successiva",
+                            "description": "Row index, 0 = first row (y=0), 1 = next row",
                         },
                         "col": {
                             "type": "integer",
-                            "description": "Indice colonna, 0 = colonna piu' a sinistra NEL DISEGNO",
+                            "description": "Column index, 0 = leftmost column IN THE DRAWING",
                         },
                     },
                     "required": ["pin", "row", "col"],
@@ -725,48 +729,48 @@ _EXTRACTION_TOOL = {
             "pinout": {
                 "type": "array",
                 "description": (
-                    "Tabella pinout del datasheet: per ogni pin FISICAMENTE PRESENTE, "
-                    "il numero e la funzione. Se il datasheet elenca piu' configurazioni "
-                    "(varianti in colonne diverse), riporta la prima e aggiungi "
-                    "l'alternativa tra parentesi solo se diversa. Se non c'e' una tabella ma "
-                    "il disegno del pinout mostra lo SCHEMA ELETTRICO con i terminali numerati "
-                    "(bobina fra due terminali, contatto con comune/NC/NA, anodo e catodo, "
-                    "avvolgimenti), ricava la funzione dal simbolo e scrivila (es. \"Bobina\", "
-                    "\"Comune\", \"NC\", \"NA\"), segnalando in notes che e' ricavata dal "
-                    "simbolo. Ometti solo se il documento non mostra ne' tabella ne' schema."
+                    "Pinout table of the datasheet: for every PHYSICALLY PRESENT pin, "
+                    "the number and the function. If the datasheet lists several configurations "
+                    "(variants in different columns), report the first one and add "
+                    "the alternative in brackets only if different. If there is no table but "
+                    "the pinout drawing shows the ELECTRICAL SCHEMATIC with the numbered terminals "
+                    "(coil between two terminals, contact with common/NC/NO, anode and cathode, "
+                    "windings), derive the function from the symbol and write it (e.g. \"Coil\", "
+                    "\"Common\", \"NC\", \"NO\"), stating in notes that it is derived from the "
+                    "symbol. Omit it only if the document shows neither a table nor a schematic."
                 ),
                 "items": {
                     "type": "object",
                     "properties": {
                         "pin": {"type": "string", "description": (
-                            "Numero del pin COME E' STAMPATO nel disegno o nella "
-                            "tabella, come testo: 1, 11, A1, B12, EP.")},
+                            "Number of the pin AS IT IS PRINTED in the drawing or in the "
+                            "table, as text: 1, 11, A1, B12, EP.")},
                         "name": {
                             "type": "string",
                             "description": (
-                                "Funzione del pin come la scrive il documento (NC se "
-                                "non collegato)."
+                                "Function of the pin as the document writes it (NC if "
+                                "not connected)."
                             ),
                         },
                         "function": {
                             "type": "string", "enum": list(PINOUT_FUNCTIONS),
                             "description": (
-                                "Ruolo ELETTRICO del terminale SOLO se il documento lo mostra "
-                                "(tabella o schema elettrico accanto al pinout): coil = "
-                                "terminale della bobina di un rele'; common = comune di un "
-                                "contatto; nc = contatto normalmente CHIUSO (NON «non "
-                                "collegato»: un pin non collegato e' other); no = contatto "
-                                "normalmente aperto; other = qualunque altro ruolo o ruolo non "
-                                "mostrato. Mai dedotto dal nome del componente."
+                                "ELECTRICAL role of the terminal ONLY if the document shows it "
+                                "(table or electrical schematic next to the pinout): coil = "
+                                "terminal of the coil of a relay; common = common of a "
+                                "contact; nc = normally CLOSED contact (NOT «not "
+                                "connected»: a pin that is not connected is other); no = normally "
+                                "open contact; other = any other role or a role not "
+                                "shown. Never deduced from the name of the component."
                             ),
                         },
                         "contact": {
                             "type": "string",
                             "description": (
-                                "SOLO per common/nc/no di un rele' con PIU' contatti: l'etichetta "
-                                "del contatto come la stampa il documento (1, 2, A, B, ...), la "
-                                "stessa per il comune e per i suoi nc/no. Con un solo contatto "
-                                "ometti. Mai inventata: senza etichetta stampata ometti."
+                                "ONLY for common/nc/no of a relay with SEVERAL contacts: the label "
+                                "of the contact as the document prints it (1, 2, A, B, ...), the "
+                                "same for the common and for its nc/no. With a single contact "
+                                "omit it. Never invented: without a printed label omit it."
                             ),
                         },
                     },
@@ -776,32 +780,32 @@ _EXTRACTION_TOOL = {
             "body_color_hex": {
                 "type": "string",
                 "description": (
-                    "Colore del case letto dalla FOTO del prodotto, formato '#rrggbb' "
-                    "(es. '#1a1a1a' per un case nero, '#c41230' per uno rosso). Usa il "
-                    "colore dell'involucro, non quello di un'etichetta applicata sopra "
-                    "-- a meno che l'etichetta copra di fatto tutta la faccia superiore, "
-                    "nel qual caso e' quello il colore che si vede. "
-                    "Ometti se non c'e' una foto del prodotto."
+                    "Colour of the case read from the product PHOTO, format '#rrggbb' "
+                    "(e.g. '#1a1a1a' for a black case, '#c41230' for a red one). Use the "
+                    "colour of the housing, not that of a label applied on it "
+                    "-- unless the label in fact covers the whole upper face, "
+                    "in which case that is the colour that is seen. "
+                    "Omit it if there is no product photo."
                 ),
             },
             "text_color_hex": {
                 "type": "string",
                 "description": (
-                    "Colore della serigrafia/scritte sul case nella foto, formato "
-                    "'#rrggbb' (es. '#ffffff' per scritte bianche su case scuro). "
-                    "Ometti se non c'e' una foto o non si leggono scritte."
+                    "Colour of the silkscreen/markings on the case in the photo, format "
+                    "'#rrggbb' (e.g. '#ffffff' for white markings on a dark case). "
+                    "Omit it if there is no photo or no marking can be read."
                 ),
             },
             "castellated_sides": {
                 "type": "array",
                 "description": (
-                    "SOLO con layout=\"castellated\": un elemento per ogni lato del "
-                    "modulo che porta contatti (fino a quattro), letto COSI' COME "
-                    "APPARE nel disegno o nella foto, senza ribaltare nulla: la vista "
-                    "letta va dichiarata in contacts_view e la specchiatura di una "
-                    "bottom view la fa il programma. Ogni lato ha il suo numero di "
-                    "contatti e il suo passo: e' proprio il motivo per cui questi "
-                    "moduli non stanno in una matrice. L'origine e' il centro del corpo."
+                    "ONLY with layout=\"castellated\": one element for every side of the "
+                    "module that carries contacts (up to four), read AS IT "
+                    "APPEARS in the drawing or in the photo, without flipping anything: the view "
+                    "read is declared in contacts_view and the program mirrors a "
+                    "bottom view. Every side has its own number of "
+                    "contacts and its own pitch: that is exactly why these "
+                    "modules do not fit in a matrix. The origin is the centre of the body."
                 ),
                 "items": {
                     "type": "object",
@@ -810,151 +814,151 @@ _EXTRACTION_TOOL = {
                             "type": "string",
                             "enum": list(EDGES),
                             "description": (
-                                "Lato del modulo come appare nella vista letta: "
-                                "\"left\"/\"right\" i lati verticali, \"top\"/\"bottom\" "
-                                "quelli orizzontali. \"top\" e' il lato in alto nel "
-                                "disegno."
+                                "Side of the module as it appears in the view read: "
+                                "\"left\"/\"right\" the vertical sides, \"top\"/\"bottom\" "
+                                "the horizontal ones. \"top\" is the upper side in the "
+                                "drawing."
                             ),
                         },
                         "count": {
                             "type": "integer",
                             "description": (
-                                "Numero di contatti FISICI su questo lato: i fori "
-                                "metallizzati tagliati dal bordo (semi-fori) o i fori "
-                                "interi del bordo, contati uno per uno sulla foto e sugli "
-                                "ingrandimenti dei bordi quando ci sono. Le sigle "
-                                "serigrafate, le etichette dei LED o dei componenti e il "
-                                "testo vicino al bordo NON sono contatti: conta i fori, "
-                                "non le scritte. Verifica che (count-1) x pitch_mm stia "
-                                "nel bordo quotato."
+                                "Number of PHYSICAL contacts on this side: the plated "
+                                "holes cut by the edge (half holes) or the whole holes "
+                                "of the edge, counted one by one on the photo and on the "
+                                "enlargements of the edges when there are any. The "
+                                "silkscreen labels, the labels of the LEDs or of the components and the "
+                                "text near the edge are NOT contacts: count the holes, "
+                                "not the writing. Check that (count-1) x pitch_mm fits "
+                                "in the dimensioned edge."
                             ),
                         },
                         "pitch_mm": {
                             "type": "number",
                             "description": (
-                                "Passo tra contatti adiacenti SU QUESTO LATO, "
-                                "nell'unita' di drawing_unit: puo' essere diverso da "
-                                "quello degli altri lati."
+                                "Pitch between adjacent contacts ON THIS SIDE, "
+                                "in the unit of drawing_unit: it may differ from "
+                                "that of the other sides."
                             ),
                         },
                         "first_pin": {
                             "type": "integer",
                             "description": (
-                                "Numero del primo contatto di questo lato, seguendo il "
-                                "bordo dall'alto in basso (lati verticali) o da sinistra "
-                                "a destra (lati orizzontali). Deve essere il minimo della "
-                                "sequenza anche con reverse=true. I numeri fisici devono "
-                                "essere univoci tra TUTTI i lati: non ricominciare da 1 "
-                                "su ogni lato e non usare i numeri GPIO come numeri pad."
+                                "Number of the first contact of this side, following the "
+                                "edge from top to bottom (vertical sides) or from left "
+                                "to right (horizontal sides). It must be the minimum of the "
+                                "sequence even with reverse=true. The physical numbers must "
+                                "be unique across ALL the sides: do not restart from 1 "
+                                "on every side and do not use the GPIO numbers as pad numbers."
                             ),
                         },
                         "reverse": {
                             "type": "boolean",
                             "description": (
-                                "true se su questo lato la numerazione cresce nel verso "
-                                "opposto (dal basso verso l'alto, o da destra a sinistra)."
+                                "true if on this side the numbering grows in the opposite "
+                                "direction (from bottom to top, or from right to left)."
                             ),
                         },
                         "offset_mm": {
                             "type": "number",
                             "description": (
-                                "Spostamento del gruppo di contatti lungo il bordo "
-                                "rispetto alla posizione centrata, nell'unita' di "
+                                "Shift of the group of contacts along the edge "
+                                "relative to the centred position, in the unit of "
                                 "drawing_unit "
-                                "(positivo verso il basso o verso destra). Ometti o 0 "
-                                "se i contatti sono centrati sul lato."
+                                "(positive downwards or to the right). Omit it or 0 "
+                                "if the contacts are centred on the side."
                             ),
                         },
                         "first_contact_from_edge_mm": {
                             "type": "number",
                             "description": (
-                                "Distanza, lungo il bordo, dall'inizio del bordo (da "
-                                "sinistra per top/bottom, dall'alto per left/right) al "
-                                "centro del PRIMO contatto, nell'unita' di drawing_unit. "
-                                "SOLO se e' una quota scritta nel disegno quotato; ometti "
-                                "altrimenti, non derivarla."
+                                "Distance, along the edge, from the start of the edge (from "
+                                "the left for top/bottom, from the top for left/right) to the "
+                                "centre of the FIRST contact, in the unit of drawing_unit. "
+                                "ONLY if it is a dimension written in the dimensioned drawing; omit it "
+                                "otherwise, do not derive it."
                             ),
                         },
                         "last_contact_from_edge_mm": {
                             "type": "number",
                             "description": (
-                                "Distanza, lungo il bordo, dalla fine del bordo al centro "
-                                "dell'ULTIMO contatto, nell'unita' di drawing_unit. SOLO se "
-                                "e' una quota scritta nel disegno quotato; ometti "
-                                "altrimenti, non derivarla."
+                                "Distance, along the edge, from the end of the edge to the centre "
+                                "of the LAST contact, in the unit of drawing_unit. ONLY if "
+                                "it is a dimension written in the dimensioned drawing; omit it "
+                                "otherwise, do not derive it."
                             ),
                         },
                         "pad_length_mm": {
                             "type": "number",
                             "description": (
-                                "Lunghezza della piazzola perpendicolarmente al bordo "
-                                "(quanto entra sotto il modulo piu' quanto sporge), "
-                                "dalla \"Recommended PCB land pattern\". Ometti se il "
-                                "datasheet non la riporta."
+                                "Length of the land perpendicular to the edge "
+                                "(how far it goes under the module plus how far it protrudes), "
+                                "from the \"Recommended PCB land pattern\". Omit it if the "
+                                "datasheet does not give it."
                             ),
                         },
                         "pad_width_mm": {
                             "type": "number",
                             "description": (
-                                "Larghezza della piazzola lungo il bordo (di norma poco "
-                                "piu' del diametro del semi-foro). Ometti se assente."
+                                "Width of the land along the edge (normally a little "
+                                "more than the diameter of the half hole). Omit it if absent."
                             ),
                         },
                         "contact_style": {
                             "type": "string",
                             "enum": list(CONTACT_STYLES),
                             "description": (
-                                "Che feature metallizzata porta ogni contatto di questo "
-                                "lato, GUARDANDO LA FOTO del bordo (non dedurlo dalle "
-                                "quote): \"half_hole\" se il foro dorato e' tagliato dal "
-                                "bordo della scheda (mezzaluna aperta verso l'esterno); "
-                                "\"through_hole\" se il foro e' un cerchio intero chiuso, "
-                                "con una corona dorata completa e scheda intatta fra la "
-                                "corona e il bordo, che resta dritto; "
-                                "\"half_and_through\" se sullo stesso contatto ci sono "
-                                "entrambi, la mezzaluna sul bordo e un foro intero poco "
-                                "piu' dentro. Ometti se la foto non mostra il bordo o se "
-                                "non distingui il tipo: non dedurlo e non scegliere un "
-                                "valore abituale, il programma lo chiedera' all'utente."
+                                "Which plated feature every contact of this side "
+                                "carries, LOOKING AT THE PHOTO of the edge (do not deduce it from the "
+                                "dimensions): \"half_hole\" if the gold hole is cut by the "
+                                "edge of the board (half-moon open towards the outside); "
+                                "\"through_hole\" if the hole is a whole closed circle, "
+                                "with a complete gold ring and intact board between the "
+                                "ring and the edge, which stays straight; "
+                                "\"half_and_through\" if the same contact has "
+                                "both, the half-moon on the edge and a whole hole a little "
+                                "further in. Omit it if the photo does not show the edge or if "
+                                "you cannot tell the type: do not deduce it and do not choose a "
+                                "usual value, the program will ask the user."
                             ),
                         },
                         "half_hole_diameter_mm": {
                             "type": "number", "exclusiveMinimum": 0,
                             "description": (
-                                "Diametro del semi-foro metallizzato tagliato dal bordo "
-                                "(il cerchio intero di cui il bordo mostra meta'), "
-                                "nell'unita' di drawing_unit: dalla quota del disegno "
-                                "o, se non quotato, stimato dalla foto in proporzione "
-                                "alle quote note (\"estimated\" in value_sources). Ometti "
-                                "se il lato non ha semi-fori o non si vedono."
+                                "Diameter of the plated half hole cut by the edge "
+                                "(the whole circle of which the edge shows half), "
+                                "in the unit of drawing_unit: from the dimension of the drawing "
+                                "or, if not dimensioned, estimated from the photo in proportion "
+                                "to the known dimensions (\"estimated\" in value_sources). Omit it "
+                                "if the side has no half holes or they cannot be seen."
                             ),
                         },
                         "through_hole_drill_mm": {
                             "type": "number", "exclusiveMinimum": 0,
                             "description": (
-                                "Diametro del foro intero (foro passante vicino al "
-                                "bordo) dei contatti di questo lato, nell'unita' di "
-                                "drawing_unit: dalla quota del disegno o, se non "
-                                "quotato, stimato dalla foto in proporzione alle quote "
-                                "note (\"estimated\" in value_sources). Solo se il lato "
-                                "ha fori interi; altrimenti ometti."
+                                "Diameter of the whole hole (through hole near the "
+                                "edge) of the contacts of this side, in the unit of "
+                                "drawing_unit: from the dimension of the drawing or, if not "
+                                "dimensioned, estimated from the photo in proportion to the known "
+                                "dimensions (\"estimated\" in value_sources). Only if the side "
+                                "has whole holes; otherwise omit it."
                             ),
                         },
-                        "value_sources": _value_sources_schema(_SIDE_LENGTH_KEYS, "per questo lato"),
+                        "value_sources": _value_sources_schema(_SIDE_LENGTH_KEYS, "for this side"),
                         "pin_names": {
                             "type": "array",
                             "items": {"type": "string"},
                             "description": (
-                                "Sigle serigrafate accanto ai contatti di questo lato, "
-                                "nell'ordine in cui si incontrano lungo il bordo nella "
-                                "vista letta (dall'alto in basso sui lati verticali, da "
-                                "sinistra a destra su quelli orizzontali). Esattamente "
-                                "un nome per contatto contato in count: una sigla "
-                                "stampata a cavallo di due fori (es. due lettere "
-                                "vicine) va divisa fra i due contatti, non unita in un "
-                                "nome solo; le etichette di LED o componenti vicini non "
-                                "sono nomi di contatti. Servono a documentare il "
-                                "pinout, non a numerare i pad."
+                                "Silkscreen labels next to the contacts of this side, "
+                                "in the order in which they are met along the edge in the "
+                                "view read (from top to bottom on the vertical sides, from "
+                                "left to right on the horizontal ones). Exactly "
+                                "one name per contact counted in count: a label "
+                                "printed across two holes (e.g. two letters "
+                                "close together) is split between the two contacts, not joined into a "
+                                "single name; the labels of nearby LEDs or components are not "
+                                "contact names. They document the "
+                                "pinout, they do not number the pads."
                             ),
                         },
                     },
@@ -964,19 +968,19 @@ _EXTRACTION_TOOL = {
             "components_3d": {
                 "type": "array",
                 "description": (
-                    "Per schede popolate, sia THT (matrix) sia castellated, solo se tra i "
-                    "file c'e' una FOTO del lato superiore: i componenti visibili, "
-                    "approssimati a blocchi rettangolari, per dare al modello 3D "
-                    "l'aspetto del modulo reale invece di una lastra liscia. "
-                    "Elenca TUTTI i componenti visibili, uno per uno, grandi e piccoli, "
-                    "compreso OGNI singolo passivo, ciascuno con la propria posizione e "
-                    "il proprio orientamento (length_mm asse lungo locale, width_mm asse "
-                    "corto, rotation_deg orientamento). Non esiste un numero atteso: "
-                    "riporta i corpi che vedi, senza aggiungerne ne' toglierne per "
-                    "arrivare a un conteggio. Nessuna quota di questi e' data dal "
-                    "datasheet -- sono stime visive in proporzione alle dimensioni note "
-                    "del modulo, ed e' normale che sia cosi'. "
-                    "Ometti il campo se non c'e' una foto dall'alto."
+                    "For populated boards, both THT (matrix) and castellated, only if among the "
+                    "files there is a PHOTO of the upper side: the visible components, "
+                    "approximated as rectangular blocks, to give the 3D model "
+                    "the look of the real module instead of a smooth plate. "
+                    "List ALL the visible components, one by one, large and small, "
+                    "including EVERY single passive, each with its own position and "
+                    "its own orientation (length_mm local long axis, width_mm short "
+                    "axis, rotation_deg orientation). There is no expected number: "
+                    "report the bodies you see, without adding or removing any to "
+                    "reach a count. No dimension of these is given by the "
+                    "datasheet -- they are visual estimates in proportion to the known "
+                    "dimensions of the module, and that is normal. "
+                    "Omit the field if there is no top-view photo."
                 ),
                 "items": {
                     "type": "object",
@@ -984,72 +988,72 @@ _EXTRACTION_TOOL = {
                         "name": {
                             "type": "string",
                             "description": (
-                                "Tipo del corpo in parole semplici, senza codici "
-                                "commerciali: finisce nel nome del solido."
+                                "Type of the body in plain English words, without commercial "
+                                "codes: it ends up in the name of the solid."
                             ),
                         },
                         "x_mm": {
                             "type": "number",
                             "description": (
-                                "Posizione del CENTRO del componente lungo X rispetto al "
-                                "centro del modulo, nell'unita' di drawing_unit: negativa verso "
-                                "sinistra, positiva verso destra nella foto vista "
-                                "dall'alto (il modulo e' lungo body_length_mm)."
+                                "Position of the CENTRE of the component along X relative to the "
+                                "centre of the module, in the unit of drawing_unit: negative towards "
+                                "the left, positive towards the right in the photo seen "
+                                "from above (the module is body_length_mm long)."
                             ),
                         },
                         "y_mm": {
                             "type": "number",
                             "description": (
-                                "Posizione del CENTRO lungo Y rispetto al centro del "
-                                "modulo: negativa verso l'alto della foto, positiva "
-                                "verso il basso (il modulo e' largo body_width_mm)."
+                                "Position of the CENTRE along Y relative to the centre of the "
+                                "module: negative towards the top of the photo, positive "
+                                "towards the bottom (the module is body_width_mm wide)."
                             ),
                         },
                         "length_mm": {
                             "type": "number",
                             "description": (
-                                "Lunghezza del componente lungo il SUO asse lungo, "
-                                "indipendentemente da come e' ruotato sul modulo: "
-                                "l'orientamento va in rotation_deg."
+                                "Length of the component along ITS long axis, "
+                                "regardless of how it is rotated on the module: "
+                                "the orientation goes in rotation_deg."
                             ),
                         },
                         "width_mm": {
                             "type": "number",
-                            "description": "Larghezza lungo l'asse corto del componente.",
+                            "description": "Width along the short axis of the component.",
                         },
                         "rotation_deg": {
                             "type": "number",
                             "enum": [0, 90, 180, 270],
                             "description": (
-                                "Come il componente sta sul modulo visto dall'alto: 0 se il "
-                                "suo asse lungo e' orizzontale (parallelo al lato lungo del "
-                                "modulo, X), 90 se e' verticale (Y). Guardalo nella foto: un "
-                                "diodo o una resistenza \"in piedi\" e' 90. 180/270 solo se "
-                                "conta il verso (banda del diodo, pin 1) e lo vedi."
+                                "How the component lies on the module seen from above: 0 if "
+                                "its long axis is horizontal (parallel to the long side of the "
+                                "module, X), 90 if it is vertical (Y). Look at it in the photo: a "
+                                "diode or a resistor \"standing up\" is 90. 180/270 only if "
+                                "the direction matters (diode band, pin 1) and you see it."
                             ),
                         },
                         "height_mm": {
                             "type": "number",
                             "description": (
-                                "Altezza sopra il PCB: da una vista laterale quotata se "
-                                "c'e', altrimenti stimata dal tipo di corpo (kind) e dalle "
-                                "sue dimensioni in pianta; da una sola foto dall'alto e' "
-                                "sempre una stima. Non superare l'altezza totale del "
-                                "modulo meno lo spessore del PCB."
+                                "Height above the PCB: from a dimensioned side view if "
+                                "there is one, otherwise estimated from the type of body (kind) and from "
+                                "its plan dimensions; from a single top-view photo it is "
+                                "always an estimate. Do not exceed the total height of the "
+                                "module minus the thickness of the PCB."
                             ),
                         },
                         "color_hex": {
                             "type": "string",
-                            "description": "Colore visto in foto, '#rrggbb'.",
+                            "description": "Colour seen in the photo, '#rrggbb'.",
                         },
                         "kind": {
                             "type": "string",
                             "enum": list(COMPONENT_KINDS),
                             "description": (
-                                "Tipo di corpo riconosciuto dalla foto dalla sua FORMA "
-                                "(non dalla funzione elettrica ne' dalla marca): decide la "
-                                "forma nel modello 3D e l'altezza plausibile. \"generic\" "
-                                "se non riconoscibile. Valori: "
+                                "Type of body recognised in the photo from its SHAPE "
+                                "(not from the electrical function nor from the brand): it decides the "
+                                "shape in the 3D model and the plausible height. \"generic\" "
+                                "if not recognisable. Values: "
                                 + "; ".join(f"{kind} = {text}" for kind, text
                                             in COMPONENT_KIND_DESCRIPTIONS.items()) + "."
                             ),
@@ -1057,10 +1061,10 @@ _EXTRACTION_TOOL = {
                         "marking": {
                             "type": "string",
                             "description": (
-                                "Scritta stampata sul componente, SOLO se leggibile nella "
-                                "foto, copiata carattere per carattere: serve a cercare il "
-                                "modello di libreria per marcatura, non viene stampata sul "
-                                "solido. Non inventare codici."
+                                "Marking printed on the component, ONLY if readable in the "
+                                "photo, copied character by character: it is used to look up the "
+                                "library model by marking, it is not printed on the "
+                                "solid. Do not invent codes."
                             ),
                         },
                     },
@@ -1073,15 +1077,16 @@ _EXTRACTION_TOOL = {
                 },
             },
             "value_sources": _value_sources_schema(
-                _TOP_LENGTH_KEYS, "a questo livello (i lati castellated hanno il loro)"),
+                _TOP_LENGTH_KEYS, "at this level (the castellated sides have their own)"),
             "confidence": {
                 "type": "string",
                 "enum": ["high", "medium", "low"],
-                "description": "Quanto sei sicuro dei valori estratti dal datasheet",
+                "description": "How sure you are of the values extracted from the datasheet",
             },
             "notes": {
                 "type": "string",
-                "description": "Ambiguita', assunzioni fatte o valori non trovati nel datasheet",
+                "description": ("Ambiguities, assumptions made or values not found in the "
+                                "datasheet, written in English"),
             },
         },
         # Always required; the matrix fields and the castellated-side fields
@@ -1101,46 +1106,47 @@ _EXTRACTION_TOOL = {
 #: convention over the six numbers printed on the TEL8 drawing), so the
 #: numbering is asked again, alone, with the drawing alone.
 DEFAULT_PIN_NUMBERING_PROMPT = (
-    "Sei un lettore di disegni meccanici. Ti viene mostrato il disegno quotato di un "
-    "componente con i suoi pin disposti su una griglia regolare. Il tuo UNICO compito e' "
-    "riportare, per ogni NUMERO DI PIN STAMPATO nel disegno accanto a una posizione, la "
-    "riga e la colonna di quella posizione sulla griglia. Conta righe e colonne COSI' COME "
-    "APPAIONO nel disegno: riga 0 la fila piu' in alto, colonna 0 la posizione piu' a "
-    "sinistra della griglia intera a passo costante, posizioni vuote comprese (due pin "
-    "distanti un multiplo del passo sono tante colonne piu' in la' quanti sono i passi). "
-    "Non specchiare e non ruotare nulla: dichiara in contacts_view se il disegno e' una "
-    "vista dal basso (BOTTOM VIEW) o dall'alto, e il programma fara' la specchiatura. "
-    "Riporta SOLO i numeri che leggi stampati: non estendere la numerazione alle posizioni "
-    "senza numero e non applicare alcuna convenzione (pin header, DIP). Se non leggi "
-    "nessun numero, rispondi con un elenco vuoto. Rispondi SOLO chiamando lo strumento."
+    "You are a reader of mechanical drawings. You are shown the dimensioned drawing of a "
+    "component with its pins arranged on a regular grid. Your ONLY task is to "
+    "report, for every PIN NUMBER PRINTED in the drawing next to a position, the "
+    "row and the column of that position on the grid. Count rows and columns AS THEY "
+    "APPEAR in the drawing: row 0 the topmost row, column 0 the leftmost position "
+    "of the whole grid at constant pitch, empty positions included (two pins "
+    "a multiple of the pitch apart are as many columns further on as there are pitches). "
+    "Do not mirror and do not rotate anything: declare in contacts_view whether the drawing is a "
+    "view from below (BOTTOM VIEW) or from above, and the program will do the mirroring. "
+    "Report ONLY the numbers you read printed: do not extend the numbering to the positions "
+    "without a number and do not apply any convention (pin header, DIP). If you read "
+    "no number, answer with an empty list. Write any note in English. Answer ONLY by "
+    "calling the tool."
 )
 
 _PIN_NUMBERING_TOOL = {
     "name": "report_pin_numbering",
-    "description": "Posizione sulla griglia di ogni numero di pin stampato nel disegno.",
+    "description": "Position on the grid of every pin number printed in the drawing.",
     "input_schema": {
         "type": "object",
         "properties": {
             "contacts_view": {
                 "type": "string", "enum": ["top", "bottom", "unknown"],
-                "description": "Da che lato e' visto il disegno dei pin (titolo BOTTOM VIEW = bottom).",
+                "description": "From which side the drawing of the pins is seen (title BOTTOM VIEW = bottom).",
             },
             "pins": {
                 "type": "array",
-                "description": "Un elemento per ogni numero di pin STAMPATO nel disegno, nessun altro.",
+                "description": "One element for every pin number PRINTED in the drawing, no other.",
                 "items": {
                     "type": "object",
                     "properties": {
                         "pin": {"type": "string", "description": (
-                            "Numero stampato accanto alla posizione, come testo e come "
-                            "appare: 1, 11, A1, B12, EP.")},
-                        "row": {"type": "integer", "description": "Indice riga: 0 = fila piu' in alto nel disegno."},
-                        "col": {"type": "integer", "description": "Indice colonna: 0 = posizione piu' a sinistra nel disegno."},
+                            "Number printed next to the position, as text and as it "
+                            "appears: 1, 11, A1, B12, EP.")},
+                        "row": {"type": "integer", "description": "Row index: 0 = topmost row in the drawing."},
+                        "col": {"type": "integer", "description": "Column index: 0 = leftmost position in the drawing."},
                     },
                     "required": ["pin", "row", "col"],
                 },
             },
-            "notes": {"type": "string", "description": "Dubbi di lettura, in breve."},
+            "notes": {"type": "string", "description": "Reading doubts, briefly, in English."},
         },
         "required": ["contacts_view", "pins"],
     },
@@ -1226,9 +1232,9 @@ def read_pin_numbering(documents, *, rows, cols, model, call, prompt=None,
             blocks.append({"type": "text", "text": f"FILE {index}: {path.name}"})
             blocks.append(_file_to_content_block(path, model))
         blocks.append({"type": "text", "text": (
-            f"La griglia dei pin ha {int(rows)} file (righe) e {int(cols)} posizioni per fila "
-            f"(colonne) a passo costante. Riporta la posizione di ogni numero di pin stampato "
-            f"nel disegno, come testo e come appare (1, 11, A1, EP), e chiama lo strumento.")})
+            f"The pin grid has {int(rows)} rows and {int(cols)} positions per row "
+            f"(columns) at constant pitch. Report the position of every pin number printed "
+            f"in the drawing, as text and as it appears (1, 11, A1, EP), and call the tool.")})
         # The profile text, or the default's bytes when it is the default
         # (V4-5); the request declares the field it sends (V4-6).
         sent = effective_text("numbering_prompt", {"numbering_prompt": prompt})
@@ -1286,44 +1292,44 @@ def read_pin_numbering(documents, *, rows, cols, model, call, prompt=None,
 #: the program adds them up (pads_from_chains): both readings had dropped one
 #: quote of a chain while summing it, the same way.
 DEFAULT_PAD_POSITIONS_PROMPT = (
-    "Sei un lettore di disegni meccanici. Ti viene mostrato il disegno quotato dei fori o "
-    "delle piazzole di UN SOLO componente. NON calcolare coordinate: trascrivi le CATENE DI "
-    "QUOTE cosi' come sono stampate, le somme le fa il programma. Una catena e' una fila di "
-    "quote consecutive lungo un asse: x orizzontale (da sinistra a destra) oppure y verticale "
-    "(dall'alto in basso). Per ogni catena elenca in `stops` le fermate in ordine crescente "
-    "sulla pagina e in `values` le quote stampate fra due fermate consecutive (una in meno "
-    "delle fermate); se invece le quote sono ORDINATE, cioe' tutte misurate dalla prima "
-    "fermata (0, 5, 10, 15 da un riferimento), dichiara kind \"from_first_stop\" e in values le "
-    "quote cosi' come stampate, senza sottrarle. In values_text ricopia ogni quota com'e' "
-    "scritta, con i suoi decimali. Una fermata e' il numero del foro o della piazzola che la "
-    "quota raggiunge; se piu' fori stanno sulla stessa linea di quota scrivili insieme separati "
-    "da virgola; scrivi \"edge\" per il contorno del CORPO, solo come prima o ultima fermata; "
-    "\"edge:<nome>\" per un altro contorno disegnato che non e' il corpo (flangia, base, "
-    "piastra); \"ref:<nome>\" per un riferimento o un foro di fissaggio che non e' un "
-    "terminale. Se una quota arriva al BORDO di una piazzola e non al suo centro (tipico dei "
-    "land pattern SMD), dichiaralo in `at` per quella fermata (near_edge o far_edge): la "
-    "conversione al centro la fa il programma. "
-    "Includi le quote fra parentesi (di riferimento) e quelle verso il contorno del corpo. "
-    "Ogni foro numerato deve comparire in almeno una catena x e una catena y. Non saltare "
-    "nessuna quota della catena e non sommarne due. LINEA D'ASSE: se su un asse un foro non ha "
-    "una quota ma sta su una linea d'asse (tratto-punto) disegnata a meta' fra due fermate "
-    "(due fori, o i due bordi del corpo), dichiaralo in midpoints con l'asse, il foro e le due "
-    "fermate (per il contorno del corpo da un solo lato dichiara in edge_side quale): la media "
-    "la fa il programma. Non inventare una quota che non e' stampata e non "
-    "scrivere catene con una sola fermata: un foro senza quota e senza linea d'asse su un asse "
-    "resta fuori da quell'asse. Dichiara in drawing_unit l'unita' delle "
-    "quote e in contacts_view se il disegno e' una vista dal basso (BOTTOM VIEW, lato "
-    "saldature) o dall'alto. Non specchiare e non ruotare nulla. Se un foro non ha un numero e "
-    "non si riconosce dalla vista del pinout, non includerlo. FORI STAMPATI: se il disegno "
-    "stampa il diametro dei fori (richiamo come \"3-Ø1.2\" o \"Ø1.3+0.1\"), riportalo in "
-    "printed_holes coi numeri dei fori a cui si riferisce e il testo com'e' stampato; un foro "
-    "il cui diametro non e' stampato non va stimato. TERMINALI QUOTATI: se il disegno quota la "
-    "SEZIONE dei terminali che entrano nei fori (reofori, pin, lamelle: un diametro come "
-    "\"Ø0.6\", oppure larghezza per spessore come \"1.0x0.4\"), riportala in printed_terminals "
-    "coi numeri dei fori a cui si riferisce: shape \"round\" con diameter, oppure shape "
-    "\"flat\" con width e thickness, e il testo com'e' stampato. E' il terminale, NON il foro; "
-    "un terminale la cui sezione non e' quotata resta fuori, non va stimato. "
-    "Rispondi SOLO chiamando lo strumento."
+    "You are a reader of mechanical drawings. You are shown the dimensioned drawing of the holes or "
+    "of the lands of ONE SINGLE component. Do NOT compute coordinates: transcribe the DIMENSION "
+    "CHAINS as they are printed, the program does the sums. A chain is a row of "
+    "consecutive dimensions along one axis: x horizontal (from left to right) or y vertical "
+    "(from top to bottom). For every chain list in `stops` the stops in increasing order "
+    "on the page and in `values` the dimensions printed between two consecutive stops (one fewer "
+    "than the stops); if instead the dimensions are ORDINATE, that is all measured from the first "
+    "stop (0, 5, 10, 15 from one datum), declare kind \"from_first_stop\" and in values the "
+    "dimensions as printed, without subtracting them. In values_text copy every dimension as it is "
+    "written, with its decimals. A stop is the number of the hole or of the land that the "
+    "dimension reaches; if several holes lie on the same dimension line write them together separated "
+    "by commas; write \"edge\" for the outline of the BODY, only as the first or last stop; "
+    "\"edge:<name>\" for another drawn outline that is not the body (flange, base, "
+    "plate); \"ref:<name>\" for a reference point or line (datum) or a mounting hole that is not a "
+    "terminal. If a dimension reaches the EDGE of a land and not its centre (typical of "
+    "SMD land patterns), declare it in `at` for that stop (near_edge or far_edge): the "
+    "program does the conversion to the centre. "
+    "Include the dimensions in brackets (reference dimensions) and those towards the outline of the body. "
+    "Every numbered hole must appear in at least one x chain and one y chain. Do not skip "
+    "any dimension of the chain and do not add two together. CENTRELINE: if on one axis a hole has no "
+    "dimension but lies on a centreline (dash-dot) drawn halfway between two stops "
+    "(two holes, or the two edges of the body), declare it in midpoints with the axis, the hole and the two "
+    "stops (for the outline of the body on one side only declare which in edge_side): the program "
+    "takes the mean. Do not invent a dimension that is not printed and do not "
+    "write chains with a single stop: a hole without a dimension and without a centreline on an axis "
+    "stays out of that axis. Declare in drawing_unit the unit of the "
+    "dimensions and in contacts_view whether the drawing is a view from below (BOTTOM VIEW, solder "
+    "side) or from above. Do not mirror and do not rotate anything. If a hole has no number and "
+    "cannot be recognised from the pinout view, do not include it. PRINTED HOLES: if the drawing "
+    "prints the diameter of the holes (a callout such as \"3-Ø1.2\" or \"Ø1.3+0.1\"), report it in "
+    "printed_holes with the numbers of the holes it refers to and the text as printed; a hole "
+    "whose diameter is not printed must not be estimated. DIMENSIONED TERMINALS: if the drawing "
+    "dimensions the CROSS-SECTION of the terminals that enter the holes (leads, pins, blades: a "
+    "diameter such as \"Ø0.6\", or width by thickness such as \"1.0x0.4\"), report it in "
+    "printed_terminals with the numbers of the holes it refers to: shape \"round\" with diameter, or "
+    "shape \"flat\" with width and thickness, and the text as printed. It is the terminal, NOT the "
+    "hole; a terminal whose cross-section is not dimensioned stays out, it must not be estimated. "
+    "Write any note in English. Answer ONLY by calling the tool."
 )
 
 #: Default model of the dedicated pad-position reading (profile field
@@ -1367,8 +1373,8 @@ REFERENCE_STOP_PREFIX = "ref:"
 
 _PAD_POSITIONS_TOOL = {
     "name": "report_pad_positions",
-    "description": ("Catene di quote del disegno dei fori o delle piazzole numerate, nell'unita' "
-                    "dichiarata: le coordinate le ricava il programma."),
+    "description": ("Dimension chains of the drawing of the numbered holes or lands, in the declared "
+                    "unit: the program derives the coordinates."),
     "input_schema": {
         "type": "object",
         "properties": {
@@ -1378,70 +1384,70 @@ _PAD_POSITIONS_TOOL = {
                 "type": "array",
                 "items": {"type": "object", "properties": {
                     "axis": {"type": "string", "enum": ["x", "y"],
-                             "description": "x: orizzontale, verso destra; y: verticale, verso il basso."},
+                             "description": "x: horizontal, to the right; y: vertical, downwards."},
                     "kind": {"type": "string", "enum": list(CHAIN_KINDS),
-                             "description": ("consecutive: ogni quota va dalla fermata precedente "
-                                             "alla successiva; from_first_stop: quote ordinate, "
-                                             "ognuna misurata dalla PRIMA fermata (0, 5, 10, 15).")},
+                             "description": ("consecutive: every dimension goes from the previous stop "
+                                             "to the next one; from_first_stop: ordinate dimensions, "
+                                             "each measured from the FIRST stop (0, 5, 10, 15).")},
                     "stops": {"type": "array", "items": {"type": "string"},
-                              "description": ("Fermate in ordine crescente sulla pagina: numeri dei "
-                                              "fori sulla stessa linea di quota separati da virgola; "
-                                              "\"edge\" (contorno del CORPO) solo agli estremi; "
-                                              "\"edge:<nome>\" per un altro contorno disegnato "
-                                              "(flangia, base, piastra) che non e' il corpo; "
-                                              "\"ref:<nome>\" per un riferimento o un foro di "
-                                              "fissaggio che non e' un terminale.")},
+                              "description": ("Stops in increasing order on the page: numbers of the "
+                                              "holes on the same dimension line separated by commas; "
+                                              "\"edge\" (outline of the BODY) only at the ends; "
+                                              "\"edge:<name>\" for another drawn outline "
+                                              "(flange, base, plate) that is not the body; "
+                                              "\"ref:<name>\" for a reference point or line (datum) or a mounting "
+                                              "hole that is not a terminal.")},
                     "at": {"type": "array", "items": {"type": "string", "enum": list(PAD_EDGE_ANCHORS)},
-                           "description": ("Una voce per fermata: centre se la quota arriva al "
-                                           "centro del foro o della piazzola; near_edge se arriva "
-                                           "al bordo della piazzola dal lato dell'inizio dell'asse "
-                                           "(sinistra per x, alto per y); far_edge al bordo opposto. "
-                                           "Ometti se tutte le quote vanno ai centri.")},
+                           "description": ("One entry per stop: centre if the dimension reaches the "
+                                           "centre of the hole or of the land; near_edge if it reaches "
+                                           "the edge of the land on the side where the axis begins "
+                                           "(left for x, top for y); far_edge the opposite edge. "
+                                           "Omit it if all the dimensions go to the centres.")},
                     "values": {"type": "array", "items": {"type": "number"},
-                               "description": "Quote stampate fra fermate consecutive, nello stesso ordine."},
+                               "description": "Dimensions printed between consecutive stops, in the same order."},
                     "values_text": {"type": "array", "items": {"type": "string"},
-                                    "description": ("Le stesse quote COME SONO STAMPATE, con i "
-                                                    "decimali del disegno (\"12\", \"12.2\", "
-                                                    "\"12.20\"): ne ricava la precisione il "
-                                                    "programma.")},
+                                    "description": ("The same dimensions AS THEY ARE PRINTED, with the "
+                                                    "decimals of the drawing (\"12\", \"12.2\", "
+                                                    "\"12.20\"): the program derives the precision "
+                                                    "from them.")},
                 }, "required": ["axis", "stops", "values"]},
             },
             "midpoints": {
                 "type": "array",
-                "description": ("Fori che su un asse NON hanno una quota ma stanno su una LINEA "
-                                "D'ASSE disegnata a meta' fra due fermate: il programma fa la media. "
-                                "Niente calcoli e niente quote inventate."),
+                "description": ("Holes that on one axis have NO dimension but lie on a "
+                                "CENTRELINE drawn halfway between two stops: the program takes the mean. "
+                                "No computations and no invented dimensions."),
                 "items": {"type": "object", "properties": {
                     "axis": {"type": "string", "enum": ["x", "y"],
-                             "description": "Asse su cui il foro sta sulla linea d'asse."},
-                    "pad": {"type": "string", "description": "Numero del foro sulla linea d'asse."},
+                             "description": "Axis on which the hole lies on the centreline."},
+                    "pad": {"type": "string", "description": "Number of the hole on the centreline."},
                     "between": {"type": "array", "items": {"type": "string"},
-                                "description": ("Le due fermate fra cui passa la linea d'asse, in "
-                                                "ordine crescente sulla pagina: numeri di foro "
-                                                "(anche in gruppo, separati da virgola), "
-                                                "\"edge:<nome>\", \"ref:<nome>\", oppure \"edge\" "
-                                                "per il contorno del corpo (allora dichiara "
+                                "description": ("The two stops between which the centreline runs, in "
+                                                "increasing order on the page: hole numbers "
+                                                "(also in a group, separated by commas), "
+                                                "\"edge:<name>\", \"ref:<name>\", or \"edge\" "
+                                                "for the outline of the body (then declare "
                                                 "edge_side).")},
                     "edge_side": {"type": "string", "enum": list(EDGE_SIDES),
-                                  "description": ("Se una sola fermata e' \"edge\": low per il "
-                                                  "contorno all'inizio dell'asse (sinistra o alto), "
-                                                  "high per quello opposto.")},
+                                  "description": ("If only one stop is \"edge\": low for the "
+                                                  "outline where the axis begins (left or top), "
+                                                  "high for the opposite one.")},
                 }, "required": ["axis", "pad", "between"]},
             },
             "printed_holes": {
                 "type": "array",
-                "description": ("Richiami dei FORI STAMPATI sul disegno (es. \"3-Ø1.2\" accanto ai "
-                                "fori del layout PCB): uno per richiamo, coi numeri dei fori a cui "
-                                "si riferisce. Solo cio' che e' stampato: nessun foro stimato."),
+                "description": ("Callouts of the HOLES PRINTED on the drawing (e.g. \"3-Ø1.2\" next to the "
+                                "holes of the PCB layout): one per callout, with the numbers of the holes "
+                                "it refers to. Only what is printed: no estimated hole."),
                 "items": {"type": "object", "properties": {
                     "pads": {"type": "string",
-                             "description": "Numeri dei fori del richiamo, separati da virgola."},
+                             "description": "Numbers of the holes of the callout, separated by commas."},
                     "diameter": {"type": "number", "exclusiveMinimum": 0,
-                                 "description": ("Diametro stampato del foro (per un'asola: la "
-                                                 "sua larghezza), nell'unita' di drawing_unit.")},
+                                 "description": ("Printed diameter of the hole (for a slot: its "
+                                                 "width), in the unit of drawing_unit.")},
                     "slot_length": {"type": "number", "exclusiveMinimum": 0,
-                                    "description": "Solo per un'asola stampata: la sua lunghezza."},
-                    "text": {"type": "string", "description": "Il richiamo com'e' stampato."},
+                                    "description": "Only for a printed slot: its length."},
+                    "text": {"type": "string", "description": "The callout as printed."},
                 }, "required": ["pads", "diameter"]},
             },
             # Second, independent transcription of the per-pad terminal
@@ -1451,25 +1457,25 @@ _PAD_POSITIONS_TOOL = {
             # so that the strict conversion stays lossless.
             "printed_terminals": {
                 "type": "array",
-                "description": ("SEZIONE dei terminali (reofori, pin, lamelle) QUOTATA nel disegno, "
-                                "nell'unita' di drawing_unit: una voce per quota, coi numeri dei "
-                                "fori in cui entrano quei terminali. NON e' il foro. Solo cio' che "
-                                "e' stampato: nessun terminale stimato."),
+                "description": ("CROSS-SECTION of the terminals (leads, pins, blades) DIMENSIONED in the "
+                                "drawing, in the unit of drawing_unit: one entry per dimension, with the "
+                                "numbers of the holes those terminals enter. It is NOT the hole. Only what "
+                                "is printed: no estimated terminal."),
                 "items": {"type": "object", "properties": {
                     "pads": {"type": "string",
-                             "description": "Numeri dei fori di questi terminali, separati da virgola."},
+                             "description": "Numbers of the holes of these terminals, separated by commas."},
                     "shape": {"type": "string", "enum": ["round", "flat"],
-                              "description": "round: terminale tondo; flat: lamella."},
+                              "description": "round: round terminal; flat: blade."},
                     "diameter": {"type": "number", "exclusiveMinimum": 0,
-                                 "description": "Solo per round: il diametro quotato del terminale."},
+                                 "description": "Only for round: the dimensioned diameter of the terminal."},
                     "width": {"type": "number", "exclusiveMinimum": 0,
-                              "description": "Solo per flat: la larghezza quotata della lamella."},
+                              "description": "Only for flat: the dimensioned width of the blade."},
                     "thickness": {"type": "number", "exclusiveMinimum": 0,
-                                  "description": "Solo per flat: lo spessore quotato della lamella."},
-                    "text": {"type": "string", "description": "La quota com'e' stampata."},
+                                  "description": "Only for flat: the dimensioned thickness of the blade."},
+                    "text": {"type": "string", "description": "The dimension as printed."},
                 }, "required": ["pads", "shape"]},
             },
-            "notes": {"type": "string"},
+            "notes": {"type": "string", "description": "Reading doubts, in English."},
         },
         "required": ["drawing_unit", "contacts_view", "chains"],
     },
@@ -1485,49 +1491,49 @@ _PAD_POSITIONS_TOOL = {
 #: (apply_dedicated_body). Values the drawing does not print are omitted.
 _BODY_DIMENSIONS_TOOL = {
     "name": "report_body_dimensions",
-    "description": ("Quote STAMPATE dell'ingombro del corpo di UN SOLO componente, nell'unita' "
-                    "dichiarata, ognuna dalla vista che la mostra; ometti cio' che non e' stampato."),
+    "description": ("PRINTED dimensions of the body envelope of ONE SINGLE component, in the declared "
+                    "unit, each from the view that shows it; omit what is not printed."),
     "input_schema": {
         "type": "object",
         "properties": {
             "drawing_unit": {"type": "string", "enum": ["mm", "inch", "mil"]},
             "body_length": {"type": "number", "exclusiveMinimum": 0,
-                            "description": "Quota in pianta del contorno del corpo lungo X (orizzontale)."},
+                            "description": "Plan dimension of the outline of the body along X (horizontal)."},
             "body_width": {"type": "number", "exclusiveMinimum": 0,
-                           "description": "Quota in pianta del contorno del corpo lungo Y (verticale)."},
+                           "description": "Plan dimension of the outline of the body along Y (vertical)."},
             "body_height": {"type": "number", "exclusiveMinimum": 0,
                             "description": _HEIGHT_RULE.replace("body_height_mm", "body_height")},
             "standoff": {"type": "number", "exclusiveMinimum": 0,
-                         "description": ("Distanza quotata fra il fondo del corpo e il PCB, solo come "
-                                         "informazione: NON sottrarla da body_height.")},
+                         "description": ("Dimensioned distance between the bottom of the body and the PCB, "
+                                         "as information only: do NOT subtract it from body_height.")},
             "lead_length": {"type": "number", "exclusiveMinimum": 0,
-                            "description": "lead_length e' " + _LEAD_RULE + "."},
+                            "description": "lead_length is " + _LEAD_RULE + "."},
             "body_quote_kind": {
                 "type": "string", "enum": ["nominal", "max", "min"],
-                "description": ("Come il disegno qualifica le quote in pianta del corpo: nominal "
-                                "(valore nominale), max (\"MAX\", un limite superiore), min (un "
-                                "limite inferiore).")},
+                "description": ("How the drawing qualifies the plan dimensions of the body: nominal "
+                                "(nominal value), max (\"MAX\", an upper limit), min (a "
+                                "lower limit).")},
             "leads_point": _LEADS_POINT_SCHEMA,
             "printed_vertical_quotes": _PRINTED_QUOTES_SCHEMA,
             "notes": {"type": "string",
-                      "description": "Quale vista hai usato per ogni valore; dubbi."},
+                      "description": "Which view you used for each value; doubts. In English."},
         },
         "required": ["drawing_unit", "printed_vertical_quotes"],
     },
 }
 
 DEFAULT_BODY_DIMENSIONS_PROMPT = (
-    "Sei un lettore di disegni meccanici. Ti viene mostrato il disegno quotato di UN SOLO "
-    "componente. Trascrivi SOLO le quote STAMPATE dell'ingombro del corpo, senza calcolare ne' "
-    "stimare. body_length e body_width sono le due quote in pianta del contorno del corpo "
-    "(vista dall'alto o dal basso); se il disegno le qualifica come massimo o minimo dillo in "
+    "You are a reader of mechanical drawings. You are shown the dimensioned drawing of ONE SINGLE "
+    "component. Transcribe ONLY the PRINTED dimensions of the body envelope, without computing or "
+    "estimating. body_length and body_width are the two plan dimensions of the outline of the body "
+    "(view from above or from below); if the drawing qualifies them as maximum or minimum say so in "
     "body_quote_kind. "
     + _HEIGHT_RULE.replace("body_height_mm", "body_height") + " "
-    "standoff e' la distanza quotata fra il fondo del corpo e il PCB, solo come informazione, "
-    "da non sottrarre; lead_length e' " + _LEAD_RULE + ". Ogni valore va preso dalla vista che lo "
-    "mostra: NON riusare una quota in pianta per l'altezza. Se una quota non e' stampata, "
-    "ometti il campo: non indovinare. Dichiara in drawing_unit l'unita' delle quote e in notes "
-    "quale vista hai usato per ogni valore. Rispondi SOLO chiamando lo strumento."
+    "standoff is the dimensioned distance between the bottom of the body and the PCB, as information "
+    "only, not to be subtracted; lead_length is " + _LEAD_RULE + ". Every value is taken from the view "
+    "that shows it: do NOT reuse a plan dimension for the height. If a dimension is not printed, "
+    "omit the field: do not guess. Declare in drawing_unit the unit of the dimensions and in notes, "
+    "in English, which view you used for each value. Answer ONLY by calling the tool."
 )
 
 #: Quotes of the dedicated body reading: (answer key of the reading, key of the
@@ -2299,8 +2305,8 @@ def read_pad_positions(documents, *, model, call, prompt=None, progress=None,
             blocks.append({"type": "text", "text": f"FILE {index}: {path.name}"})
             blocks.append(_file_to_content_block(path, model))
         blocks.append({"type": "text", "text": (
-            "Trascrivi le catene di quote dei fori o delle piazzole numerate del disegno e chiama "
-            "lo strumento.")})
+            "Transcribe the dimension chains of the numbered holes or lands of the drawing and call "
+            "the tool.")})
         # The profile text, or the default's bytes when it is the default
         # (V4-5); the request declares the field it sends (V4-6).
         sent = effective_text("pad_positions_prompt", {"pad_positions_prompt": prompt})
@@ -2801,8 +2807,8 @@ def read_body_dimensions(documents, *, model, call, prompt=None, progress=None,
                 blocks.append({"type": "text", "text": f"FILE {index}: {path.name}"})
                 blocks.append(_file_to_content_block(path, model))
         blocks.append({"type": "text", "text": (
-            "Trascrivi le quote stampate dell'ingombro del corpo del componente e chiama lo "
-            "strumento.")})
+            "Transcribe the printed dimensions of the body envelope of the component and call the "
+            "tool.")})
         # The profile text, or the default's bytes when it is the default
         # (V4-5); the request declares the field it sends (V4-6).
         sent = effective_text("body_dimensions_prompt", {"body_dimensions_prompt": prompt})
@@ -6275,68 +6281,68 @@ SINGLE_COMPONENT_FAMILIES = ("single_tht", "single_smd")
 #: component inventory, no castellated sides; the pads are described one by
 #: one, the regular grid is only a declared shortcut.
 DEFAULT_SINGLE_SYSTEM_PROMPT = (
-    "Sei un lettore di disegni meccanici di UN SOLO componente elettronico (connettore, "
-    "rele', trasformatore, convertitore, circuito integrato, passivo): dal datasheet o dal "
-    "disegno quotato ricavi le quote che servono per il footprint KiCad e per un solido 3D "
-    "semplificato. Riporta le quote COSI' COME LE LEGGI: dichiara in drawing_unit l'unita' del "
-    "disegno (mm, inch o mil) e in contacts_view da che lato e' vista la disposizione dei "
-    "terminali (top, bottom o unknown); conversione e specchiatura le fa il programma. "
-    "TERMINALI: descrivili uno per uno in pads, con il numero STAMPATO nel disegno, il "
-    "tipo (thru_hole oppure smd) e la piazzola (pad_length_mm lungo X e pad_width_mm lungo Y; "
-    "per una piazzola circolare i due valori coincidono). Se le posizioni dei "
-    "terminali sono quotate con catene di quote, trascrivile in pad_chains COSI' COME "
-    "SONO STAMPATE, senza calcolare: asse x verso destra o y verso il basso, fermate in ordine "
-    "crescente sulla pagina (numeri dei terminali sulla stessa linea di quota separati da "
-    "virgola, \"edge\" per il contorno del corpo solo come prima o ultima fermata, "
-    "\"edge:<nome>\" per un altro contorno disegnato, \"ref:<nome>\" per un riferimento o un "
-    "foro di fissaggio), values con le quote fra fermate consecutive (oppure kind "
-    "\"from_first_stop\" se sono quote ordinate, tutte dalla prima fermata), values_text con le "
-    "quote ricopiate con i loro decimali, e `at` se una quota arriva al bordo di una piazzola "
-    "invece che al centro; le coordinate le ricava il programma sommandole, quindi non saltare "
-    "e non accorpare quote. Con le catene trascritte puoi omettere x_mm e y_mm; scrivile, "
-    "rispetto a un'origine che scegli e dichiari in pads_origin, solo se il disegno quota le "
-    "coordinate direttamente o non ha catene. Un terminale che su un asse non ha una quota ma "
-    "sta su una LINEA D'ASSE (tratto-punto) disegnata a meta' fra due fermate va dichiarato in "
-    "pad_midpoints (asse, terminale, le due fermate, edge_side se una sola e' il contorno del "
-    "corpo): la media la fa il programma, non inventare la quota. "
-    "Usa grid SOLO se TUTTI i "
-    "terminali stanno su una griglia a passo costante e lo dichiari: rows e cols sono le "
-    "posizioni della griglia intera, vuote comprese, e populated_pins elenca quelle "
-    "occupate. Distanze fra terminali che non sono multipli di un passo unico significano "
-    "che la griglia NON esiste: usa pads. NUMERAZIONE: solo i numeri stampati accanto ai "
-    "terminali; non estenderla per convenzione (pin header, DIP) e non inventare numeri per "
-    "posizioni senza numero. FORI E TERMINALI, pad per pad: trascrivi solo cio' che e' "
-    "STAMPATO. Se il disegno stampa il foro (richiamo come \"3-Ø1.2\" sul layout PCB) "
-    "riportalo in drill_mm, ricopia il richiamo in hole_callout e dichiara drill_mm \"read\" "
-    "nel value_sources del pad; un'asola solo se stampata: drill_mm e' il suo lato lungo X e "
-    "drill_length_mm il suo lato lungo Y (un'asola orizzontale ha drill_mm maggiore di "
-    "drill_length_mm). Se il foro NON e' stampato non stimarlo: ometti drill_mm e descrivi in "
-    "lead il terminale che ci entra (round con diameter_mm, oppure flat con width_mm e "
-    "thickness_mm), dichiarandone la provenienza in value_sources.lead; foro e piazzola li "
-    "ricava il programma. PIAZZOLA: pad_length_mm e pad_width_mm vanno sempre compilati; se "
-    "il disegno stampa il land pattern trascrivili e dichiara pad_size \"read\", altrimenti "
-    "scrivi una tua stima dichiarata \"estimated\": per un terminale con foro il programma la "
-    "sostituisce con la piazzola che ricava dal foro o dal terminale. "
-    "Se tutti i terminali sono uguali puoi riportarne il diametro anche in "
-    "lead_diameter_mm. In grid vale la stessa regola: grid.drill_mm solo se il foro e' "
-    "stampato, altrimenti omettilo e da' il terminale in lead_diameter_mm; "
-    "grid.pad_diameter_mm stampato oppure stimato e dichiarato tale. In lead_exit di' "
-    "da quale faccia escono i terminali (bottom: dritti dal fondo; side: dai fianchi e "
-    "piegati; unknown). CORPO: body_length_mm e body_width_mm sono le due quote in pianta "
-    "(dalla vista dall'alto o dal basso); se il disegno le qualifica come massimo o minimo "
-    "dillo in body_quote_kind. "
-    + _HEIGHT_RULE + " pin_length_3d_mm e' " + _LEAD_RULE + ". Per ogni quota dichiara in "
-    "value_sources se l'hai letta (\"read\"), "
-    "ricavata da quote lette (\"derived\") o stimata (\"estimated\"); una stima non deve mai "
-    "sembrare una lettura. Se c'e' una foto del pezzo, da essa ricava solo body_color_hex, "
-    "text_color_hex ed edge_fillets. Compila pinout con la funzione di ogni terminale se il "
-    "documento la riporta in una tabella o la mostra in uno schema elettrico accanto al pinout "
-    "(bobina, comune, NC, NA, anodo, catodo...): una funzione ricavata dal simbolo va scritta e "
-    "segnalata in notes come ricavata. Quando il documento mostra il ruolo elettrico di un "
-    "terminale, dichiaralo in pinout[].function (coil, common, nc, no; other per il resto) e, "
-    "se il rele' ha piu' contatti, in pinout[].contact l'etichetta stampata del contatto: il "
-    "programma disegna bobina e contatti da quei ruoli, mai dal nome del componente. Scrivi in "
-    "notes dubbi e incongruenze. Rispondi SOLO chiamando lo strumento."
+    "You are a reader of mechanical drawings of ONE SINGLE electronic component (connector, "
+    "relay, transformer, converter, integrated circuit, passive): from the datasheet or from the "
+    "dimensioned drawing you derive the dimensions needed for the KiCad footprint and for a "
+    "simplified 3D solid. Report the dimensions AS YOU READ THEM: declare in drawing_unit the unit of "
+    "the drawing (mm, inch or mil) and in contacts_view from which side the arrangement of the "
+    "terminals is seen (top, bottom or unknown); the program does the conversion and the mirroring. "
+    "TERMINALS: describe them one by one in pads, with the number PRINTED in the drawing, the "
+    "type (thru_hole or smd) and the land (pad_length_mm along X and pad_width_mm along Y; "
+    "for a circular land the two values are equal). If the positions of the "
+    "terminals are dimensioned with dimension chains, transcribe them in pad_chains AS "
+    "THEY ARE PRINTED, without computing: axis x to the right or y downwards, stops in increasing "
+    "order on the page (numbers of the terminals on the same dimension line separated by "
+    "commas, \"edge\" for the outline of the body only as the first or last stop, "
+    "\"edge:<name>\" for another drawn outline, \"ref:<name>\" for a reference point or line (datum) or a "
+    "mounting hole), values with the dimensions between consecutive stops (or kind "
+    "\"from_first_stop\" if they are ordinate dimensions, all from the first stop), values_text with the "
+    "dimensions copied with their decimals, and `at` if a dimension reaches the edge of a land "
+    "instead of its centre; the program derives the coordinates by adding them up, so do not skip "
+    "and do not merge dimensions. With the chains transcribed you may omit x_mm and y_mm; write them, "
+    "relative to an origin you choose and declare in pads_origin, only if the drawing dimensions the "
+    "coordinates directly or has no chains. A terminal that on one axis has no dimension but "
+    "lies on a CENTRELINE (dash-dot) drawn halfway between two stops must be declared in "
+    "pad_midpoints (axis, terminal, the two stops, edge_side if only one is the outline of the "
+    "body): the program takes the mean, do not invent the dimension. "
+    "Use grid ONLY if ALL the "
+    "terminals lie on a grid at constant pitch and you declare it: rows and cols are the "
+    "positions of the whole grid, empty ones included, and populated_pins lists the occupied "
+    "ones. Distances between terminals that are not multiples of one single pitch mean "
+    "that the grid does NOT exist: use pads. NUMBERING: only the numbers printed next to the "
+    "terminals; do not extend it by convention (pin header, DIP) and do not invent numbers for "
+    "positions without a number. HOLES AND TERMINALS, pad by pad: transcribe only what is "
+    "PRINTED. If the drawing prints the hole (a callout such as \"3-Ø1.2\" on the PCB layout) "
+    "report it in drill_mm, copy the callout into hole_callout and declare drill_mm \"read\" "
+    "in the value_sources of the pad; a slot only if printed: drill_mm is its side along X and "
+    "drill_length_mm its side along Y (a horizontal slot has drill_mm greater than "
+    "drill_length_mm). If the hole is NOT printed do not estimate it: omit drill_mm and describe in "
+    "lead the terminal that enters it (round with diameter_mm, or flat with width_mm and "
+    "thickness_mm), declaring its provenance in value_sources.lead; the program derives hole and "
+    "land. LAND: pad_length_mm and pad_width_mm must always be filled in; if "
+    "the drawing prints the land pattern transcribe them and declare pad_size \"read\", otherwise "
+    "write your own estimate declared \"estimated\": for a terminal with a hole the program "
+    "replaces it with the land it derives from the hole or from the terminal. "
+    "If all the terminals are equal you may also give their diameter in "
+    "lead_diameter_mm. In grid the same rule applies: grid.drill_mm only if the hole is "
+    "printed, otherwise omit it and give the terminal in lead_diameter_mm; "
+    "grid.pad_diameter_mm printed or estimated and declared as such. In lead_exit say "
+    "from which face the terminals come out (bottom: straight out of the bottom; side: out of the "
+    "flanks and bent; unknown). BODY: body_length_mm and body_width_mm are the two plan dimensions "
+    "(from the view from above or from below); if the drawing qualifies them as maximum or minimum "
+    "say so in body_quote_kind. "
+    + _HEIGHT_RULE + " pin_length_3d_mm is " + _LEAD_RULE + ". For every dimension declare in "
+    "value_sources whether you read it (\"read\"), "
+    "derived it from read dimensions (\"derived\") or estimated it (\"estimated\"); an estimate must "
+    "never look like a reading. If there is a photo of the part, derive from it only body_color_hex, "
+    "text_color_hex and edge_fillets. Fill in pinout with the function of every terminal if the "
+    "document gives it in a table or shows it in an electrical schematic next to the pinout "
+    "(coil, common, NC, NO, anode, cathode...): a function derived from the symbol must be written and "
+    "flagged in notes as derived. When the document shows the electrical role of a "
+    "terminal, declare it in pinout[].function (coil, common, nc, no; other for the rest) and, "
+    "if the relay has several contacts, in pinout[].contact the printed label of the contact: the "
+    "program draws coil and contacts from those roles, never from the name of the component. Write in "
+    "notes, in English, doubts and inconsistencies. Answer ONLY by calling the tool."
 )
 
 #: Digests of former single-component defaults, replaced in the profile
@@ -6398,9 +6404,19 @@ SUPERSEDED_SINGLE_PROMPT_DIGESTS = frozenset({
     # omit an unprinted hole (grid.drill_mm was required) and gave a slot no
     # axis. Now one rule for holes, lands and slots, pads and grid alike.
     "a8ec8c4c0e846a73fa8f74f93eb2ac111d0eebb093c5d5d91484013d19a9f5ef",
+    # 2026-11-12 (user: every prompt in ONE language, English; the model's
+    # free-text answers in English too): the Italian text of 2026-11-11,
+    # translated rule by rule.
+    "f583c8284cfd15465458c77c2e08677adf9a1e55b930de3b3b36dd0bb43fa0ae",
+    # 2026-11-12: the first English translation, before «ref:» stops were
+    # worded «a reference point or line (datum)» (a database may store it).
+    "222bffb5d87f5bc2aed6d2ddb1fab4bc8f792a7fdb2be115398352a36b16b4da",
 })
-#: Digests of former pin-numbering defaults (none yet: first version).
-SUPERSEDED_NUMBERING_PROMPT_DIGESTS = frozenset()
+#: Digests of former pin-numbering defaults.
+SUPERSEDED_NUMBERING_PROMPT_DIGESTS = frozenset({
+    # 2026-11-12 (user: every prompt in English): the first, Italian text.
+    "96eb92c3c0237c138a5a4f64b2784636d338392f1b1d5c2be3861a0d2e26cb25",
+})
 
 
 def _single_component_tool() -> dict:
@@ -6415,29 +6431,29 @@ def _single_component_tool() -> dict:
     pad = {
         "type": "object",
         "properties": {
-            "number": {"type": "string", "description": "Numero STAMPATO accanto al terminale."},
-            "name": {"type": "string", "description": "Funzione, se il documento la riporta."},
-            "x_mm": {"type": "number", "description": "Centro, asse X (verso DESTRA nella vista "
-                                                      "dichiarata), nell'unita' di drawing_unit; "
-                                                      "omettibile se il terminale e' in pad_chains."},
-            "y_mm": {"type": "number", "description": "Centro, asse Y (verso il basso nella vista "
-                                                      "dichiarata); omettibile se il terminale e' in "
+            "number": {"type": "string", "description": "Number PRINTED next to the terminal."},
+            "name": {"type": "string", "description": "Function, if the document gives it."},
+            "x_mm": {"type": "number", "description": "Centre, X axis (to the RIGHT in the declared "
+                                                      "view), in the unit of drawing_unit; "
+                                                      "may be omitted if the terminal is in pad_chains."},
+            "y_mm": {"type": "number", "description": "Centre, Y axis (downwards in the declared "
+                                                      "view); may be omitted if the terminal is in "
                                                       "pad_chains."},
             "pad_type": {"type": "string", "enum": ["thru_hole", "smd"]},
             "drill_mm": {"type": "number", "exclusiveMinimum": 0,
-                         "description": ("Foro, solo per thru_hole: il diametro STAMPATO sul "
-                                         "disegno (hole_callout); per un'asola stampata il suo "
-                                         "lato lungo X. Se il foro non e' stampato ometti "
-                                         "questo campo e dai il terminale in lead.")},
+                         "description": ("Hole, only for thru_hole: the diameter PRINTED on the "
+                                         "drawing (hole_callout); for a printed slot its "
+                                         "side along X. If the hole is not printed omit "
+                                         "this field and give the terminal in lead.")},
             "pad_length_mm": {"type": "number", "exclusiveMinimum": 0,
-                              "description": ("Piazzola lungo X; diametro per una piazzola "
-                                              "circolare. Stampata (land pattern, pad_size "
-                                              "\"read\") oppure una stima dichiarata estimated "
-                                              "in value_sources.pad_size, che per un terminale "
-                                              "con foro il programma sostituisce con quella "
-                                              "ricavata dal foro o dal terminale.")},
+                              "description": ("Land along X; diameter for a circular "
+                                              "land. Printed (land pattern, pad_size "
+                                              "\"read\") or an estimate declared estimated "
+                                              "in value_sources.pad_size, which for a terminal "
+                                              "with a hole the program replaces with the one "
+                                              "derived from the hole or from the terminal.")},
             "pad_width_mm": {"type": "number", "exclusiveMinimum": 0,
-                             "description": "Piazzola lungo Y; diametro per una piazzola circolare."},
+                             "description": "Land along Y; diameter for a circular land."},
             "shape": {"type": "string", "enum": ["circle", "rect", "oval", "roundrect"]},
             # Terminal, printed hole and per-pad provenance (2026-11-10).
             **_PAD_TERMINAL_PROPERTIES,
@@ -6450,9 +6466,9 @@ def _single_component_tool() -> dict:
     grid = {
         "type": "object",
         "description": (
-            "SOLO se tutti i terminali stanno su una griglia a passo costante. rows e cols "
-            "sono le posizioni della griglia intera, vuote comprese; populated_pins le "
-            "posizioni occupate; pin_map la posizione di ogni numero stampato."),
+            "ONLY if all the terminals lie on a grid at constant pitch. rows and cols "
+            "are the positions of the whole grid, empty ones included; populated_pins the "
+            "occupied positions; pin_map the position of every printed number."),
         "properties": {
             "rows": main["rows"], "cols": main["cols"], "pitch_mm": main["pitch_mm"],
             "row_spacing_mm": main["row_spacing_mm"], "pad_diameter_mm": main["pad_diameter_mm"],
@@ -6460,10 +6476,10 @@ def _single_component_tool() -> dict:
             # only when printed, so the field is optional here; without it
             # the program derives hole and land from `lead_diameter_mm`.
             "drill_mm": {"type": "number", "exclusiveMinimum": 0,
-                         "description": ("Foro dei terminali della griglia, SOLO se stampato sul "
-                                         "disegno (dichiaralo \"read\" in value_sources.drill_mm). "
-                                         "Se non e' stampato ometti questo campo e da' il "
-                                         "terminale in lead_diameter_mm.")},
+                         "description": ("Hole of the terminals of the grid, ONLY if printed on the "
+                                         "drawing (declare it \"read\" in value_sources.drill_mm). "
+                                         "If it is not printed omit this field and give the "
+                                         "terminal in lead_diameter_mm.")},
             "populated_pins": main["populated_pins"],
             "pin_map": main["pin_map"],
             "body_offset_x_mm": main["body_offset_x_mm"],
@@ -6475,13 +6491,13 @@ def _single_component_tool() -> dict:
         "name": main["name"], "description": main["description"], "tags": main["tags"],
         "drawing_unit": main["drawing_unit"], "contacts_view": main["contacts_view"],
         "pads": {"type": "array", "items": pad,
-                 "description": "Un elemento per terminale, nelle coordinate dichiarate in pads_origin."},
+                 "description": "One element per terminal, in the coordinates declared in pads_origin."},
         "pads_origin": {"type": "string", "enum": ["body_center", "pin1", "custom"],
-                        "description": "Origine delle coordinate di pads: centro del corpo, "
-                                       "terminale 1, oppure un punto del disegno descritto in notes."},
+                        "description": "Origin of the coordinates of pads: centre of the body, "
+                                       "terminal 1, or a point of the drawing described in notes."},
         "pad_chains": dict(_PAD_POSITIONS_TOOL["input_schema"]["properties"]["chains"],
-                           description=("Catene di quote dei terminali come stampate nel disegno, "
-                                        "nell'unita' di drawing_unit: il programma le somma.")),
+                           description=("Dimension chains of the terminals as printed in the drawing, "
+                                        "in the unit of drawing_unit: the program adds them up.")),
         "pad_midpoints": _PAD_POSITIONS_TOOL["input_schema"]["properties"]["midpoints"],
         "grid": grid,
         "body_length_mm": main["body_length_mm"], "body_width_mm": main["body_width_mm"],
@@ -6497,8 +6513,9 @@ def _single_component_tool() -> dict:
     }
     return {"type": "function", "function": {
         "name": "report_single_component",
-        "description": ("Quote di un singolo componente per footprint e 3D: terminali uno per uno "
-                        "(pads) oppure, solo se dichiarata, una griglia a passo costante (grid)."),
+        "description": ("Dimensions of a single component for footprint and 3D: terminals one by one "
+                        "(pads) or, only if declared, a grid at constant pitch (grid). Free-text "
+                        "values (notes) are written in English."),
         "parameters": {"type": "object", "properties": properties,
                        "required": ["drawing_unit", "contacts_view", "confidence",
                                     "printed_vertical_quotes"]}}}
@@ -7030,6 +7047,37 @@ def _reread_documents(documents) -> list:
 #: analysis did. Every other «_» key of a stored answer is dropped (V4-7).
 _RAW_MAIN_DERIVED_KEYS = ("_numbers_by_convention", "_grid_missing")
 
+#: Top-level key of the stored main answer (ExtractedParams.raw_main) naming
+#: the model that actually gave it (the main step's usable model, 2026-11-12,
+#: review finding 1). Program state, never a model field: written after
+#: `without_private_keys`, so an answer cannot set it. A partial re-read
+#: compares its reader with it and keeps it in the `_raw_main` it carries on
+#: (so a re-read of a re-read still knows), but never in its working data.
+RAW_MAIN_MODEL_KEY = "_main_model"
+
+
+def _reader_model(reader) -> str:
+    """The model name of a dedicated reader: a name, or a zero-argument resolver called now.
+
+    @param reader A model identifier, a callable returning one, or None.
+    @return The identifier, "" when there is none.
+    """
+    if callable(reader):
+        reader = reader()
+    return (reader or "").strip() if isinstance(reader, str) else ""
+
+
+def stored_main_model(stored) -> Optional[str]:
+    """@brief The model recorded as the producer of a stored main answer, if any.
+
+    @param stored The stored main answer (`ExtractedParams.raw_main`), any type.
+    @return The non-blank model identifier under RAW_MAIN_MODEL_KEY, or None
+        for an answer saved before 2026-11-12 (or one whose value is not a
+        non-blank string: a hand-edited file is not trusted with a model).
+    """
+    value = stored.get(RAW_MAIN_MODEL_KEY) if isinstance(stored, dict) else None
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
 
 def _reread_start(stored: dict, progress) -> dict:
     """A working copy of the stored main answer, sanitised as `_validate_main_response` does.
@@ -7050,15 +7098,59 @@ def _reread_start(stored: dict, progress) -> dict:
             clean[key] = copy.deepcopy(stored[key])
     data = copy.deepcopy(clean)
     data["_raw_main"] = copy.deepcopy(clean)
+    producer = stored_main_model(stored)
+    if producer is not None:
+        # Kept only in the answer carried on, not in the working data: the
+        # re-read result's raw_main still names the model that gave it.
+        data["_raw_main"][RAW_MAIN_MODEL_KEY] = producer
     _sanitise_printed_quotes(data, progress)
     for key in ("body_length_mm", "body_width_mm", "body_height_mm"):
         data[key] = _optional_number(data.get(key), positive=True)
     return data
 
 
+def _reread_reader(field: str, stored: dict, step_models: Optional[Mapping[str, str]],
+                   model: str, same_model: bool, progress) -> tuple:
+    """The reader of a partial re-read and whether it is the model that gave `stored`.
+
+    The comparison base is the model RECORDED in the stored answer
+    (RAW_MAIN_MODEL_KEY) when there is one: since 2026-11-12 the main
+    reading may run on its own step model, which the caller (the GUI, with
+    the single or session model) does not know (review finding 1). An
+    answer saved before has no record: `model` is the base, as before.
+
+    @param field The step of the reading ('pad_positions_prompt' or 'body_dimensions_prompt').
+    @param stored The stored main answer the re-read starts from.
+    @param step_models The step-model table, or None (the caller's `model`
+        reads, as before 2026-11-12).
+    @param model The caller's model: the main model when a table is given,
+        the reader otherwise; also the last fallback of a reader that cannot run.
+    @param same_model The caller's claim, used only without a table AND
+        without a recorded producer (nothing better to compare with).
+    @param progress Optional log callback (the fallback lines of usable_model).
+    @return (reader, same_model): the usable reader and True when it is the
+        model that gave `stored` (its reading and the stored one are one witness).
+    """
+    model = model or DEFAULT_MODEL
+    producer = stored_main_model(stored)
+    if step_models is None:
+        # The caller's model reads; with a record the H6 rule is decided by it.
+        return model, (model == producer) if producer is not None else same_model
+    base = producer or model
+    # The step's own model, or (blank step) the model that gave the answer.
+    reader = usable_model(field, step_models, base, progress)
+    if reader == base and base != model:
+        # The recorded producer was not checked by the caller, who knows only
+        # `model`: checked like a step model (key, credit, images), falling
+        # back to `model` with the log line when it cannot run now.
+        reader = usable_model(field, {field: base}, model, progress)
+    return reader, reader == base
+
+
 def reread_body_height(stored: dict, documents, *, model: str, call, progress=None,
                        answers: Optional[dict] = None, same_model: bool = False,
-                       prompts: Optional[dict] = None) -> ExtractedParams:
+                       prompts: Optional[dict] = None,
+                       step_models: Optional[Mapping[str, str]] = None) -> ExtractedParams:
     """@brief Re-run ONLY the dedicated body-quote reading on a stored main answer (no main paid call).
 
     @param stored The main answer as kept in the result (`ExtractedParams.raw_main`):
@@ -7073,10 +7165,22 @@ def reread_body_height(stored: dict, documents, *, model: str, call, progress=No
         `extract_pin_header_params(answers=)`.
     @param same_model True when `model` is the model that gave `stored`:
         its list and the stored main list are one witness
-        (`apply_dedicated_body(same_model=)`).
+        (`apply_dedicated_body(same_model=)`). Used only when `stored`
+        records no producer (RAW_MAIN_MODEL_KEY) and no table is given.
     @param prompts The profile's prompt texts ({field: text}, see
         `extract_pin_header_params`); the reading sends
         'body_dimensions_prompt', its default when missing or blank.
+    @param step_models The step-model table (`extract_pin_header_params`),
+        or None (the behaviour before 2026-11-12: `model` reads and
+        `same_model` is the caller's). When given, `model` is the MAIN
+        model that gave `stored`: the reading uses the model of the step
+        'body_dimensions_prompt' (prompt_models.usable_model, falling back
+        to the main model with a log line) and `same_model` is recomputed,
+        whatever the caller passed.
+    @note The «main model» compared with the reader is the one RECORDED in
+        `stored` (RAW_MAIN_MODEL_KEY, the main step's model that actually
+        answered) when present, else `model`; a blank step reads with that
+        recorded model (`_reread_reader`).
     @return A new ExtractedParams built from the stored answer with the body
         quotes confronted by `apply_dedicated_body` (one paid call, no
         tie-break: the GUI runs this when the user asks a re-reading of the
@@ -7100,6 +7204,10 @@ def reread_body_height(stored: dict, documents, *, model: str, call, progress=No
     data["_question_documents"] = [path.name for path in images]
     if not images:
         raise ExtractionError(tx("Nessun disegno in immagine da rileggere."))
+    # Resolved here, before the images are sized for the reader; the
+    # comparison base is the model recorded in `stored` when there is one.
+    model, same_model = _reread_reader("body_dimensions_prompt", stored, step_models, model,
+                                       same_model, progress)
     if progress:
         progress(tx("Rilettura delle quote del corpo su {names} con {model}.",
                     names=", ".join(path.name for path in images), model=model))
@@ -7128,7 +7236,8 @@ def reread_body_height(stored: dict, documents, *, model: str, call, progress=No
 def reread_pad_positions(stored: dict, documents, *, model: str, call, progress=None,
                          answers: Optional[dict] = None, library=None,
                          same_model: bool = False,
-                         prompts: Optional[dict] = None) -> ExtractedParams:
+                         prompts: Optional[dict] = None,
+                         step_models: Optional[Mapping[str, str]] = None) -> ExtractedParams:
     """@brief Re-run ONLY the dedicated pad-position reading on a stored main answer (no main paid call).
 
     @param stored The main answer as kept in the result (`ExtractedParams.raw_main`),
@@ -7145,9 +7254,22 @@ def reread_pad_positions(stored: dict, documents, *, model: str, call, progress=
         (`_library_witness`), one more geometry witness; None or empty for none.
     @param same_model True when `model` is the model that gave `stored`
         (an agreement is then one reading, see `apply_dedicated_pads`).
+        Used only when `stored` records no producer (RAW_MAIN_MODEL_KEY)
+        and no table is given.
     @param prompts The profile's prompt texts ({field: text}, see
         `extract_pin_header_params`); the reading sends
         'pad_positions_prompt', its default when missing or blank.
+    @param step_models The step-model table (`extract_pin_header_params`),
+        or None (the behaviour before 2026-11-12: `model` reads and
+        `same_model` is the caller's). When given, `model` is the MAIN
+        model that gave `stored`: the reading uses the model of the step
+        'pad_positions_prompt' (prompt_models.usable_model, falling back to
+        the main model with a log line) and `same_model` is recomputed,
+        whatever the caller passed.
+    @note The «main model» compared with the reader is the one RECORDED in
+        `stored` (RAW_MAIN_MODEL_KEY, the main step's model that actually
+        answered) when present, else `model`; a blank step reads with that
+        recorded model (`_reread_reader`).
     @return A new ExtractedParams: the pads confronted by `apply_dedicated_pads`
         with the drawn holes as witness, the side asked by
         `_require_declared_view` when still unknown, everything else as
@@ -7170,6 +7292,10 @@ def reread_pad_positions(stored: dict, documents, *, model: str, call, progress=
     data["_question_documents"] = [path.name for path in images]
     if not images:
         raise ExtractionError(tx("Nessun disegno in immagine da rileggere."))
+    # Resolved here, before the images are sized for the reader; the
+    # comparison base is the model recorded in `stored` when there is one.
+    model, same_model = _reread_reader("pad_positions_prompt", stored, step_models, model,
+                                       same_model, progress)
     if progress:
         progress(tx("Rilettura delle posizioni dei pad su {names} con {model}.",
                     names=", ".join(path.name for path in images), model=model))
@@ -7395,83 +7521,84 @@ def _openai_tool() -> dict:
 
 
 _SYSTEM_PROMPT = (
-    "Sei un assistente che legge datasheet di componenti, connettori e moduli "
-    "elettronici (PDF o immagini di disegni meccanici quotati) ed estrae i parametri "
-    "geometrici necessari per generare un footprint KiCad: una matrice di pin a foro "
-    "passante, i lati di un modulo castellated oppure i pad espliciti in "
-    "package_geometry (l'unico modo di descrivere pad SMD, che non hanno foro). "
-    "Riporta le quote COSI' COME LE LEGGI: dichiara in drawing_unit l'unita' del "
-    "disegno (mm, inch o mil) e in contacts_view da che lato e' visto il disegno dei "
-    "contatti (top, bottom o unknown); conversione e specchiatura le fa il programma. "
-    "Distingui SEMPRE con attenzione pitch_mm (passo tra pin adiacenti sulla stessa "
-    "riga) da row_spacing_mm (distanza perpendicolare tra file di pin adiacenti): sono "
-    "quasi sempre valori molto diversi tra loro nei moduli DIP-style, non usare lo "
-    "stesso numero per entrambi a meno che il disegno meccanico non lo confermi "
-    "esplicitamente. Se il pinout mostra che solo alcune posizioni della matrice hanno "
-    "un pin fisico, usa populated_pins per elencarle invece di generare una matrice "
-    "completa: rows x cols restano quelli della griglia INTERA a passo costante, "
-    "posizioni vuote comprese (due pin distanti un multiplo del passo sono tante "
-    "colonne piu' in la' quanti sono i passi, non adiacenti). Per ogni quota che compili dichiara in value_sources (e, per i lati "
-    "castellated, nel value_sources del lato) se l'hai letta (\"read\"), ricavata "
-    "solo da quote lette (\"derived\") o stimata (\"estimated\"). Se un valore "
-    "necessario non e' presente nei documenti, stimalo dalle altre quote o dalle "
-    "regole di progetto del tipo di contatto, dichiaralo \"estimated\" e scrivi in "
-    "notes da cosa lo hai ricavato: un valore stimato non deve mai sembrare letto. "
-    "Per un componente singolo a foro passante riporta in lead_diameter_mm il diametro "
-    "del terminale se e' quotato (e' il pin, non il foro) e in lead_exit da quale faccia "
-    "escono i terminali (bottom: dritti dal fondo, side: dai fianchi e piegati, unknown): "
-    "il programma usa il primo per controllare il foro e il secondo per controllare che "
-    "i pin stiano nel corpo. "
-    "Se il datasheet include un disegno meccanico con l'ingombro del corpo (es. sezione "
-    "\"Outline Dimensions\"), compila anche i campi body_* e pin_length_3d_mm; se non "
-    "c'e' alcun disegno meccanico dell'ingombro 3D, ometti tutti i campi body_* e "
-    "pin_length_3d_mm piuttosto che indovinare le dimensioni del corpo. "
-    "ATTENZIONE - errore comune da evitare: body_height_mm (spessore del case, vista "
-    "laterale, asse Z) NON e' la stessa quota di row_spacing_mm (distanza tra le righe "
-    "di pin, vista dall'alto, asse Y), anche se nel disegno possono comparire vicine "
-    "come numeri: leggi ogni quota dalla vista corretta (dall'alto per row_spacing_mm/"
-    "body_width_mm, laterale per body_height_mm) invece di riusare un valore gia' letto "
-    "altrove. Se hai dubbi su quale numero appartenga a quale quota, guarda quale vista "
-    "(dall'alto vs laterale) del disegno la mostra, e scrivi il dubbio nelle note "
-    "invece di indovinare silenziosamente. "
-    "Se tra i file c'e' anche una foto reale del prodotto (non un disegno tecnico) e "
-    "mostra spigoli arrotondati/smussati, compila edge_fillets con gli spigoli "
-    "visibilmente arrotondati e un raggio stimato a occhio (le foto prodotto non hanno "
-    "MAI un raggio quotato: e' normale stimarlo visivamente, non serve certezza numerica "
-    "per compilare questo campo). Ometti edge_fillets solo se il case ha chiaramente "
-    "spigoli vivi a 90 gradi, o se non c'e' nessuna foto del prodotto -- non omettere "
-    "solo perche' il raggio non e' quotato esplicitamente. "
-    "Dalla stessa foto ricava anche body_color_hex (colore del case) e "
-    "text_color_hex (colore delle scritte serigrafate sul case): servono per dare "
-    "al modello 3D l'aspetto del componente reale. "
-    "PRIMA DI TUTTO scegli la disposizione dei contatti (campo layout): "
-    "\"matrix\" per i pin a foro passante su griglia regolare (pin header, "
-    "moduli DIP-style) e per i componenti descritti pad per pad in "
-    "package_geometry, \"castellated\" per i moduli su PCB con semi-fori "
-    "metallizzati sul bordo. Nei moduli castellated ogni lato ha spesso un "
-    "numero di contatti e un passo diversi dagli altri: descrivili in castellated_sides, un "
-    "elemento per lato, invece di comprimerli in una matrice righe x colonne che "
-    "non li rappresenta e produrrebbe un footprint sbagliato. "
-    "Per ogni lato castellated indica anche contact_style guardando il bordo nella "
-    "foto: half_hole se il foro metallizzato e' tagliato dal bordo (mezzaluna aperta "
-    "verso l'esterno), through_hole se il foro e' intero, con corona chiusa e scheda "
-    "intatta fra la corona e il bordo, half_and_through se lo stesso contatto ha "
-    "entrambi; ometti il campo se il bordo non si vede o il tipo non si distingue "
-    "(il programma lo chiedera' all'utente). Se quotati o visibili, "
-    "riporta per lato anche half_hole_diameter_mm e through_hole_drill_mm. "
-    "Per i moduli su PCB, se c'e' una foto del lato superiore, elenca in "
-    "components_3d TUTTI i componenti visibili, uno per uno, compresi i passivi "
-    "piccoli (resistenze, condensatori chip, diodi): posizione, ingombro (asse "
-    "lungo x asse corto), orientamento in rotation_deg (0 orizzontale, 90 "
-    "verticale, letto dalla foto) e colore stimati a occhio in proporzione alle dimensioni note "
-    "del modulo. Servono a dare al modello 3D l'aspetto del pezzo reale, e "
-    "nessuna di quelle quote e' riportata dal datasheet -- e' normale e atteso "
-    "stimarle. Non esiste un numero atteso di componenti: elenca quelli che vedi, "
-    "senza aggiungerne ne' toglierne per raggiungere un conteggio. Compila sempre "
-    "anche pinout con la funzione di ogni contatto, leggendola dalle sigle "
-    "serigrafate accanto ai contatti nella foto o dalle etichette di "
-    "un'immagine descrittiva del prodotto. "
-    "Rispondi SOLO chiamando lo strumento fornito."
+    "You are an assistant that reads datasheets of electronic components, connectors and "
+    "modules (PDFs or images of dimensioned mechanical drawings) and extracts the geometric "
+    "parameters needed to generate a KiCad footprint: a matrix of through-hole "
+    "pins, the sides of a castellated module or the explicit pads in "
+    "package_geometry (the only way to describe SMD pads, which have no hole). "
+    "Report the dimensions AS YOU READ THEM: declare in drawing_unit the unit of the "
+    "drawing (mm, inch or mil) and in contacts_view from which side the drawing of the "
+    "contacts is seen (top, bottom or unknown); the program does the conversion and the mirroring. "
+    "ALWAYS carefully distinguish pitch_mm (pitch between adjacent pins on the same "
+    "row) from row_spacing_mm (perpendicular distance between adjacent pin rows): they are "
+    "almost always very different values in DIP-style modules, do not use the "
+    "same number for both unless the mechanical drawing confirms it "
+    "explicitly. If the pinout shows that only some positions of the matrix have "
+    "a physical pin, use populated_pins to list them instead of generating a complete "
+    "matrix: rows x cols stay those of the WHOLE grid at constant pitch, "
+    "empty positions included (two pins a multiple of the pitch apart are as many "
+    "columns further on as there are pitches, not adjacent). For every dimension you fill in declare in value_sources (and, for the "
+    "castellated sides, in the value_sources of the side) whether you read it (\"read\"), derived "
+    "it only from read dimensions (\"derived\") or estimated it (\"estimated\"). If a needed "
+    "value is not present in the documents, estimate it from the other dimensions or from the "
+    "design rules of the contact type, declare it \"estimated\" and write in "
+    "notes what you derived it from: an estimated value must never look read. "
+    "For a single through-hole component report in lead_diameter_mm the diameter "
+    "of the terminal if it is dimensioned (it is the pin, not the hole) and in lead_exit from which "
+    "face the terminals come out (bottom: straight out of the bottom, side: out of the flanks and bent, "
+    "unknown): the program uses the first to check the hole and the second to check that "
+    "the pins lie inside the body. "
+    "If the datasheet includes a mechanical drawing with the envelope of the body (e.g. an "
+    "\"Outline Dimensions\" section), also fill in the body_* fields and pin_length_3d_mm; if there "
+    "is no mechanical drawing of the 3D envelope at all, omit all the body_* fields and "
+    "pin_length_3d_mm rather than guess the dimensions of the body. "
+    "WARNING - common mistake to avoid: body_height_mm (thickness of the case, side "
+    "view, Z axis) is NOT the same dimension as row_spacing_mm (distance between the rows "
+    "of pins, top view, Y axis), even if in the drawing they may appear close "
+    "as numbers: read every dimension from the correct view (top view for row_spacing_mm/"
+    "body_width_mm, side view for body_height_mm) instead of reusing a value already read "
+    "elsewhere. If you are in doubt about which number belongs to which dimension, look at which view "
+    "(top vs side) of the drawing shows it, and write the doubt in the notes "
+    "instead of silently guessing. "
+    "If among the files there is also a real photo of the product (not a technical drawing) and "
+    "it shows rounded/chamfered edges, fill in edge_fillets with the visibly rounded "
+    "edges and a radius estimated by eye (product photos NEVER have "
+    "a dimensioned radius: it is normal to estimate it visually, numerical certainty is not needed "
+    "to fill in this field). Omit edge_fillets only if the case clearly has "
+    "sharp 90-degree edges, or if there is no product photo at all -- do not omit it "
+    "only because the radius is not explicitly dimensioned. "
+    "From the same photo also derive body_color_hex (colour of the case) and "
+    "text_color_hex (colour of the silkscreen markings on the case): they give "
+    "the 3D model the look of the real component. "
+    "FIRST OF ALL choose the arrangement of the contacts (layout field): "
+    "\"matrix\" for through-hole pins on a regular grid (pin headers, "
+    "DIP-style modules) and for the components described pad by pad in "
+    "package_geometry, \"castellated\" for modules on a PCB with plated "
+    "half holes on the edge. In castellated modules every side often has a "
+    "number of contacts and a pitch different from the others: describe them in castellated_sides, one "
+    "element per side, instead of compressing them into a rows x columns matrix that "
+    "does not represent them and would produce a wrong footprint. "
+    "For every castellated side also give contact_style looking at the edge in the "
+    "photo: half_hole if the plated hole is cut by the edge (half-moon open "
+    "towards the outside), through_hole if the hole is whole, with a closed ring and intact "
+    "board between the ring and the edge, half_and_through if the same contact has "
+    "both; omit the field if the edge cannot be seen or the type cannot be told "
+    "(the program will ask the user). If dimensioned or visible, "
+    "also report per side half_hole_diameter_mm and through_hole_drill_mm. "
+    "For modules on a PCB, if there is a photo of the upper side, list in "
+    "components_3d ALL the visible components, one by one, including the small "
+    "passives (resistors, chip capacitors, diodes): position, envelope (long "
+    "axis x short axis), orientation in rotation_deg (0 horizontal, 90 "
+    "vertical, read from the photo) and colour estimated by eye in proportion to the known dimensions "
+    "of the module. They give the 3D model the look of the real part, and "
+    "none of those dimensions is given by the datasheet -- it is normal and expected "
+    "to estimate them. There is no expected number of components: list those you see, "
+    "without adding or removing any to reach a count. Always also fill in "
+    "pinout with the function of every contact, reading it from the silkscreen "
+    "labels next to the contacts in the photo or from the labels of "
+    "a descriptive image of the product. "
+    "Write notes and every other free-text value in English. "
+    "Answer ONLY by calling the tool provided."
 )
 
 # Public alias: the GUI ("Prompt LLM" tab) shows it as the editable starting
@@ -7499,6 +7626,9 @@ SUPERSEDED_SYSTEM_PROMPT_DIGESTS = frozenset({
     "31a4c60ce3dedcce3efe236114fa2b963fcbfed652a40f62cbc6609e5e426715",
     "2e420a121ee16fc0877e6d74ac4efdc7e0731f2e3cc29b4c32c0d014364877d0",
     "d00743ee29a91d396eae57cd56e40dbc2e03825d571960dd09f88ba36d0f754f",
+    # 2026-11-12 (user: every prompt in ONE language, English; the model's
+    # free-text answers in English too): the Italian text, translated rule by rule.
+    "b36d2b0ce7572f3e65c599d2a3336420f773bb444200e914b2a945048b602dbe",
 })
 
 
@@ -7618,7 +7748,8 @@ class ExtractedParams:
     #: (`single_answer_to_data`) and deep-copied before any validation or
     #: dedicated reading: the input of `reread_body_height` and
     #: `reread_pad_positions` (partial re-runs without the main paid call).
-    #: None for results built outside `extract_pin_header_params`.
+    #: None for results built outside `extract_pin_header_params`. Its one
+    #: program key, RAW_MAIN_MODEL_KEY, names the model that gave it.
     raw_main: Optional[dict] = None
     #: Not None only for the result of a partial re-read (`reread_body_height`,
     #: `reread_pad_positions`): {"field": key of REREAD_SCOPES,
@@ -7748,12 +7879,12 @@ class AnswerShapeError(ExtractionError):
 #: the structural rule of `report_single_component` the answer broke, never a
 #: value, so it holds for any component.
 _SHAPE_CORRECTION = (
-    "CORREZIONE: la risposta precedente non rispettava lo schema dello strumento. Richiama "
-    "lo strumento con TUTTI i campi: pads e' una LISTA con un oggetto per ciascun terminale "
-    "(number, x_mm, y_mm, pad_type, pad_length_mm, pad_width_mm, drill_mm se passante), mai i "
-    "campi di un singolo pad al primo livello; ogni pad con il suo number STAMPATO (un foro "
-    "senza numero stampato non va incluso); grid solo se i terminali stanno su una griglia "
-    "a passo costante, e mai insieme a pads.")
+    "CORRECTION: the previous answer did not follow the schema of the tool. Call "
+    "the tool again with ALL the fields: pads is a LIST with one object for each terminal "
+    "(number, x_mm, y_mm, pad_type, pad_length_mm, pad_width_mm, drill_mm if through-hole), never "
+    "the fields of a single pad at the top level; every pad with its PRINTED number (a hole "
+    "without a printed number must not be included); grid only if the terminals lie on a grid "
+    "at constant pitch, and never together with pads.")
 
 
 #: Bound of the rejected main answer written to the log, in characters: the
@@ -8283,10 +8414,10 @@ def _edge_strip_blocks(doc_paths, document_roles) -> list:
             strips = []
         for edge, png in strips:
             blocks.append({"type": "text", "text": (
-                f"FILE {index}, ingrandimento del bordo {edge} della scheda (stessa vista "
-                "della foto, bordo scheda verso l'esterno dell'immagine): conta qui i fori "
-                "metallizzati tagliati dal bordo, uno per contatto; le scritte accanto sono "
-                "sigle, non contatti.")})
+                f"FILE {index}, enlargement of the {edge} edge of the board (same view "
+                "as the photo, board edge towards the outside of the image): count here the plated "
+                "holes cut by the edge, one per contact; the writing next to them is "
+                "labels, not contacts.")})
             data_b64 = base64.b64encode(png).decode("ascii")
             blocks.append({"type": "image_url",
                            "image_url": {"url": f"data:image/png;base64,{data_b64}"}})
@@ -8463,8 +8594,8 @@ def _enlarged_tile_blocks(path: Path, model: Optional[str]) -> list:
         (`enlarges` False): a tile is a fraction of the page, so enlarging it
         up to the page limit shows the same digits with more pixels.
     @return Content blocks: a text caption and an image block for the whole
-        page, then a caption and an image block per tile («riquadro k di 4»,
-        top-left, top-right, bottom-left, bottom-right).
+        page, then a caption and an image block per tile («tile k of 4»,
+        top-left, top-right, bottom-left, bottom-right), captions in English.
     @throws ExtractionError As `_file_to_content_block` for an unreadable or
         uncleanable image.
     @note Every tile is a lossless PNG rebuilt from the decoded page, so it
@@ -8475,7 +8606,9 @@ def _enlarged_tile_blocks(path: Path, model: Optional[str]) -> list:
     from PIL import Image
     from .photo_grounding import model_image_limits
     whole = _file_to_content_block(path, model)
-    blocks = [{"type": "text", "text": tx("FILE {name}: pagina intera", name=path.name)}, whole]
+    # Model-facing captions are fixed English (user, 2026-11-12: every prompt
+    # in one language), never tx(): the UI language must not reach the model.
+    blocks = [{"type": "text", "text": f"FILE {path.name}: whole page"}, whole]
     limits = model_image_limits(model)
     payload = _upright_image_bytes(path.read_bytes())
     with Image.open(BytesIO(payload)) as image:
@@ -8486,8 +8619,7 @@ def _enlarged_tile_blocks(path: Path, model: Optional[str]) -> list:
         width, height = page.size
         tile_w, tile_h = max(1, int(width * TILE_SIDE_FRACTION)), max(1, int(height * TILE_SIDE_FRACTION))
         corners = [(0, 0), (width - tile_w, 0), (0, height - tile_h), (width - tile_w, height - tile_h)]
-        names = (tx("in alto a sinistra"), tx("in alto a destra"), tx("in basso a sinistra"),
-                 tx("in basso a destra"))
+        names = ("top left", "top right", "bottom left", "bottom right")
         for index, ((left, top), where) in enumerate(zip(corners, names), start=1):
             tile = page.crop((left, top, left + tile_w, top + tile_h))
             scale = min(limits.long_side_px / max(tile_w, tile_h),
@@ -8500,10 +8632,9 @@ def _enlarged_tile_blocks(path: Path, model: Optional[str]) -> list:
             data = _image_without_metadata(out.getvalue())
             if len(data) > MAX_FILE_BYTES:
                 continue
-            blocks.append({"type": "text", "text": tx(
-                "FILE {name}: riquadro {index} di 4 ({where}), ingrandito: una porzione della stessa "
-                "pagina, per leggere le cifre piccole; non contare due volte le stesse quote.",
-                name=path.name, index=index, where=where)})
+            blocks.append({"type": "text", "text": (
+                f"FILE {path.name}: tile {index} of 4 ({where}), enlarged: a portion of the same "
+                "page, to read the small digits; do not count the same dimensions twice.")})
             blocks.append({"type": "image_url", "image_url": {
                 "url": "data:image/png;base64," + base64.b64encode(data).decode("ascii")}})
     return blocks
@@ -9003,42 +9134,44 @@ DRAWING_VIEWS = ("side_view",)
 #: the photo inventory (component recognition).
 PHOTO_ROLE = "hires"
 
-#: How each role is presented to the model: (name, instruction). Prompt text
-#: (Italian, like every prompt), not a user-visible message; the names are
-#: the labels of document_roles.ROLES, so the model and the user read the same
-#: words (tests/test_extraction_prompts.py checks it).
+#: How each role is presented to the model: (model-facing name, instruction).
+#: Prompt text in English, like every prompt (user, 2026-11-12), not a
+#: user-visible message. The NAME is a fixed English name keyed by the role id;
+#: the user reads the Italian-source label of document_roles.ROLES, translated
+#: by the catalog (`_role_label`), so the UI language never reaches the model
+#: (tests/test_extraction_prompts.py checks that every role has both).
 _ROLE_PROMPTS = {
-    "pinout": ("Pinout / disposizione contatti",
-               "usalo per contatti, numerazione, funzioni dei pin e quote dei contatti. "
-               "Non assumere che il disegno sia visto dall'alto: dichiara in contacts_view "
-               "la vista che il documento indica."),
-    "top": ("Immagine con quote",
-            "disegno quotato: in pianta usalo per le quote meccaniche -- lunghezza e larghezza "
-            "del corpo, posizione dei contatti e delle file, spostamenti del corpo rispetto ai "
-            "contatti; se lo stesso foglio stampa una vista frontale o laterale, da quella leggi "
-            "le quote verticali (body_height_mm, pin_length_3d_mm)."),
-    "hires": ("Foto ad alta risoluzione",
-              "fotografia del pezzo reale vista dall'alto: usala per cio' che si vede -- "
-              "tipo di contatto sul bordo, colori, sigle serigrafate, spigoli arrotondati, "
-              "componenti montati. Non e' un disegno quotato: una misura ricavata da qui e' "
-              "una stima (\"estimated\" in value_sources)."),
-    "land_pattern": ("Piazzole consigliate",
-                     "piazzole consigliate (land pattern) sulla scheda che ospita il "
-                     "componente: usalo per "
-                     "dimensioni e posizioni di piazzole e fori (pad_diameter_mm, drill_mm, "
-                     "pad_length_mm, pad_width_mm, package_geometry). Le piazzole non sono il "
-                     "corpo: non ricavarne le quote body_*."),
-    "side_view": ("Vista laterale / altezze",
-                  "vista di profilo: usala per le quote in altezza -- body_height_mm, "
-                  "pcb_thickness_mm, pin_length_3d_mm e altezze dei componenti. Lunghezze, "
-                  "larghezze e passi in pianta non si leggono da questa vista."),
-    "datasheet": ("Datasheet del costruttore",
-                  "documento completo del costruttore: puo' contenere tabella dei pin e pinout, "
-                  "disegni quotati visti dall'alto e di profilo, piazzole consigliate (land "
-                  "pattern). Cerca ciascuna di queste sezioni e usala per il suo scopo, come se "
-                  "fosse dichiarata a parte; dichiara in contacts_view la vista del disegno dei "
-                  "contatti. Una sezione che non c'e' va segnalata in notes, non ricostruita. "
-                  "Non e' una foto del pezzo: non ricavarne components_3d ne' colori."),
+    "pinout": ("Pinout / contact arrangement",
+               "use it for contacts, numbering, pin functions and contact dimensions. "
+               "Do not assume that the drawing is seen from above: declare in contacts_view "
+               "the view that the document indicates."),
+    "top": ("Dimensioned image",
+            "dimensioned drawing: in plan use it for the mechanical dimensions -- length and width "
+            "of the body, position of the contacts and of the rows, offsets of the body relative to the "
+            "contacts; if the same sheet prints a front or side view, read from that one "
+            "the vertical dimensions (body_height_mm, pin_length_3d_mm)."),
+    "hires": ("High-resolution photo",
+              "photograph of the real part seen from above: use it for what can be seen -- "
+              "contact type on the edge, colours, silkscreen labels, rounded edges, "
+              "mounted components. It is not a dimensioned drawing: a measure derived from here is "
+              "an estimate (\"estimated\" in value_sources)."),
+    "land_pattern": ("Recommended land pattern",
+                     "recommended lands (land pattern) on the board that hosts the "
+                     "component: use it for "
+                     "sizes and positions of lands and holes (pad_diameter_mm, drill_mm, "
+                     "pad_length_mm, pad_width_mm, package_geometry). The lands are not the "
+                     "body: do not derive the body_* dimensions from them."),
+    "side_view": ("Side view / heights",
+                  "profile view: use it for the height dimensions -- body_height_mm, "
+                  "pcb_thickness_mm, pin_length_3d_mm and heights of the components. Plan lengths, "
+                  "widths and pitches are not read from this view."),
+    "datasheet": ("Manufacturer datasheet",
+                  "complete document of the manufacturer: it may contain the pin table and pinout, "
+                  "dimensioned drawings seen from above and in profile, recommended lands (land "
+                  "pattern). Look for each of these sections and use it for its purpose, as if "
+                  "it were declared separately; declare in contacts_view the view of the drawing of the "
+                  "contacts. A section that is not there is flagged in notes, not reconstructed. "
+                  "It is not a photo of the part: do not derive components_3d or colours from it."),
 }
 
 
@@ -9134,9 +9267,8 @@ def role_instructions(prompts=None) -> dict:
         profile's text when it is not blank, else the second item of
         _ROLE_PROMPTS (the factory text).
     @note Only the INSTRUCTION is a profile prompt; the role NAME (first item
-        of _ROLE_PROMPTS) is the label the user reads in the documents card
-        and stays in the code, so the model and the user keep reading the
-        same words.
+        of _ROLE_PROMPTS) is the fixed English name the model reads and stays
+        in the code; the user reads the label of document_roles.ROLES.
     """
     return {key: effective_text(f"role_prompt_{key}", prompts) for key in _ROLE_PROMPTS}
 
@@ -9149,18 +9281,18 @@ def _role_description(keys, instructions=None) -> str:
     """
     instructions = instructions or {}
     names = " + ".join(_ROLE_PROMPTS[key][0] for key in keys)
-    lead = "RUOLO DICHIARATO DALL’UTENTE" if len(keys) == 1 else "RUOLI DICHIARATI DALL’UTENTE"
+    lead = "ROLE DECLARED BY THE USER" if len(keys) == 1 else "ROLES DECLARED BY THE USER"
     lines = [f"{lead}: {names}."]
     lines += [f"- {_ROLE_PROMPTS[key][0]}: {instructions.get(key) or _ROLE_PROMPTS[key][1]}"
               for key in keys]
     if len(keys) > 1:
-        lines.append("Lo stesso file vale per tutti questi ruoli: leggi da ogni parte del "
-                     "documento le informazioni del ruolo corrispondente.")
+        lines.append("The same file applies to all these roles: read from every part of the "
+                     "document the information of the corresponding role.")
     if "pinout" in keys and "top" not in keys and "datasheet" not in keys:
         # Only when the SAME file is not also the dimensioned top view: a
         # datasheet page that is both must be read for both.
-        lines.append("Questo file non e' dichiarato disegno quotato dall'alto: non usarlo "
-                     "per gli ingombri del corpo.")
+        lines.append("This file is not declared a dimensioned top-view drawing: do not use it "
+                     "for the envelope of the body.")
     return "\n".join(lines)
 
 
@@ -9268,6 +9400,7 @@ def extract_pin_header_params(
     part_number: Optional[str] = None,
     answers: Optional[dict] = None,
     prompts: Optional[dict] = None,
+    step_models: Optional[Mapping[str, str]] = None,
 ) -> ExtractedParams:
     """@brief Extract dimensions and pinout, optionally using local YOLO photo proposals.
 
@@ -9351,6 +9484,23 @@ def extract_pin_header_params(
         prompt_catalog.SentPromptLog, which writes one log line per prompt
         sent (title, status, digest; never the text). None sends the
         defaults and writes no such line.
+    @param step_models The model of every analysis step, {profile prompt
+        field: model identifier or "" for the single model}
+        (ProfileStore.step_models, see prompt_models), or None. None keeps
+        the behaviour before 2026-11-12: every call uses `model`, the
+        dedicated pad and body readings `pad_model`. When given, `pad_model`
+        is ignored and each call resolves its own step's model AT THE CALL
+        SITE, before its images are sized and before any cache key
+        (prompt_models.usable_model: a step model that cannot run leaves the
+        step to `model`, with a log line): the main reading
+        ('system_prompt_single' or 'system_prompt', whichever is sent; the
+        castellated recounts and the numbering repair reuse it), the
+        dedicated numbering ('numbering_prompt'), the dedicated pad and body
+        readings of a single part ('pad_positions_prompt',
+        'body_dimensions_prompt', each falling back to the main reading's
+        model), the contact-style recheck ('contact_style_prompt'); the
+        mapping is forwarded to the photo stage (`step_models=` of
+        photo_inventory.extract_inventory and photo_terminals.observe_terminals).
 
     @param cancel Optional cancellation channel: a threading.Event (or any
         object with is_set()) or a zero-argument callable returning True when
@@ -9488,6 +9638,48 @@ def extract_pin_header_params(
     except OpenRouterError as exc:
         raise ExtractionError(str(exc)) from exc
 
+    # The model of every step, resolved HERE, at the call site, before the
+    # images are sized for it (user request of 2026-11-12, prompt_models).
+    # The check above covers `model`, every step's fallback; a step model on
+    # another provider is checked by usable_model when it is resolved, and
+    # one that cannot run leaves its step to the fallback with a log line:
+    # an optional model never stops the run. Without step_models every call
+    # uses `model` as before.
+    main_field = ("system_prompt_single" if component_family in SINGLE_COMPONENT_FAMILIES
+                  else "system_prompt")
+    main_model = (usable_model(main_field, step_models, model or DEFAULT_MODEL, progress,
+                               openrouter_ready)
+                  if step_models is not None else model or DEFAULT_MODEL)
+    resolved_steps: dict = {}
+    #: {(requested model, step sends images): usable model} of this run.
+    resolved_models: dict = {}
+
+    def step_model(field):
+        """The model of the step `field` (falling back to the main reading's), resolved once per run.
+
+        Resolved on first use: a step the answer never reaches (the
+        numbering of a castellated board) writes no fallback line.
+        Without step_models it is the main model, as before 2026-11-12.
+        """
+        if step_models is None:
+            return main_model
+        if field not in resolved_steps:
+            # Memoised per requested model too (finding 5, 2026-11-12): two
+            # steps asking the same model (the pad positions and the body
+            # quotes on the legacy «Posizioni pad» model) check it once and
+            # log at most one fallback line. Keyed with whether the step
+            # sends images, the one step property usable_model checks.
+            try:
+                images = prompt_step(field).images
+            except KeyError:
+                images = True
+            key = (model_for(field, step_models, main_model), images)
+            if key not in resolved_models:
+                resolved_models[key] = usable_model(field, step_models, main_model, progress,
+                                                    openrouter_ready)
+            resolved_steps[field] = resolved_models[key]
+        return resolved_steps[field]
+
     def announce(tool, detail):
         """Reporting the phase is informational: a broken modal must not lose a
         paid processing, so the error is logged and the run goes on -- the
@@ -9504,12 +9696,16 @@ def extract_pin_header_params(
     # Which tool is working cannot be inferred from the progress messages,
     # and the difference matters: this is a remote call that is paid for,
     # local detection is not.
-    announce("llm", model or DEFAULT_MODEL)
+    announce("llm", main_model)
     if progress:
         # The user must be able to check WHICH of their documents went into
         # the paid call, and with which declared role.
         progress(_files_sent_message(doc_paths, document_roles))
     content_blocks = []
+    # Where each document's block sits in `content_blocks`: a later call by
+    # another step model gets the same request with the images sized for
+    # ITS model (`blocks_for`).
+    file_slots = []
     # The role instructions of the profile (fields 'role_prompt_<role>'),
     # blank or missing ones replaced by the factory texts.
     roles_text = role_instructions(prompts)
@@ -9518,7 +9714,8 @@ def extract_pin_header_params(
         if document_roles is not None:
             description += "\n" + _role_description(document_roles[path.name], roles_text)
         content_blocks.append({"type": "text", "text": description})
-        content_blocks.append(_file_to_content_block(path, model or DEFAULT_MODEL))
+        file_slots.append((len(content_blocks), path))
+        content_blocks.append(_file_to_content_block(path, main_model))
     if component_family == CASTELLATED_FAMILY and document_roles is not None:
         # The AI recognises the number of contacts in THIS call (user,
         # 28/09, point 142): the photo edges enlarged, not a correction afterwards.
@@ -9528,8 +9725,8 @@ def extract_pin_header_params(
             progress(tx("Allegati all'AI gli ingrandimenti dei bordi della foto, per contare i "
                         "contatti fisici: {count} immagini.",
                         count=sum(1 for block in strips if block.get("type") == "image_url")))
-    request = ("Estrai i parametri meccanici del componente da questi documenti e chiama lo "
-               "strumento.")
+    request = ("Extract the mechanical parameters of the component from these documents and call the "
+               "tool. Write every free-text value (notes, reasons) in English.")
     if document_roles is not None:
         declared = {key for keys in document_roles.values() for key in keys}
         # A datasheet is a container: the views it may hold are looked for in
@@ -9548,37 +9745,51 @@ def extract_pin_header_params(
                      if key in in_datasheet and key not in declared]
         in_drawings = [_ROLE_PROMPTS[key][0] for key in DRAWING_VIEWS
                        if key in in_drawing and key not in declared and key not in in_datasheet]
-        request += ('\nI ruoli dei file sono espliciti: rispettali, non dedurli dai nomi originali. '
-                    'Un file con piu\' ruoli vale per ciascuno di essi. '
-                    'Segnala dati mancanti e incongruenze, senza inventare quote per completare le viste assenti.')
+        request += ('\nThe roles of the files are explicit: respect them, do not deduce them from the original names. '
+                    'A file with several roles applies to each of them. '
+                    'Flag missing data and inconsistencies, without inventing dimensions to complete the absent views.')
         if missing:
-            request += '\nViste non fornite: ' + ', '.join(missing) + '.'
+            request += '\nViews not provided: ' + ', '.join(missing) + '.'
         if to_search:
-            request += ('\nViste da cercare nel datasheet (non dichiarate in altri file): '
+            request += ('\nViews to look for in the datasheet (not declared in other files): '
                         + ', '.join(to_search) + '.')
         if in_drawings:
-            request += ('\nViste da cercare nei disegni quotati forniti (non dichiarate a parte): '
+            request += ('\nViews to look for in the dimensioned drawings provided (not declared separately): '
                         + ', '.join(in_drawings) + '.')
     if include_nc_pins:
         request += (
-            "\n\nPin NC: i pin marcati NC (Not Connected) nella tabella pinout sono "
-            "comunque FISICAMENTE PRESENTI sul componente -- non sono collegati "
-            "elettricamente, ma il piedino c'e'. Includili quindi in populated_pins: "
-            "senza il loro pad il footprint non avrebbe il foro e il componente non "
-            "entrerebbe nella scheda."
+            "\n\nNC pins: the pins marked NC (Not Connected) in the pinout table are "
+            "nevertheless PHYSICALLY PRESENT on the component -- they are not connected "
+            "electrically, but the pin is there. So include them in populated_pins: "
+            "without their pad the footprint would not have the hole and the component would not "
+            "fit into the board."
         )
     else:
         request += (
-            "\n\nPin NC: escludi da populated_pins i pin marcati NC (Not Connected), "
-            "anche se fisicamente presenti."
+            "\n\nNC pins: exclude from populated_pins the pins marked NC (Not Connected), "
+            "even if physically present."
         )
     if extra_instructions and extra_instructions.strip():
         request += (
-            "\n\nNote specifiche su QUESTO componente, fornite dall'utente "
-            "(hanno la precedenza se contraddicono quanto deduci dai documenti):\n"
+            "\n\nSpecific notes on THIS component, provided by the user "
+            "(they take precedence if they contradict what you deduce from the documents):\n"
             + extra_instructions.strip()
         )
     content_blocks.append({"type": "text", "text": request})
+
+    def blocks_for(step):
+        """The request of the main reading with each document sized for the model `step`.
+
+        The same list when `step` is the main model; otherwise a copy whose
+        document blocks are rebuilt for `step` (an image enlarged to ITS
+        provider's limits, `_file_to_content_block`).
+        """
+        if step == main_model:
+            return content_blocks
+        blocks = list(content_blocks)
+        for slot, path in file_slots:
+            blocks[slot] = _file_to_content_block(path, step)
+        return blocks
 
     has_pdf = any(p.suffix.lower() == ".pdf" for p in doc_paths)
 
@@ -9598,11 +9809,11 @@ def extract_pin_header_params(
         # The profile field of the main prompt; a text equal to its default
         # apart from blanks and line ends sends the default's bytes (V4-5),
         # and the request declares the field it sends (V4-6).
-        main_field = "system_prompt_single" if single_part else "system_prompt"
+        # (`main_field` is resolved above, with the model of its step.)
         sent = effective_text(main_field, {main_field: system_prompt})
         with prompt_sending({main_field: sent}):
             answer = diagnostic_call(
-                model=model or DEFAULT_MODEL,
+                model=main_model,
                 system_prompt=sent,
                 content_blocks=blocks,
                 tool=_single_component_tool() if single_part else _openai_tool(),
@@ -9664,19 +9875,48 @@ def extract_pin_header_params(
     # The main answer as given travels into the result (ExtractedParams.raw_main)
     # for the partial re-runs (reread_body_height, reread_pad_positions).
     data["_raw_main"] = copy.deepcopy(raw_main)
+    # The model that actually gave this answer (the main step's usable model,
+    # not necessarily the single or session model the GUI knows): a partial
+    # re-read compares its reader with it («one model reading twice is one
+    # reading», H6). Written after `without_private_keys`, so a model answer
+    # can never set it (RAW_MAIN_MODEL_KEY).
+    data["_raw_main"][RAW_MAIN_MODEL_KEY] = main_model
+    if step_models is None:
+        # Before 2026-11-12: one dedicated reader, the profile's pad_model,
+        # for both the pad positions and the body quotes.
+        pad_reader = _pad_reading_model(pad_model, main_model, component_family, progress,
+                                        openrouter_ready)
+        readers = {"pad_model": pad_reader, "pad_model_requested": (pad_model or "").strip(),
+                   # No note about the body reader: the pad note says it.
+                   "body_model": pad_reader, "body_model_requested": ""}
+    elif component_family in SINGLE_COMPONENT_FAMILIES:
+        # Each dedicated reading of a single part has its own step; the
+        # requested model is kept so the result can say it was replaced.
+        # The readers are resolvers, called only when the dedicated reading
+        # runs (finding 5, 2026-11-12): a part whose answer never reaches it
+        # writes no fallback line and pays no credit check.
+        readers = {"pad_model": lambda: step_model("pad_positions_prompt"),
+                   "pad_model_requested": model_for("pad_positions_prompt", step_models,
+                                                    main_model),
+                   "body_model": lambda: step_model("body_dimensions_prompt"),
+                   "body_model_requested": model_for("body_dimensions_prompt", step_models,
+                                                     main_model)}
+    else:
+        # Only a single part has the dedicated pad and body readings.
+        readers = {"pad_model": main_model, "pad_model_requested": "",
+                   "body_model": main_model, "body_model_requested": ""}
     try:
-        _validate_main_response(data, content_blocks, diagnostic_call, model, system_prompt,
+        _validate_main_response(data, content_blocks, diagnostic_call, main_model, system_prompt,
                                 has_pdf, progress,
                                 numbering={"documents": numbering_documents(doc_paths, document_roles),
                                            "pdf_only": _numbering_only_in_pdf(doc_paths, document_roles),
                                            "component_family": component_family,
                                            "announce": announce, "check_cancel": check_cancel,
                                            "prompt": numbering_prompt,
-                                           "pad_model": _pad_reading_model(
-                                               pad_model, model or DEFAULT_MODEL,
-                                               component_family, progress,
-                                               openrouter_ready),
-                                           "pad_model_requested": (pad_model or "").strip(),
+                                           # The model of the dedicated numbering,
+                                           # resolved when the call is made.
+                                           "step_model": step_model,
+                                           **readers,
                                            "library": _library_witness(
                                                part_number, component_family, progress),
                                            "answers": answers,
@@ -9696,8 +9936,12 @@ def extract_pin_header_params(
         raise error from exc
 
     check_cancel()
-    _recheck_missing_contact_styles(data, content_blocks, diagnostic_call, model,
-                                   has_pdf, progress,
+    # The recheck runs only on a castellated answer with sides of unknown
+    # style: its step model is resolved (and its fallback logged) only then.
+    contact_model = (step_model("contact_style_prompt")
+                     if _needs_contact_style_recheck(data, content_blocks, has_pdf) else main_model)
+    _recheck_missing_contact_styles(data, blocks_for(contact_model), diagnostic_call,
+                                   contact_model, has_pdf, progress,
                                    prompt=(prompts or {}).get("contact_style_prompt"))
     check_cancel()
     if progress:
@@ -9720,9 +9964,9 @@ def extract_pin_header_params(
         review_proposals=review_proposals, yolo_confidence=yolo_confidence,
         yolo_settings=yolo_settings,
         recount_contacts=lambda disagreements: _recount_sides_from_photo(
-            data, disagreements, content_blocks, diagnostic_call, model, system_prompt,
+            data, disagreements, content_blocks, diagnostic_call, main_model, system_prompt,
             has_pdf, progress),
-        prompts=prompts)
+        prompts=prompts, step_models=step_models)
 
 
 #: System prompt of the optional contact-style recheck of a castellated board
@@ -9744,6 +9988,29 @@ CONTACT_STYLE_PROMPT = (
 )
 
 
+def _sides_missing_style(data) -> dict:
+    """The castellated sides of `data` whose contact style is unknown, {edge: side}; empty otherwise."""
+    if data.get("layout") != "castellated":
+        return {}
+    sides = data.get("castellated_sides") or []
+    return {_side_edge(side): side for side in sides
+            if isinstance(side, dict) and side.get("contact_style") is None
+            and _side_edge(side) in ("top", "bottom", "left", "right")}
+
+
+def _needs_contact_style_recheck(data, content_blocks, has_pdf) -> bool:
+    """Whether `_recheck_missing_contact_styles` would make its paid call on `data`.
+
+    True for a castellated answer with sides of unknown style and a request
+    carrying visual evidence (a PDF or an image): a text-only request cannot
+    provide new visual evidence. Lets the caller resolve the step's model
+    only for a call that is made.
+    """
+    if not _sides_missing_style(data):
+        return False
+    return has_pdf or any(block.get("type") == "image_url" for block in content_blocks)
+
+
 def _recheck_missing_contact_styles(data, content_blocks, diagnostic_call, model,
                                    has_pdf=False, progress=None, prompt=None):
     """One optional visual check; uncertain edges still require manual choice.
@@ -9752,18 +10019,12 @@ def _recheck_missing_contact_styles(data, content_blocks, diagnostic_call, model
     observed styles are preserved. Replies use canonical top-view edge names.
     `prompt` is the profile's system prompt of the check (field
     'contact_style_prompt'); None or blank sends CONTACT_STYLE_PROMPT.
+    `model` is the model of that step (the main reading's when no step
+    model is chosen) and `content_blocks` the request sized for it.
     """
-    if data.get("layout") != "castellated":
+    if not _needs_contact_style_recheck(data, content_blocks, has_pdf):
         return
-    sides = data.get("castellated_sides") or []
-    missing = {_side_edge(side): side for side in sides
-               if isinstance(side, dict) and side.get("contact_style") is None
-               and _side_edge(side) in ("top", "bottom", "left", "right")}
-    if not missing:
-        return
-    # A text-only request cannot provide new visual evidence.
-    if not has_pdf and not any(block.get("type") == "image_url" for block in content_blocks):
-        return
+    missing = _sides_missing_style(data)
     message = "Ricontrollo AI del tipo di contatto sui lati non riconosciuti: " + ", ".join(missing)
     if progress:
         progress(tx("Ricontrollo AI del tipo di contatto sui lati non riconosciuti: {sides}",
@@ -10162,16 +10423,17 @@ def _recount_sides_attempt(data, disagreements, content_blocks, diagnostic_call,
     if not disagreements and not unverifiable:
         return changed
     facts = "; ".join(
-        f"lato {item.edge}: la foto calibrata vista dall'alto mostra {item.found} semi-fori "
-        f"aperti sul bordo, con i centri a {', '.join(f'{c:.2f}' for c in item.centres_mm)} mm "
-        f"dall'inizio del bordo (da sinistra per top/bottom, dall'alto per left/right); "
-        f"la risposta ne dichiarava {item.declared}"
+        f"side {item.edge}: the calibrated photo seen from above shows {item.found} half holes "
+        f"open on the edge, with the centres at {', '.join(f'{c:.2f}' for c in item.centres_mm)} mm "
+        f"from the start of the edge (from the left for top/bottom, from the top for left/right); "
+        f"the answer declared {item.declared}"
         for item in disagreements)
     doubts = "; ".join(
-        f"lato {item.edge}: la foto calibrata non permette di contare i semi-fori "
-        f"({item.reason}); la risposta ne dichiarava {item.declared}. Guarda l'ingrandimento "
-        f"del bordo {item.edge}: se NON vedi fori metallizzati tagliati dal bordo, rispondi "
-        f"count 0 per questo lato (o non elencarlo)"
+        f"side {item.edge}: the calibrated photo does not allow the half holes to be counted "
+        f"({item.model_reason or 'not countable'}); the answer declared {item.declared}. "
+        f"Look at the enlargement "
+        f"of the {item.edge} edge: if you do NOT see plated holes cut by the edge, answer "
+        f"count 0 for this side (or do not list it)"
         for item in unverifiable)
     summary = ", ".join(
         [f"{EDGE_LABELS.get(item.edge, item.edge)} {item.declared} -> {item.found}"
@@ -10180,15 +10442,15 @@ def _recount_sides_attempt(data, disagreements, content_blocks, diagnostic_call,
            for item in unverifiable])
     say(tx("Contatti: la foto non conferma l'analisi ({summary}). Richiesta di ricontarli sugli "
            "stessi documenti: una chiamata in piu'.", summary=summary))
-    comparison = "Confronto con la fotografia: " + "; ".join(part for part in (facts, doubts) if part)
+    comparison = "Comparison with the photograph: " + "; ".join(part for part in (facts, doubts) if part)
     blocks = list(content_blocks) + [{"type": "text", "text": (
-        comparison + ". Riconta sui documenti (pinout, disegno "
-        "quotato, foto) i contatti FISICI di questi lati: count e' il loro numero, pin_names "
-        "ne elenca esattamente uno per contatto nell'ordine lungo il bordo; le sigle dei LED "
-        "o di altri componenti non sono contatti. La foto puo' sbagliare solo se un semi-foro "
-        "e' coperto: se i documenti mostrano un altro numero, tienilo e spiegalo in notes. "
-        "Restituisci la risposta completa con i lati visti dall'alto (contacts_view=\"top\") "
-        "e le quote in millimetri (drawing_unit=\"mm\"). Lati attuali, visti dall'alto e in "
+        comparison + ". Recount on the documents (pinout, dimensioned "
+        "drawing, photo) the PHYSICAL contacts of these sides: count is their number, pin_names "
+        "lists exactly one per contact in the order along the edge; the labels of the LEDs "
+        "or of other components are not contacts. The photo can be wrong only if a half hole "
+        "is covered: if the documents show another number, keep it and explain it in notes, in English. "
+        "Return the complete answer with the sides seen from above (contacts_view=\"top\") "
+        "and the dimensions in millimetres (drawing_unit=\"mm\"). Current sides, seen from above and in "
         f"mm: {data.get('castellated_sides')!r}")}]
     repaired = diagnostic_call(model=model or DEFAULT_MODEL,
                                system_prompt=system_prompt or _SYSTEM_PROMPT,
@@ -10300,7 +10562,18 @@ def _side_contradictions(raw, body_length, body_width) -> list[str]:
 
 
 def _edge_contradictions(raw, body_length, body_width) -> list[tuple[str, str]]:
-    """Same checks as _side_contradictions, each problem paired with its edge."""
+    """Same checks as _side_contradictions, each problem paired with its edge (English, for the model)."""
+    return [(edge, model_text) for edge, model_text, _ui_text
+            in _edge_problems(raw, body_length, body_width)]
+
+
+def _edge_problems(raw, body_length, body_width) -> list[tuple[str, str, str]]:
+    """The self-contradictions of the castellated sides as (edge, model text, log text).
+
+    The model text is fixed English (user, 2026-11-12: every text sent to a
+    model in English); the log text keeps the Italian wording the progress
+    line has always shown inside its translated frame.
+    """
     try:
         sides = _normalized_castellated_sides(raw)
     except ExtractionError:
@@ -10320,14 +10593,17 @@ def _edge_contradictions(raw, body_length, body_width) -> list[tuple[str, str]]:
     for side in sides:
         edge, count = side["edge"], side["count"]
         if names.get(edge, count) != count:
-            problems.append((edge, f"lato {edge}: count={count} ma pin_names ha "
-                                   f"{names[edge]} voci"))
+            problems.append((edge, f"side {edge}: count={count} but pin_names has "
+                                   f"{names[edge]} entries",
+                             f"lato {edge}: count={count} ma pin_names ha "
+                             f"{names[edge]} voci"))
         edge_length = body_width if edge in ("left", "right") else body_length
         span = (count - 1) * side["pitch_mm"]
         if edge_length is not None and span > edge_length + _PIN_FIELD_TOLERANCE_MM:
-            problems.append((edge, f"lato {edge}: (count-1) x pitch_mm = ({count}-1) x "
-                                   f"{side['pitch_mm']:g} = {span:.2f}, piu' del bordo lungo "
-                                   f"{edge_length:g}"))
+            formula = f"(count-1) x pitch_mm = ({count}-1) x {side['pitch_mm']:g} = {span:.2f}"
+            problems.append((edge, f"side {edge}: {formula}, more than the edge, which is "
+                                   f"{edge_length:g} long",
+                             f"lato {edge}: {formula}, piu' del bordo lungo {edge_length:g}"))
         # A row of N contacts at pitch P spans (N-1)*P from centre to centre;
         # a drawing that quotes the first and the last contact from the two
         # ends of the edge (a, b) fixes that span to L-a-b. When the nearest
@@ -10340,14 +10616,20 @@ def _edge_contradictions(raw, body_length, body_width) -> list[tuple[str, str]]:
             first, last = ends[edge]
             quoted = edge_length - first - last
             if quoted < 0:
-                problems.append((edge, f"lato {edge}: le quote del primo e dell'ultimo contatto "
-                                       f"dai bordi ({first:g} + {last:g}) superano il bordo lungo "
-                                       f"{edge_length:g}"))
+                problems.append((edge, f"side {edge}: the dimensions of the first and last contact "
+                                       f"from the edges ({first:g} + {last:g}) exceed the edge, which "
+                                       f"is {edge_length:g} long",
+                                 f"lato {edge}: le quote del primo e dell'ultimo contatto "
+                                 f"dai bordi ({first:g} + {last:g}) superano il bordo lungo "
+                                 f"{edge_length:g}"))
             elif abs(quoted - span) > side["pitch_mm"] / 2:
                 expected = round(quoted / side["pitch_mm"]) + 1
-                problems.append((edge, f"lato {edge}: le quote del disegno danno "
-                                       f"({edge_length:g} - {first:g} - {last:g}) / {side['pitch_mm']:g} "
-                                       f"+ 1 = {expected} contatti, ma count={count}"))
+                formula = (f"({edge_length:g} - {first:g} - {last:g}) / {side['pitch_mm']:g} "
+                           f"+ 1 = {expected}")
+                problems.append((edge, f"side {edge}: the dimensions of the drawing give "
+                                       f"{formula} contacts, but count={count}",
+                                 f"lato {edge}: le quote del disegno danno "
+                                 f"{formula} contatti, ma count={count}"))
     return problems
 
 
@@ -10397,29 +10679,32 @@ def _recount_contradictory_sides(data, content_blocks, diagnostic_call, model, s
     that lists an edge twice is also passed whole, so the normalization
     refuses it as it always did.
     """
-    contradicted = _edge_contradictions(data.get("castellated_sides"), **dims)
+    contradicted = _edge_problems(data.get("castellated_sides"), **dims)
     if not contradicted:
         return
-    problems = [problem for _edge, problem in contradicted]
-    wrong_edges = {edge for edge, _problem in contradicted}
-    summary = "; ".join(problems)
+    wrong_edges = {edge for edge, _model_text, _ui_text in contradicted}
+    # The model reads the English wording, the log the wording it always
+    # showed (user, 2026-11-12: prompts in English, UI unchanged).
+    summary = "; ".join(model_text for _edge, model_text, _ui_text in contradicted)
+    log_summary = "; ".join(ui_text for _edge, _model_text, ui_text in contradicted)
     if progress:
         progress(tx("Risposta AI incoerente sui contatti ({summary}). Richiesta di ricontarli "
-                    "sugli stessi documenti: una chiamata in piu'.", summary=summary))
+                    "sugli stessi documenti: una chiamata in piu'.", summary=log_summary))
     unit = data.get("drawing_unit") or "mm"
     repair_blocks = list(content_blocks) + [{"type": "text", "text": (
-        "La risposta precedente si contraddice sui contatti dei lati castellated: "
-        f"{summary}. Riconta sui documenti (pinout e disegno quotato) i contatti FISICI di "
-        "ogni lato: count e' il loro numero, pin_names ne elenca esattamente uno per "
-        "contatto nell'ordine lungo il bordo, e (count-1) x pitch_mm deve stare nel bordo "
-        f"(body_length_mm={dims['body_length']} per i lati top e bottom, "
-        f"body_width_mm={dims['body_width']} per left e right). Se il disegno quota le "
-        "distanze del primo e dell'ultimo contatto dai bordi (first_contact_from_edge_mm, "
-        "last_contact_from_edge_mm), allora count = (bordo - prima - ultima) / pitch_mm + 1: "
-        "riportale e rispettale. Usa la stessa unita' della "
-        f"risposta precedente (drawing_unit={unit}). Non inventare valori che i documenti "
-        "non danno: se non puoi stabilirli, ometti i nomi e spiegalo in notes. Restituisci "
-        f"la risposta completa. Lati precedenti: {data.get('castellated_sides')!r}"
+        "The previous answer contradicts itself on the contacts of the castellated sides: "
+        f"{summary}. Recount on the documents (pinout and dimensioned drawing) the PHYSICAL contacts of "
+        "every side: count is their number, pin_names lists exactly one per "
+        "contact in the order along the edge, and (count-1) x pitch_mm must fit in the edge "
+        f"(body_length_mm={dims['body_length']} for the top and bottom sides, "
+        f"body_width_mm={dims['body_width']} for left and right). If the drawing dimensions the "
+        "distances of the first and last contact from the edges (first_contact_from_edge_mm, "
+        "last_contact_from_edge_mm), then count = (edge - first - last) / pitch_mm + 1: "
+        "report them and respect them. Use the same unit as the "
+        f"previous answer (drawing_unit={unit}). Do not invent values that the documents "
+        "do not give: if you cannot establish them, omit the names and explain it in notes, in "
+        "English. Return "
+        f"the complete answer. Previous sides: {data.get('castellated_sides')!r}"
     )}]
     try:
         repaired = diagnostic_call(model=model or DEFAULT_MODEL,
@@ -10469,7 +10754,7 @@ def _recount_contradictory_sides(data, content_blocks, diagnostic_call, model, s
     # counts of the others, so mixing two answers can silently lose a pad.
     data["castellated_sides"] = sides if whole else merged
     warning = tx("Contatti dei lati ricontati dopo una risposta AI incoerente ({summary}); "
-                 "verificare conteggi e nomi prima dell'utilizzo.", summary=summary)
+                 "verificare conteggi e nomi prima dell'utilizzo.", summary=log_summary)
     if changed and whole:
         warning += " " + tx("Il ricontrollo cambiava anche lati che erano coerenti ({edges}) e la "
                             "numerazione dei contatti dipende da tutti i lati: adottato il "
@@ -10561,13 +10846,16 @@ def _validate_main_response(data, content_blocks, diagnostic_call, model, system
                             "dell'analisi foto.",
                             exc=exc))
             repair_blocks = list(content_blocks) + [{"type": "text", "text": (
-                "Correggi esclusivamente la numerazione fisica dei contatti della risposta precedente. "
-                "Confronta il pinout originale: GPIO e sigle elettriche sono pin_names, non numeri pad. "
-                "first_pin e' il minimo della sequenza; reverse ne inverte l'ordine spaziale. "
-                "Non cambiare lati, conteggi, geometria o ordine delle sigle. "
-                "Se i documenti non stabiliscono la numerazione, ometti first_pin su TUTTI i lati "
-                "per adottare una convenzione progressiva esplicitamente da verificare. "
-                f"Conflitto: {end_sentence(exc)} Lati precedenti: {data.get('castellated_sides')!r}"
+                "Correct only the physical numbering of the contacts of the previous answer. "
+                "Compare the original pinout: GPIOs and electrical labels are pin_names, not pad numbers. "
+                "first_pin is the minimum of the sequence; reverse inverts its spatial order. "
+                "Do not change sides, counts, geometry or the order of the labels. "
+                "If the documents do not establish the numbering, omit first_pin on ALL the sides "
+                "to adopt a progressive convention explicitly to be verified. "
+                # The English twin of the conflict, never the UI-language
+                # message (user, 2026-11-12).
+                f"Conflict: {end_sentence(getattr(exc, 'model_text', '') or str(exc))} "
+                f"Previous sides: {data.get('castellated_sides')!r}"
             )}]
             try:
                 repaired = diagnostic_call(model=model or DEFAULT_MODEL,
@@ -10613,12 +10901,16 @@ def _validate_main_response(data, content_blocks, diagnostic_call, model, system
         cols = _optional_number(data.get("cols"), positive=True, integer=True)
         if rows and cols:
             numbering["check_cancel"]()
-            numbering["announce"]("llm", model or DEFAULT_MODEL)
+            # The model of the numbering step (2026-11-12), resolved now that
+            # the call is made; without a resolver, the main model as before.
+            resolve = numbering.get("step_model")
+            reader = resolve("numbering_prompt") if resolve else model or DEFAULT_MODEL
+            numbering["announce"]("llm", reader)
             if progress:
                 progress(tx("Lettura dedicata della numerazione dei pin su {names}.",
                             names=", ".join(p.name for p in documents)))
             reading = read_pin_numbering(
-                documents, rows=rows, cols=cols, model=model or DEFAULT_MODEL,
+                documents, rows=rows, cols=cols, model=reader,
                 call=diagnostic_call, prompt=numbering.get("prompt"), progress=progress)
         else:
             reading = {"view": "unknown", "pins": [], "notes": "",
@@ -10629,10 +10921,16 @@ def _validate_main_response(data, content_blocks, diagnostic_call, model, system
         # Explicit pads of a single part: a second, dedicated reading of the
         # hole positions, compared by distances (user, 2026-10-10, VE12H-K).
         documents = numbering["documents"]
-        reader = numbering.get("pad_model") or model or DEFAULT_MODEL
+        # A reader is a model name or a resolver called here, when the
+        # reading runs (finding 5, 2026-11-12: no eager fallback lines).
+        reader = _reader_model(numbering.get("pad_model")) or model or DEFAULT_MODEL
+        # The body quotes have their own step since 2026-11-12 (the pad
+        # reader before): absent, the pad reader as before.
+        body_reader = _reader_model(numbering.get("body_model")) or reader
         # One model reading twice is one reading (H6): said to the pad
-        # confrontation and to the height tie-break.
+        # confrontation (pad reader) and to the height tie-break (body reader).
         same_model = reader == (model or DEFAULT_MODEL)
+        body_same_model = body_reader == (model or DEFAULT_MODEL)
         numbering["check_cancel"]()
         numbering["announce"]("llm", reader)
         if progress:
@@ -10673,34 +10971,47 @@ def _validate_main_response(data, content_blocks, diagnostic_call, model, system
         # outline sizes and the height from the view that prints them,
         # compared with the main answer by apply_dedicated_body.
         numbering["check_cancel"]()
-        numbering["announce"]("llm", reader)
+        numbering["announce"]("llm", body_reader)
         if progress:
             progress(tx("Lettura dedicata delle quote del corpo su {names} con {model}.",
-                        names=", ".join(p.name for p in documents), model=reader))
+                        names=", ".join(p.name for p in documents), model=body_reader))
         def tie_break():
             # A model OTHER than the main one (review 2026-11-04, M13): the
             # dedicated reader on the enlarged page is a third, independent
             # transcription; when that reader IS the main model (blank pad
             # model, or a provider not ready) the third witness does not
             # exist and no call is paid for a re-reading by the same model.
-            if same_model:
+            if body_same_model:
                 if progress:
                     progress(tx("Spareggio sull'altezza non disponibile: il lettore dedicato e' il "
                                 "modello principale {model}, una sua terza lettura non sarebbe "
-                                "indipendente.", model=reader))
+                                "indipendente.", model=body_reader))
                 return None
             numbering["check_cancel"]()
-            numbering["announce"]("llm", reader)
+            numbering["announce"]("llm", body_reader)
             if progress:
                 progress(tx("Spareggio sull'altezza: terza lettura delle quote del corpo su {names} a "
                             "riquadri ingranditi con {model}.",
-                            names=", ".join(p.name for p in documents), model=reader))
-            return read_body_dimensions(documents, model=reader, call=diagnostic_call,
+                            names=", ".join(p.name for p in documents), model=body_reader))
+            return read_body_dimensions(documents, model=body_reader, call=diagnostic_call,
                                         prompt=body_prompt, progress=progress, enlarged=True)
 
-        apply_dedicated_body(data, read_body_dimensions(documents, model=reader, call=diagnostic_call,
+        apply_dedicated_body(data, read_body_dimensions(documents, model=body_reader,
+                                                        call=diagnostic_call,
                                                         prompt=body_prompt, progress=progress),
                              progress, tie_break=tie_break)
+        body_requested = numbering.get("body_model_requested") or body_reader
+        pad_note_says_it = (body_requested == numbering.get("pad_model_requested")
+                            and body_reader == reader)
+        if body_reader != body_requested and not pad_note_says_it:
+            # As for the pads: the result says the body quotes were not read
+            # by the model chosen for their step. Not when both steps asked
+            # the same model and both fell back to the same reader: the pad
+            # note above already says it (finding 5, 2026-11-12).
+            data["notes"] = (str(data.get("notes") or "") + "\n" + tx(
+                "Quote del corpo lette dal modello principale {model} al posto di "
+                "{requested}, non utilizzabile.", model=body_reader,
+                requested=numbering["body_model_requested"])).strip()
     elif (numbering and _has_explicit_pads(data)
             and numbering.get("component_family") in SINGLE_COMPONENT_FAMILIES):
         # No drawing image to read the positions from (only a PDF, or no
@@ -10757,7 +11068,8 @@ def _extract_photo_stage(data, doc_paths, *, progress, announce, check_cancel, d
                          yolo_confidence, yolo_settings,
                          recount_contacts=None, crop_prompt=None,
                          crop_model=None, cancelled=None,
-                         smd_model_path=None, prompts=None) -> ExtractedParams:
+                         smd_model_path=None, prompts=None,
+                         step_models=None) -> ExtractedParams:
     """Optional photo inventory and final assembly of a validated main answer.
 
     `cancelled` is the zero-argument cancellation predicate of extract_params
@@ -10765,6 +11077,10 @@ def _extract_photo_stage(data, doc_paths, *, progress, announce, check_cancel, d
     `prompts` is the profile's {field: text} of extract_pin_header_params,
     forwarded to extract_inventory only when given (None: the defaults, and
     an inventory function that predates the keyword keeps working).
+    `step_models` is the step-model table of extract_pin_header_params,
+    forwarded the same way (only when given) to extract_inventory and
+    observe_terminals, which resolve the model of each photo step at their
+    own call sites.
     """
     # The photo needs a separate pass: in the global extraction the model
     # must also read dimensions, pinout and layout, and tends to sacrifice the
@@ -10823,6 +11139,7 @@ def _extract_photo_stage(data, doc_paths, *, progress, announce, check_cancel, d
                 **({'smd_model_path': smd_model_path}
                    if photo_detector == 'yolo_smd' and smd_model_path is not None else {}),
                 **({'prompts': prompts} if prompts is not None else {}),
+                **({'step_models': step_models} if step_models is not None else {}),
             )
         except ReviewCancelled as exc:
             # A cancellation is not an inventory failure: continuing here
@@ -10871,6 +11188,7 @@ def _extract_photo_stage(data, doc_paths, *, progress, announce, check_cancel, d
                         diagnostic_call, progress or (lambda message: None),
                         photo_cache_dir,
                         **({'system_prompt': terminal_prompt} if terminal_prompt else {}),
+                        **({'step_models': step_models} if step_models is not None else {}),
                     )
                 except (OpenRouterError, ValueError, OSError) as exc:
                     photo_report.warnings.append(tx("Dettaglio terminali non disponibile: {exc}", exc=exc))
@@ -11471,7 +11789,21 @@ def _optional_number(value, *, positive=False, integer=False):
 
 
 class _PinNumberConflict(ExtractionError):
-    """@brief Reject overlapping physical pad ranges before photographic analysis."""
+    """@brief Reject overlapping physical pad ranges before photographic analysis.
+
+    @note The message is the user's (tx); `model_text` is the same fact in
+        fixed English, the wording the numbering correction sends to the model
+        (user, 2026-11-12: the UI language never reaches a model).
+    """
+
+    def __init__(self, message: str, model_text: str = "") -> None:
+        """@brief Keep the user message and its English model-facing twin.
+
+        @param message Translated message shown to the user.
+        @param model_text English wording for the model; the message when empty.
+        """
+        super().__init__(message)
+        self.model_text = model_text or message
 
 
 #: Optional per-side hole sizes, in mm, as observed on the board: the diameter
@@ -11658,7 +11990,9 @@ def _castellated_sides(raw: Optional[Sequence[dict]], *, body_length: Optional[f
             start, stop = side["first_pin"], side["first_pin"] + side["count"]
             shared = [max(start, a) for a, b in used if max(start, a) < min(stop, b)]
             if shared:
-                raise _PinNumberConflict(tx("Numero pad duplicato tra lati: {min}.", min=min(shared)))
+                raise _PinNumberConflict(
+                    tx("Numero pad duplicato tra lati: {min}.", min=min(shared)),
+                    model_text=f"Duplicate pad number between sides: {min(shared)}.")
             used.append((start, stop))
     next_pin = 1
     for side in sides:

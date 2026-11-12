@@ -10,7 +10,8 @@ L'analisi iniziale dei documenti (quote, pinout) e l'inventario fotografico
 (rilevatore locale, inventario AI, lettura dei ritagli) sono descritti in
 `photo-mechanical-workflow.md`; qui si parla solo di che cosa succede dopo,
 quando i corpi riconciliati vengono abbinati ai modelli. Il modello AI è
-quello unico configurato in **Configurazione → Default generali AI…**
+quello configurato in **Configurazione → Modello AI…** (il modello unico o
+quello scelto per il singolo passo)
 (predefinito: `deepseek-api/deepseek-flash` dai sorgenti, `anthropic/claude-opus-5`
 via OpenRouter nel programma installato; si sceglie dall'interfaccia, mai
 modificando il database); la versione

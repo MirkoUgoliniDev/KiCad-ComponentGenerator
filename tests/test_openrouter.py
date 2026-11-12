@@ -115,7 +115,11 @@ def test_changing_type_replaces_block_and_keeps_user_notes():
     assert second.count(component_types.BLOCK_START) == 1
     assert "castellated" in second
     assert "Il case e' metallico." in second
-    assert "FORI PASSANTI (THT)" not in second
+    # CONTRACT CHANGED 2026-11-12: prompts in English («FORI PASSANTI
+    # (THT)» -> «THROUGH-HOLE (THT)»): the THT block is gone, castellated
+    # only. Positive twin: the first block did carry it.
+    assert "THROUGH-HOLE (THT)" in first
+    assert "THROUGH-HOLE (THT)" not in second
 
 
 def test_selecting_no_type_removes_block_only():

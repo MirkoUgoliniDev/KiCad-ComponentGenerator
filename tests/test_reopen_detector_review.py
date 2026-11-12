@@ -548,7 +548,7 @@ def test_empty_review_replaces_old_bundle_and_survives_project_reopen(prepared, 
     window._refresh_reopen_review_button()
     assert window.btn_component_review.isEnabled()
     assert not window.btn_relaunch_inventory.isEnabled()
-    monkeypatch.setattr(window, '_ensure_api_key', lambda: pytest.fail('empty review must not request AI'))
+    monkeypatch.setattr(window, '_ensure_api_key', lambda *args, **kwargs: pytest.fail('empty review must not request AI'))
     window._relaunch_inventory()
     assert window._reconcile_worker is None and calls == []
 

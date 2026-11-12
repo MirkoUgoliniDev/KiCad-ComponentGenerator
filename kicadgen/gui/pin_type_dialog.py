@@ -97,7 +97,11 @@ class PinTypeDialog(QDialog):
         note = QLabel(tx('Invia pinout e documenti selezionati al modello AI configurato. Può comportare costi. Le proposte richiedono revisione.'))
         note.setWordWrap(True)
         layout.addWidget(note)
-        files = QLabel(args['model'] + '\n' + '\n'.join(str(p.name) for p in args['documents']))
+        # The model the suggestion will really use: the step's own model when
+        # the «Modello AI» table chose one (2026-11-12), else the given one.
+        from ..services.prompt_models import model_for
+        shown_model = model_for('pin_type_prompt', args.get('step_models'), args['model'])
+        files = QLabel(shown_model + '\n' + '\n'.join(str(p.name) for p in args['documents']))
         files.setTextFormat(Qt.TextFormat.PlainText)
         files.setWordWrap(True)
         layout.addWidget(files)

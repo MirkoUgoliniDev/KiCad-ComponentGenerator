@@ -97,7 +97,8 @@ def test_a_recount_that_agrees_with_the_photo_replaces_the_side(fraction):
     right = _side(data, "right")
     assert right["count"] == 4 and right["pin_names"] == ["G", "R", "T", "V"]
     prompt = calls[0]["content_blocks"][-1]["text"]
-    assert "4 semi-fori" in prompt       # the photo's measure is told
+    # CONTRACT CHANGED 2026-11-12: prompts in English.
+    assert "4 half holes" in prompt       # the photo's measure is told
     assert any("ricontati dopo il confronto con la foto" in line for line in logs)
 
 

@@ -651,11 +651,14 @@ def cached_call(call, kwargs, cache_dir, stage, log, expected_ids=None):
 #: Description of the `package` field in the photo tools. The examples are
 #: generic families, different from one another, chosen on purpose outside
 #: the test board: an example taken from the sample is a hint at the answer.
+#: English since 2026-11-12 (every prompt sent to a model is in English, user
+#: decision): the tool schema is part of the photo cache key, so photo
+#: answers cached with the Italian text are asked again once.
 PACKAGE_DESCRIPTION = (
-    "Sigla standard del CORPO come si usa nelle librerie (per esempio SOT-23, "
-    "SOIC-8, QFN-32, R_0603, C_0805). E' una forma fisica, non una funzione "
-    "elettrica. Stringa vuota se non la si riconosce con certezza: meglio "
-    "vuota che inventata.")
+    "Standard designation of the BODY as used in libraries (for example SOT-23, "
+    "SOIC-8, QFN-32, R_0603, C_0805). It is a physical shape, not an electrical "
+    "function. Empty string if it is not recognised with certainty: better "
+    "empty than invented.")
 
 
 def classification_tool(kinds):
@@ -684,14 +687,13 @@ def classification_tool(kinds):
         # board (user, 26/09: the sample's examples steered the model).
         "package": {"type": "string",
                     "description": PACKAGE_DESCRIPTION},
-        "mating": {"type": "string", "enum": ["edge", "top", "none"],
-                   "description": ("Solo per i connettori: dove si affaccia l'apertura. "
-                                   "\"edge\" se guarda il bordo della scheda (innesto "
-                                   "laterale), \"top\" se il cavo o la spina entrano "
-                                   "dall'alto (innesto verticale). "
-                                   "\"none\" per tutto il resto.")},
     }
-    required = [key for key in properties if key != "mating"]
+    # `mating` is optional and its schema is the shared one of
+    # mechanical_metadata_properties (English). A local Italian description
+    # used to sit here, overwritten before the tool was built: removed on
+    # 2026-11-12 as dead text. Added last, after `required`, so the key order
+    # and the required list sent to the model are what they were.
+    required = list(properties)
     properties["mating"] = mechanical_metadata_properties()["mating"]
     # New evidence remains optional so partial/older responses are still useful.
     properties.update({k: v for k, v in mechanical_metadata_properties().items()
@@ -962,7 +964,7 @@ def _height_family(component):
 
 
 def mechanical_envelopes(photo, components, model, call, log, cache_dir, verification_prompt=None,
-                         mechanical_evidence_prompt=None):
+                         mechanical_evidence_prompt=None, step_models=None):
     """@brief Verify presence, visible physical family and mechanical package evidence.
 
     XY envelopes include terminals. Heights are clearly labeled coarse priors,
@@ -984,6 +986,12 @@ def mechanical_envelopes(photo, components, model, call, log, cache_dir, verific
         or blank appends MECHANICAL_EVIDENCE_PROMPT. The cache key is the whole
         request, so an edited contract never replays an answer cached for
         another text.
+    @param step_models The model of every analysis step (prompt_models.step_models),
+        or None (`model`, the behaviour before 2026-11-12). The step
+        'verification_prompt' (the mechanical contract rides inside it) uses
+        its own model when chosen and usable, resolved before the first
+        request so it keys the cache. grounded_components resolves it itself
+        and passes the result as `model`, with this left None.
     @return The components still present, with confidence, family, package
         evidence and estimated height updated; bodies voted absent are dropped,
         those without a usable verdict are kept as uncertain.
@@ -1001,6 +1009,9 @@ def mechanical_envelopes(photo, components, model, call, log, cache_dir, verific
     import numpy as np
     from .datasheet_extractor import COMPONENT_KINDS
     from .photo_inventory import image_block
+    from .prompt_models import usable_model
+    # The step's own model before the first request and its cache key.
+    model = usable_model('verification_prompt', step_models, model, log)
 
     def estimate_height(c):
         """Family/plan estimate for the current height family; 1.5 mm placeholder otherwise."""
@@ -1137,7 +1148,7 @@ def mechanical_envelopes(photo, components, model, call, log, cache_dir, verific
 def grounded_components(photo, model, length, width, kinds, call, log, cache_dir=None,
                         extra_instructions=None, classifier_model=None, mechanical=True,
                         grounding_prompt=None, verification_prompt=None,
-                        mechanical_evidence_prompt=None):
+                        mechanical_evidence_prompt=None, step_models=None):
     """@brief Localize packages over the full view and a mm-sized detail grid, then verify them in batches; returns renumbered components.
 
     @param photo Calibrated board photo (BGR array).
@@ -1162,6 +1173,14 @@ def grounded_components(photo, model, length, width, kinds, call, log, cache_dir
         appended to the verification prompt (mechanical path) and to
         SEMANTIC_VERIFICATION_PROMPT (legacy path); None or blank appends
         MECHANICAL_EVIDENCE_PROMPT.
+    @param step_models The model of every analysis step (prompt_models.step_models),
+        or None (exactly the behaviour before 2026-11-12). Resolved at the
+        top, before the grid is sized for the model (grounding_regions) and
+        before any cache key: 'grounding_prompt' replaces `model`,
+        'verification_prompt' replaces `classifier_model` (else DEFAULT_MODEL)
+        on both the mechanical and the legacy semantic verification. The
+        resolved models are handed down, never `step_models` itself, so an
+        unusable step model is reported once.
     @return List of the verified components; on the mechanical path they are
         renumbered 1..n in `_id`, the previous id kept in `_candidate_id`.
 
@@ -1170,7 +1189,11 @@ def grounded_components(photo, model, length, width, kinds, call, log, cache_dir
         count is written to the log before the calls start.
     """
     from .photo_inventory import image_block, merge_components
+    from .prompt_models import usable_model
     classifier_model = classifier_model or DEFAULT_MODEL
+    # Every step's own model before grids, images and cache keys depend on it.
+    model = usable_model('grounding_prompt', step_models, model, log)
+    classifier_model = usable_model('verification_prompt', step_models, classifier_model, log)
     log(tx("Localizzazione fotografica dedicata: {model}. Geometria e "
            "classificazione separate.",
            model=model))

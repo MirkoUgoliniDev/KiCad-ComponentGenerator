@@ -699,15 +699,20 @@ class TerminalDetailWorker(QThread):
     progress = pyqtSignal(str)
 
     def __init__(self, photo, components, model, only_leads=False, system_prompt=None,
-                 cache_dir=None):
+                 cache_dir=None, step_models=None):
         """@brief Prepare one terminal (or lead) pass on a copy of @p components.
 
         @param photo PNG bytes of the reference photo.
         @param components Photo components; deep-copied, never modified.
-        @param model AI model identifier.
+        @param model AI model identifier: the single (or session) model, used
+            when the step has no model of its own.
         @param only_leads True to refine the leads of observed terminals only.
         @param system_prompt Optional profile prompt for the pass.
         @param cache_dir Project photo cache, or None for no cache.
+        @param step_models The model of every analysis step
+            (ProfileStore.step_models), copied; forwarded as `step_models=`
+            when the service accepts it, which resolves the terminal or lead
+            step's model. None = every call on `model`.
         @note Costs are charged by the window, which binds the run project
             before `start()` (`MainWindow._start_terminal_refinement`).
         """
@@ -715,6 +720,8 @@ class TerminalDetailWorker(QThread):
         self.photo, self.components, self.model = photo, deepcopy(components), model
         self.only_leads = only_leads
         self.system_prompt = system_prompt
+        #: Step models of this pass (a copy); None = no step choice.
+        self.step_models = dict(step_models) if step_models is not None else None
         # PROJECT cache (see photo_inventory.PHOTO_CACHE_SUBDIR); None = no
         # cache, never a shared folder.
         self.cache_dir = cache_dir
@@ -732,7 +739,9 @@ class TerminalDetailWorker(QThread):
             self.done.emit(operation(self.photo, self.components, self.model,
                 make_logged_call(call_tool, self.progress.emit, log_prompt=True), self.progress.emit,
                 self.cache_dir,
-                **({'system_prompt': self.system_prompt} if self.system_prompt else {})))
+                **({'system_prompt': self.system_prompt} if self.system_prompt else {}),
+                **(accepted_kwargs(operation, step_models=self.step_models)
+                   if getattr(self, "step_models", None) is not None else {})))
         except Exception as exc:
             self.error.emit(tx("Dettaglio terminali fallito: {exc}", exc=exc))
 
@@ -783,6 +792,7 @@ class ExtractWorker(QThread):
         pad_model: str | None = None,
         part_number: str | None = None,
         prompts: dict | None = None,
+        step_models: dict | None = None,
     ):
         """@brief Snapshot extraction settings before starting background work.
 
@@ -823,9 +833,16 @@ class ExtractWorker(QThread):
         @param prompts The profile's prompt texts, {field: text}
             (prompt_catalog.profile_prompts of ProfileStore.resolve), copied;
             forwarded as `prompts=` like `crop_prompt`. None sends the defaults.
+        @param step_models The model of every analysis step, {prompt field:
+            model or "" for the single model} (ProfileStore.step_models,
+            «Modello AI» table), copied; forwarded as `step_models=` like
+            `crop_prompt`. None = every step on its usual model. The session
+            model replaces only `model`, never a step's own choice.
         @note YOLO changes photo proposals only; AI verification remains configured.
         """
         super().__init__()
+        #: Step models of this run (a copy); None = no step choice.
+        self.step_models = dict(step_models) if step_models is not None else None
         self.doc_paths = doc_paths
         self.system_prompt = system_prompt
         #: Prompt of the dedicated pin-numbering call; None = factory default.
@@ -959,7 +976,9 @@ class ExtractWorker(QThread):
                                   cancel=self.cancel_event,
                                   # None = the defaults: not forwarded at all.
                                   **({"prompts": self.prompts}
-                                     if getattr(self, "prompts", None) is not None else {})),
+                                     if getattr(self, "prompts", None) is not None else {}),
+                                  **({"step_models": self.step_models}
+                                     if getattr(self, "step_models", None) is not None else {})),
                 **phase_kwargs(extract, self._forward_phase),
             )
             self.done.emit(params)
@@ -1081,7 +1100,7 @@ class ReconcileWorker(QThread):
     def __init__(self, photo_png, proposals, length_mm, width_mm, model, cache_dir,
                  *, declared=None, verification_prompt=None, extra_instructions=None,
                  detector='yolo', crop_prompt=None, crop_model=None, reviewed=True,
-                 smd_model_path=None, prompts=None):
+                 smd_model_path=None, prompts=None, step_models=None):
         """@brief Snapshot the approved proposals before leaving the GUI thread.
 
         @param photo_png Calibrated photograph on which the proposals were measured.
@@ -1110,9 +1129,14 @@ class ReconcileWorker(QThread):
             for ExtractWorker: the inventory and marking prompts reach
             reconcile_saved_proposals, and every request is reported in the
             log (prompt_catalog.SentPromptLog). None sends the defaults.
+        @param step_models The model of every analysis step, copied, as for
+            ExtractWorker: forwarded as `step_models=` when
+            reconcile_saved_proposals accepts it. None = no step choice.
         """
         super().__init__()
         self.prompts = dict(prompts) if prompts is not None else None
+        #: Step models of this re-run (a copy); None = no step choice.
+        self.step_models = dict(step_models) if step_models is not None else None
         self.photo_png = photo_png
         self.proposals = deepcopy(proposals)
         self.length_mm, self.width_mm = float(length_mm), float(width_mm)
@@ -1189,7 +1213,9 @@ class ReconcileWorker(QThread):
                 **accepted_kwargs(reconcile_saved_proposals, crop_model=self.crop_model,
                                   cancel=self.cancel_event, reviewed=self.reviewed,
                                   smd_model_path=self.smd_model_path,
-                                  **({"prompts": prompts} if prompts is not None else {})),
+                                  **({"prompts": prompts} if prompts is not None else {}),
+                                  **({"step_models": self.step_models}
+                                     if getattr(self, "step_models", None) is not None else {})),
                 **phase_kwargs(reconcile_saved_proposals, self._forward_phase))
             self.done.emit(report)
         except Exception as exc:  # noqa: BLE001 - network/API errors are reported in the UI
@@ -1251,7 +1277,8 @@ class RereadWorker(QThread):
                  *, field: str, model: str | None = None, pad_model: str | None = None,
                  component_family: str | None = None, system_prompt: str | None = None,
                  extra_instructions: str | None = None, part_number: str | None = None,
-                 answers: dict | None = None, prompts: dict | None = None):
+                 answers: dict | None = None, prompts: dict | None = None,
+                 step_models: dict | None = None):
         """@brief Snapshot the stored answer and the settings before leaving the GUI thread.
 
         @param stored Main answer of the extraction as kept with the project
@@ -1282,9 +1309,17 @@ class RereadWorker(QThread):
             pad and body readings send 'pad_positions_prompt' and
             'body_dimensions_prompt'), and every request is reported in the
             log (prompt_catalog.SentPromptLog). None sends the defaults.
+        @param step_models The model of every analysis step (ProfileStore.
+            step_models), copied. When given and the re-read function accepts
+            it, the function receives `model` = the MAIN model that produced
+            `stored` and resolves the reader of the pad or body step itself
+            (its usability and `same_model` included); `pad_model` is then
+            unused. None keeps the `_pad_reading_model` rule.
         """
         super().__init__()
         self.prompts = dict(prompts) if prompts is not None else None
+        #: Step models of this re-read (a copy); None = the old pad-model rule.
+        self.step_models = dict(step_models) if step_models is not None else None
         self.stored = deepcopy(stored) if isinstance(stored, dict) else {}
         self.answers = dict(answers) if isinstance(answers, dict) and answers else None
         self.doc_paths = list(doc_paths or [])
@@ -1364,16 +1399,35 @@ class RereadWorker(QThread):
                                    "assente nell'estrattore.", name=name))
                 return
             main_model = self.model or DEFAULT_MODEL
-            model = self._reread_model(extractor, main_model)
+            step_models = getattr(self, "step_models", None)
+            # The step table goes to a re-read that takes it: that function
+            # resolves the pad or body step's reader from the MAIN model
+            # that produced `stored` (contract of agent A, 2026-11-12).
+            with_table = step_models is not None and "step_models" in accepted_kwargs(
+                reread, step_models=step_models)
+            if with_table:
+                model = main_model
+                from ..services.prompt_models import usable_model
+                step_field = ("body_dimensions_prompt" if self.field == "body_height_mm"
+                              else "pad_positions_prompt")
+                # The model that will really answer (review finding C): the
+                # step's reader when it can run, else the main model. Resolved
+                # without a log line: the re-read resolves it again at its
+                # call site and writes the fallback reason there, once.
+                shown = usable_model(step_field, step_models, main_model)
+            else:
+                model = shown = self._reread_model(extractor, main_model)
             # Key and credit of every DIRECT provider the re-read uses, as
-            # ReconcileWorker does (OpenRouter is verified by _ensure_api_key).
+            # ReconcileWorker does (OpenRouter is verified by _ensure_api_key);
+            # a step reader on another source is checked by the re-read itself.
             direct = [m for m in (model,) if providers.provider_of(m) == providers.PROVIDER_DEEPSEEK]
             if direct:
                 providers.ensure_providers_ready(direct, self.progress.emit)
-            # M13: the log says which model re-reads which datum.
+            # M13: the log says which model re-reads which datum (the step's
+            # reader; the re-read logs a fallback when it cannot run).
             self.progress.emit(tx("Rilettura di {field} con il modello {model}.",
-                                  field=self.field, model=model))
-            self.phase.emit('llm', model, 0, 0)
+                                  field=self.field, model=shown))
+            self.phase.emit('llm', shown, 0, 0)
             self._raise_if_cancelled()
             prompts = getattr(self, "prompts", None)
             call = make_logged_call(call_tool, self.progress.emit, log_prompt=True,
@@ -1383,7 +1437,10 @@ class RereadWorker(QThread):
                 self.stored, self.doc_paths, model=model,
                 call=_reporting_call(call, prompts, self.progress.emit),
                 progress=self.progress.emit,
-                **accepted_kwargs(reread, same_model=(model == main_model),
+                **accepted_kwargs(reread,
+                                  # With the table the re-read decides it itself.
+                                  **({"step_models": step_models} if with_table
+                                     else {"same_model": model == main_model}),
                                   **({"prompts": prompts} if prompts is not None else {}),
                                   document_roles=self.document_roles,
                                   component_family=self.component_family,

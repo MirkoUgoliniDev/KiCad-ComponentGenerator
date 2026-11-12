@@ -163,17 +163,20 @@ sources** it is `deepseek-api/deepseek-flash` (stored in the profile database
 `data/analysis_profiles.sqlite3`), so a DeepSeek key is needed. **Installed
 from the MSI** it is `anthropic/claude-opus-5` through OpenRouter (the
 installer rebuilds the database from the code). The model is always chosen
-from the interface: the default in «Configuration» → «General AI
-defaults...», tab «Model», and for the current session in the «AI model»
-box; never by editing the database by hand.
+from the interface: the default in «Configuration» → «AI model...», and
+for the current session in the «AI model» box; never by editing the
+database by hand.
 
 **Configuration → AI account...** lists every provider with where its key in
 use comes from (environment variable, Windows Credential Manager, `.env` file
 or none) and its current balance, read with the providers' free status
-endpoints. Paste a key, press **Verify** (no model call, no cost), then
-**Save**: the key is stored in the Windows Credential Manager of your user
-account (`KiCadGen/OpenRouter`, `KiCadGen/DeepSeek`), never in a file or in
-the profile database. **Remove key** deletes that entry only.
+endpoints. Paste a key (the eye in the field, or Alt+F8, shows it) and press
+**Verify and save**: the key is verified (no model call, no cost) and, only if
+valid, stored in the Windows Credential Manager of your user account
+(`KiCadGen/OpenRouter`, `KiCadGen/DeepSeek`), never in a file or in the profile
+database. A key written in a `.env` file is moved there with **Move it to
+Windows**, which then asks whether to remove its line from the file.
+**Remove** deletes the Credential Manager entry only.
 
 The key is looked up in this order: the environment variable
 (`OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`), the Credential Manager, a `.env`
@@ -207,9 +210,10 @@ files together.
 - **File**: new, open, rename, recent projects, exit.
 - **Configuration**: «Manage AI types and profiles...» (component types and
   their prompts, in the SQLite catalogue `data/analysis_profiles.sqlite3`),
-  «General AI defaults...» (the single AI model with its source, OpenRouter or
-  DeepSeek, and the base prompts in the tabs Model, Datasheet,
-  Photo localization, Photo verification), «AI account...», «Generation
+  «AI model...» (the single AI model with its source, OpenRouter or
+  DeepSeek, and a table with the model of each analysis step: every step
+  follows the single model unless «Change…» gives it one of its own; the
+  prompts are edited in «Manage AI types and profiles...»), «AI account...», «Generation
   options...» (NC pins, engraved pin labels, pause after the AI inventory),
   «Accepted matches archive...».
 - **Tools**: open the component folder, the three KiCad commands (also in

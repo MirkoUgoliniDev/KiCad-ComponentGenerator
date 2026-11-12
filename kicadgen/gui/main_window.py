@@ -63,6 +63,8 @@ from ..core.package_geometry import (DOUBT_BODY_OVER_LANDS, DOUBT_BODY_PADS, Pac
                                      package_from_mapping)
 from ..services import component_types, prompt_catalog, recent_projects
 from ..services.analysis_profiles import ProfileStore, ProfileError
+from ..services.prompt_models import (LEGACY_PAD_STEPS, STEPS as PROMPT_STEPS, model_for,
+                                      step as prompt_step)
 from ..services.i18n import DEFAULT_TRANSLATIONS, I18n, ITEM_SOURCE_ROLE, LANGUAGES
 from ..services.document_roles import DocumentSet, MANIFEST, SUFFIXES
 from ..services.datasheet_extractor import (
@@ -1909,6 +1911,12 @@ def _project_list(mapping: dict, key: str, skipped: list, label: str | None = No
     return []
 
 
+#: `QGraphicsSimpleTextItem::Type` of Qt (9): the value the virtual `type()`
+#: returns for a simple text, a Python subclass included. PyQt6 exposes
+#: `Type` only on QGraphicsItem (1), so the subclass attribute cannot be used.
+_QT_SIMPLE_TEXT_ITEM_TYPE = 9
+
+
 class MainWindow(QMainWindow):
     """@brief Coordinate the six-tab component generation workflow."""
 
@@ -2422,8 +2430,14 @@ class MainWindow(QMainWindow):
         self.action_profiles = config_menu.addAction(
             QIcon(str(Path(__file__).parent / 'assets' / 'profile-edit.svg')),
             self.i18n.text("Gestione tipologie e profili AI..."), self._edit_profiles)
+        # Prompts -> model -> account: what is sent, who runs it, who pays
+        # (UX review 2026-11-12, finding 11: two entries named «AI»).
+        self.action_profiles.setToolTip(self.i18n.text(
+            "Testi (prompt) inviati all'AI, generali e per tipologia"))
         self.action_defaults = config_menu.addAction(
-            self.i18n.text("Default generali AI..."), self._edit_llm_settings)
+            self.i18n.text("Modello AI..."), self._edit_llm_settings)
+        self.action_defaults.setToolTip(self.i18n.text(
+            "Quale modello AI esegue ogni passo dell'analisi"))
         # OpenRouter and DeepSeek keys in the Windows Credential Manager
         # (PIANO-FIX 2, HANDOFF 129).
         self.action_ai_account = config_menu.addAction(
@@ -2533,41 +2547,149 @@ class MainWindow(QMainWindow):
         )
 
     def _edit_llm_settings(self) -> None:
+        """@brief Configurazione → «Modello AI...»: the single model and the model of every step.
+
+        @note Models only: the prompts are edited in the profile manager
+            (user, 2026-11-12). The single model is saved among the AI
+            defaults and, in the same transaction, ONLY the steps whose model
+            the user changed (review finding B): an untouched pad or body step
+            keeps following the old «Posizioni pad» model
+            (prompt_models.step_models) instead of being turned into a saved
+            choice by a mere OK, and the old 'pad_model' field is never
+            written from here (the window has no such field any more).
+        """
         try:
             defaults = self.profile_store.defaults()
+            shown_steps = self.profile_store.step_models()
+            stored = self.profile_store.step_models_stored()
         except (ProfileError, sqlite3.Error, OSError) as exc:
             QMessageBox.warning(self, self.i18n.text('Database profili'), str(exc))
             return
-        dialog = LlmSettingsDialog(
-            defaults["system_prompt"], defaults["model"], self,
-            current_vision_model=defaults["vision_model"],
-            current_grounding_prompt=defaults["grounding_prompt"],
-            current_verification_prompt=defaults["verification_prompt"],
-            current_verification_model=defaults["verification_model"],
-            current_single_prompt=defaults.get("system_prompt_single"),
-            current_numbering_prompt=defaults.get("numbering_prompt"),
-            current_family=self._selected_family(),
-            current_pad_model=defaults.get("pad_model"),
-        )
+        dialog = LlmSettingsDialog(current_model=defaults["model"], parent=self,
+                                   current_step_models=shown_steps,
+                                   stored_step_fields=set(stored),
+                                   session_model=self._session_model,
+                                   account_opener=self._open_ai_account)
         self.i18n.retranslate_widgets(dialog)
         if self._run_modal(dialog) != QDialog.DialogCode.Accepted:
             return
 
+        chosen_steps = dialog.step_models()
+        changed = {field: model for field, model in chosen_steps.items()
+                   if model != (shown_steps.get(field) or "")}
+        values = dict(model=dialog.model(), vision_model=dialog.vision_model(),
+                      verification_model=dialog.verification_model())
         try:
-            self.profile_store.save_defaults(dict(
-                system_prompt=dialog.prompt() or DEFAULT_SYSTEM_PROMPT, model=dialog.model(),
-                vision_model=dialog.vision_model(), verification_model=dialog.verification_model(),
-                grounding_prompt=dialog.grounding_prompt(), verification_prompt=dialog.verification_prompt(),
-                system_prompt_single=dialog.single_prompt(),
-                numbering_prompt=dialog.numbering_prompt(), pad_model=dialog.pad_model()))
+            # One transaction for the defaults and the steps (review finding 7):
+            # a failure leaves neither saved.
+            self.profile_store.save_models(defaults=values, steps=changed or None)
         except (ProfileError, sqlite3.Error, OSError) as exc:
             QMessageBox.warning(
                 self, self.i18n.text("Impostazioni non salvate"), str(exc))
             return
         self._refresh_model_combo()
-        self._append_log(
-            tx("Impostazioni LLM aggiornate (SQLite). Modello unico: {default_model}.",
-               default_model=self._default_model()))
+        self._append_log(tx("Modelli AI salvati. Modello unico: {model}.",
+                            model=self._default_model()))
+        own = self._own_step_models_text(chosen_steps)
+        if own:
+            self._append_log(own)
+
+    @staticmethod
+    def _own_step_models_text(models) -> str:
+        """@brief The log line naming the steps that do not use the single model.
+
+        @param models {step field: model or ""} (prompt_models.step_models), or None.
+        @return «Passi con un modello proprio: <step> → <model>; ...», or ""
+            when every step follows the single model.
+        """
+        pairs = [f"{tx(item.title)} → {models[item.field]}" for item in PROMPT_STEPS
+                 if models and (models.get(item.field) or "").strip()]
+        return tx("Passi con un modello proprio: {steps}.", steps="; ".join(pairs)) if pairs else ""
+
+    def _step_models(self):
+        """@brief The model of every analysis step (ProfileStore.step_models), or None.
+
+        @return {step field: model or "" for the single model}, or None when
+            the profile database cannot be read: every call then uses its
+            usual model, as before the step table existed.
+        """
+        reader = getattr(getattr(self, "profile_store", None), "step_models", None)
+        if reader is None:
+            return None
+        try:
+            return reader()
+        except (ProfileError, sqlite3.Error, OSError):
+            return None
+
+    #: Photo steps each detector of the Project tab runs on a populated board
+    #: (photo_inventory.extract_inventory, datasheet_extractor._extract_photo_stage):
+    #: «AI (attuale)» localises, verifies and reads the terminals itself; the
+    #: YOLO and vision-only detectors go through the global inventory, the
+    #: crop reading and the markings; the SMD network leaves only the bodies
+    #: it does not resolve to the crop reading; the YOLO pretest pays nothing.
+    _DETECTOR_PHOTO_STEPS = {
+        "ai": ("grounding_prompt", "verification_prompt", "terminal_prompt"),
+        "yolo": ("inventory_prompt", "crop_prompt", "marking_prompt"),
+        "vlm": ("inventory_prompt", "crop_prompt", "marking_prompt"),
+        "yolo_smd": ("crop_prompt",),
+        "yolo_only": (),
+    }
+    #: Steps of the partial re-reads (Strumenti menu), by re-read field.
+    _REREAD_STEPS = {"body_height_mm": ("body_dimensions_prompt",),
+                     "pad_layout": ("pad_positions_prompt",)}
+
+    def _run_steps(self, command: str = "analysis", *, detector: str | None = None,
+                   field: str | None = None) -> tuple[str, ...]:
+        """@brief The steps a paid command may run, for its key check and its log line.
+
+        @param command "analysis" (full extraction), "pin_types", "terminals",
+            "leads", "reread" (with `field`) or "relaunch" (inventory re-run,
+            with the bundle's `detector`).
+        @param detector Photo detector of the run; None = the one selected in
+            the Project tab (`_photo_detector_options`).
+        @param field Re-read field of "reread" (REREAD_FIELDS key).
+        @return Step fields (prompt_models.STEPS), in table order, without repeats.
+        @note A full analysis reads the documents by the component type (the
+            single-part readings, the board readings, both when the type does
+            not say) and, unless the type declares a single part, the photo
+            steps of the detector actually used (`_DETECTOR_PHOTO_STEPS`;
+            every photo step when the detector is unknown). The side commands
+            run only their own step (review finding A: the key check used to
+            ask for the keys of every analysis step before a pin-type
+            suggestion).
+        @note The same criterion as `_photo_inventory_family`: an attribute
+            the type declares, never the component's name.
+        """
+        if command == "pin_types":
+            return ("pin_type_prompt",)
+        if command == "terminals":
+            return ("terminal_prompt",)
+        if command == "leads":
+            return ("lead_prompt",)
+        if command == "reread":
+            return self._REREAD_STEPS.get(field, ())
+        all_photo = tuple(dict.fromkeys(
+            step for steps in self._DETECTOR_PHOTO_STEPS.values() for step in steps))
+        if command == "relaunch":
+            if detector == "yolo_smd":
+                return ("crop_prompt",)
+            # Every other re-run goes through the global inventory, the crop
+            # reading and the markings (reconcile_saved_proposals).
+            return self._DETECTOR_PHOTO_STEPS["yolo"]
+        if detector is None:
+            detector = self._photo_detector_options()[0] if hasattr(
+                self, "combo_photo_detector") else None
+        populated = self._photo_inventory_family()
+        single = ("system_prompt_single", "numbering_prompt", *LEGACY_PAD_STEPS)
+        board = ("system_prompt", "numbering_prompt", "contact_style_prompt")
+        photo = self._DETECTOR_PHOTO_STEPS.get(detector, all_photo)
+        if populated is False:
+            fields = single
+        elif populated is True:
+            fields = board + photo
+        else:
+            fields = single + board + photo
+        return tuple(dict.fromkeys(fields))
 
     def _project_option(self, key: str, default):
         """@brief Value of an option that follows the project (`PROJECT_OPTIONS`).
@@ -2932,6 +3054,9 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, self.i18n.text('Database profili'), str(exc))
         finally:
             if dialog is not None:
+                # The working copy goes with the dialog on every path (an
+                # exception before or during the modal included).
+                dialog.discard_working_copy()
                 dialog.deleteLater()
 
     def _reload_profile_types(self, *, update_prompt=True, previous_instructions=None):
@@ -2969,7 +3094,8 @@ class MainWindow(QMainWindow):
         if not update_prompt and index >= 0:
             self.field_component_prompt.setPlainText(original_prompt)
             self._generated_block_digest = original_digest
-        elif index >= 0 and component_types.BLOCK_START in original_prompt:
+        # Old projects carry the Italian markers: `has_block` knows both (2026-11-12).
+        elif index >= 0 and component_types.has_block(original_prompt):
             # The block that was there decides, not the text just written.
             row = self.profile_store.get_type(selected)
             selected_type = (component_types.ComponentType(selected, row['label'], row['instructions'])
@@ -4272,7 +4398,11 @@ class MainWindow(QMainWindow):
         self.menu_recent.setTitle(self.i18n.text("Progetti recenti"))
         self.start_page.refresh()
         self.action_profiles.setText(self.i18n.text("Gestione tipologie e profili AI..."))
-        self.action_defaults.setText(self.i18n.text("Default generali AI..."))
+        self.action_profiles.setToolTip(self.i18n.text(
+            "Testi (prompt) inviati all'AI, generali e per tipologia"))
+        self.action_defaults.setText(self.i18n.text("Modello AI..."))
+        self.action_defaults.setToolTip(self.i18n.text(
+            "Quale modello AI esegue ogni passo dell'analisi"))
         self.action_ai_account.setText(self.i18n.text("Account AI..."))
         self.action_ai_account.setToolTip(self.i18n.text(
             "Chiavi OpenRouter e DeepSeek, credito e limiti: incolla, verifica e salva le "
@@ -4716,7 +4846,10 @@ class MainWindow(QMainWindow):
         # detector decides which of the rows below are needed.
         models_form.addRow(self.label_photo_detector, self.combo_photo_detector)
         self._row_photo_detector = models_form.rowCount() - 1
-        models_form.addRow("Modello AI:", model_row)
+        # «(questa sessione)»: the configured models are in Configurazione →
+        # «Modello AI...»; this row only replaces the single model for the
+        # session (finding 10: two things were named «Modello AI»).
+        models_form.addRow("Modello AI (questa sessione):", model_row)
         self._row_ai_model = models_form.rowCount() - 1
         self.label_yolo_model = QLabel()
         self.field_yolo_model = QLineEdit()
@@ -4960,8 +5093,8 @@ class MainWindow(QMainWindow):
         prompt_note = QLabel(
             "Prompt specifico di QUESTO componente -- ci finisce il testo della "
             "tipologia scelta qui sopra, modificabile, piu' le note che vuoi "
-            "aggiungere. Il prompt generale si imposta da Configurazione -> "
-            "Modello e prompt di sistema LLM:"
+            "aggiungere. I prompt generali si impostano da Configurazione -> "
+            "Gestione tipologie e profili AI..."
         )
         prompt_note.setWordWrap(True)
         prompt_layout.addWidget(prompt_note)
@@ -6371,7 +6504,8 @@ class MainWindow(QMainWindow):
             # photo, no AI call, no field modified.
             self._start_yolo_pretest(doc_paths, document_roles, yolo_model_path)
             return
-        if not self._ensure_api_key():
+        # The detector actually used: a single component forces "ai".
+        if not self._ensure_api_key(detector=photo_detector):
             self.group_ai_tools.setExpanded(True)
             return
 
@@ -6431,13 +6565,20 @@ class MainWindow(QMainWindow):
             setattr(self, name, value)
         self._set_review_buttons_enabled(self._photo_png is not None)
 
-    def _run_models(self) -> tuple[str, ...]:
-        """@brief Every model identifier the next paid run may call.
+    def _run_models(self, command: str = "analysis", **step_options) -> tuple[str, ...]:
+        """@brief Every model identifier the next paid command may call.
 
-        @return The extraction model, the photo model (`_photo_detector_model`:
+        @param command The command, as `_run_steps` takes it; "analysis" (the
+            default) is the full extraction.
+        @param step_options `detector` / `field`, forwarded to `_run_steps`.
+        @return For the full analysis and the inventory re-run, the
+            extraction model, the photo model (`_photo_detector_model`:
             the session vision model when one was chosen) and, when the
             profile names one, the per-body crop reading model (`crop_model`;
-            blank means «the photo model», see `analysis_profiles.resolve`).
+            blank means «the photo model», see `analysis_profiles.resolve`);
+            for a side command (pin types, terminals, leads, re-read) only the
+            model it calls without a step choice. Then the models SAVED for
+            the steps that command runs (`_run_steps`).
         @note The key check must look at the same set the worker receives
             (review 2026-10-27, A8): a DeepSeek main and photo model with an
             OpenRouter crop model still needs the OpenRouter key, and before
@@ -6449,18 +6590,57 @@ class MainWindow(QMainWindow):
             DeepSeek vision model chosen for the session without a DeepSeek
             key passed this check and failed late, inside the review.
         """
-        models = [self._effective_model(), self._photo_detector_model()]
-        try:
-            crop_model = self._profile_values().get('crop_model')
-        except (ProfileError, sqlite3.Error, OSError):
-            crop_model = None
-        if isinstance(crop_model, str) and crop_model.strip():
-            models.append(crop_model.strip())
+        if command in ("analysis", "relaunch"):
+            models = [self._effective_model(), self._photo_detector_model()]
+            try:
+                crop_model = self._profile_values().get('crop_model')
+            except (ProfileError, sqlite3.Error, OSError):
+                crop_model = None
+            if isinstance(crop_model, str) and crop_model.strip():
+                models.append(crop_model.strip())
+        else:
+            # The side commands call `_vision_model()` (= the extraction
+            # model) unless their step has a model of its own.
+            models = [self._vision_model()]
+        # The models chosen in the «Modello AI» step table for the steps
+        # this command may use (user request 2026-11-12): a step on another
+        # source needs that source's key before anything is paid.
+        for model in self._chosen_step_models(self._run_steps(command, **step_options)):
+            if model not in models:
+                models.append(model)
         return tuple(models)
 
-    def _ensure_api_key(self) -> bool:
-        """@brief Before a paid AI run: True when every provider of `_run_models()` has a key.
+    def _chosen_step_models(self, fields) -> list[str]:
+        """@brief The models explicitly chosen in the «Modello AI» table for `fields`.
 
+        @param fields Step fields (prompt_models.STEPS) a command may run.
+        @return Their saved, non-blank models, in table order, without repeats.
+        @note Only SAVED choices (ProfileStore.step_models_stored): the two pad
+            steps that still follow the old «Posizioni pad» default are an
+            optional reader, which falls back on the single model with a log
+            line when its source cannot run (prompt_models.usable_model), as
+            it always did; a choice the user made is checked before paying.
+            An unreadable database adds nothing (the caller reports it).
+        """
+        reader = getattr(getattr(self, "profile_store", None), "step_models_stored", None)
+        if reader is None:
+            return []
+        try:
+            stored = reader()
+        except (ProfileError, sqlite3.Error, OSError):
+            return []
+        wanted = set(fields)
+        return list(dict.fromkeys(
+            stored[item.field].strip() for item in PROMPT_STEPS
+            if item.field in wanted and isinstance(stored.get(item.field), str)
+            and stored[item.field].strip()))
+
+    def _ensure_api_key(self, command: str = "analysis", **step_options) -> bool:
+        """@brief Before a paid AI command: True when every provider of `_run_models(command)` has a key.
+
+        @param command The command, as `_run_steps` takes it (default: the
+            full analysis).
+        @param step_options `detector` / `field`, forwarded to `_run_steps`.
         @return False when there is none; the user is offered «Account AI...»
             and the run does not start either way (a key saved there is used
             by the next run, which the user starts again).
@@ -6469,10 +6649,19 @@ class MainWindow(QMainWindow):
             the progress window had opened. `openrouter.api_key` reads no
             network (environment, Credential Manager, `.env`).
         """
+        return self._ensure_keys_for(self._run_models(command, **step_options))
+
+    def _ensure_keys_for(self, models) -> bool:
+        """@brief True when every provider of `models` has a key; otherwise tell the user.
+
+        @param models Model identifiers a paid command will call.
+        @return False when a key is missing (a DeepSeek one is reported, an
+            OpenRouter one offers «Account AI...»).
+        """
         from ..services import openrouter
         from ..services.providers import (PROVIDER_DEEPSEEK, ProviderKeyMissing,
                                           deepseek_api_key, provider_of)
-        models = self._run_models()
+        models = tuple(models)
         if any(provider_of(model) == PROVIDER_DEEPSEEK for model in models):
             try:
                 deepseek_api_key()
@@ -6572,9 +6761,17 @@ class MainWindow(QMainWindow):
             # Single model (user, 2026-10-02): a model saved on this component type
             # before the change is no longer valid, and that must be said.
             self._on_ai_progress(tx(
-                "La tipologia aveva un modello suo ({models}): ignorato, il modello e' unico "
-                "e si sceglie nel tab «Modello» delle impostazioni LLM.",
+                "La tipologia aveva un modello suo ({models}): ignorato. Il modello unico e "
+                "quelli dei singoli passi si scelgono in Configurazione → «Modello AI...».",
                 models=", ".join(sorted(set(ignored.values())))))
+        # The steps of this run with a model of their own, said before paying
+        # (user request 2026-11-12): the single model above is not the whole story.
+        step_models = self._step_models()
+        own = self._own_step_models_text(
+            {field: (step_models or {}).get(field, "")
+             for field in self._run_steps(detector=photo_detector)})
+        if own:
+            self._on_ai_progress(own)
         if ((chosen_detector or photo_detector) in ('yolo', 'vlm', 'yolo_smd')
                 and self._photo_inventory_family() is False):
             # Defect seen by the user: with «YOLO locale + verifica AI» (local YOLO +
@@ -6606,9 +6803,19 @@ class MainWindow(QMainWindow):
             # One catalogue template with the model as a placeholder (review
             # 2026-10-27, A4): the sentence used to be composed from an
             # untranslated Italian prefix and a translated suffix.
-            self._on_ai_progress(
-                tx("Chiamata sulla fotografia affidata a {model}", model=verification_model)
-                + (tx(" (scelto per questa sessione).") if self._vlm_model else tx(" (da impostazioni).")))
+            # The step that sends the photo with this detector: the inventory
+            # for 'yolo' and 'vlm'. Its own model, when chosen, replaces the
+            # session or configured one, and the line must name it (finding C).
+            photo_call_model = model_for('inventory_prompt', step_models, verification_model)
+            if photo_call_model != verification_model:
+                self._on_ai_progress(
+                    tx("Chiamata sulla fotografia affidata a {model}", model=photo_call_model)
+                    + tx(" (modello del passo «{step}»).", step=tx(prompt_step('inventory_prompt').title)))
+            else:
+                self._on_ai_progress(
+                    tx("Chiamata sulla fotografia affidata a {model}", model=verification_model)
+                    + (tx(" (scelto per questa sessione).") if self._vlm_model
+                       else tx(" (da impostazioni).")))
         elif verification_model != model:
             self._on_ai_progress(tx("Rilevamento dei corpi affidato a {verification_model}.",
                                     verification_model=verification_model))
@@ -6652,6 +6859,9 @@ class MainWindow(QMainWindow):
             # readings, document roles, inventory, markings, ...): step P2 of
             # 2026-11-11. Only to a worker that declares the keyword.
             **accepted_kwargs(ExtractWorker.__init__, prompts=self._profile_prompt_texts()),
+            # The model of every step («Modello AI» table, 2026-11-12); the
+            # session model above replaces only the single model.
+            **accepted_kwargs(ExtractWorker.__init__, step_models=step_models),
         )
         if self._extraction_answers and accepts_keyword(extract_pin_header_params, "answers"):
             # Also as an attribute, for a worker that reads it at run time.
@@ -6918,7 +7128,7 @@ class MainWindow(QMainWindow):
 
         @note Does nothing while `_extraction_busy` is set: the detector combo
             is not the only way here -- a model change from «Configurazione» ->
-            «Default generali AI...» goes through `_refresh_model_combo` and
+            «Modello AI...» goes through `_refresh_model_combo` and
             `_on_photo_detector_changed` in the middle of a run, and used to
             put the idle text back over «Analisi in corso...» (audit 25/09,
             B6). The run's end clears the flag and calls this again through
@@ -7685,7 +7895,7 @@ class MainWindow(QMainWindow):
         except (ProfileError, sqlite3.Error, OSError) as exc:
             QMessageBox.warning(self, self.i18n.text('Profilo AI non disponibile'), str(exc))
             return
-        if not self._ensure_api_key():
+        if not self._ensure_api_key("relaunch", detector=bundle.detector):
             return
         self._begin_ai_run("Rilancio inventario")
         # As for the extraction start: nothing ran when the worker never
@@ -7725,6 +7935,12 @@ class MainWindow(QMainWindow):
             self._append_log(tx("Nessuna estrazione in questa sessione: l'inventario rilanciato "
                                 "aggiorna i componenti senza avviare la generazione automatica."))
         self._set_review_buttons_enabled(False)
+        # The model each paid call really uses (finding C): the step chosen in
+        # «Modello AI» replaces `model` for the inventory request (and, with
+        # the SMD network, for the crop readings).
+        step_models = self._step_models()
+        announced = model_for('crop_prompt' if bundle.detector == 'yolo_smd' else 'inventory_prompt',
+                              step_models, model)
         # Declared BEFORE starting, in the log and in the modal: whoever presses must
         # know before, not after, what is being paid for. Besides the request on
         # the inventory the re-run re-reads every body from its crop and the
@@ -7735,7 +7951,7 @@ class MainWindow(QMainWindow):
                            "dalla cache se gia' pagate).",
                            n_proposals=len(bundle.proposals),
                            name=bundle.json_path.name,
-                           model=model)
+                           model=announced)
                         if bundle.detector == 'yolo_smd' else
                         tx("Rilancio dell'inventario su {n_proposals} proposte da {name}: una "
                            "richiesta a pagamento al modello {model} per l'inventario, poi le "
@@ -7743,7 +7959,7 @@ class MainWindow(QMainWindow):
                            "cache se gia' pagate).",
                            n_proposals=len(bundle.proposals),
                            name=bundle.json_path.name,
-                           model=model))
+                           model=announced))
         self._on_ai_progress(announcement)
         self._last_extracted = params
         declared = dict(layout=params.layout, castellated_sides=params.castellated_sides,
@@ -7760,7 +7976,9 @@ class MainWindow(QMainWindow):
             detector=bundle.detector, reviewed=bundle.reviewed,
             smd_model_path=self._smd_model_option(),
             # The inventory and marking prompts of the profile (step P2).
-            **accepted_kwargs(ReconcileWorker.__init__, prompts=self._profile_prompt_texts()))
+            **accepted_kwargs(ReconcileWorker.__init__, prompts=self._profile_prompt_texts()),
+            # The model of every step («Modello AI» table, 2026-11-12).
+            **accepted_kwargs(ReconcileWorker.__init__, step_models=step_models))
         self._reconcile_worker.done.connect(self._on_reconciled)
         self._reconcile_worker.error.connect(self._on_extract_error)
         self._reconcile_worker.progress.connect(self._on_ai_progress)
@@ -9475,7 +9693,8 @@ class MainWindow(QMainWindow):
         saved_digest = getattr(self, "_generated_block_digest", None)
         restored_prompt = old_prompt
         outcome = component_types.BLOCK_ABSENT
-        if component_types.BLOCK_START in old_prompt:
+        # Current or legacy (Italian) markers alike (2026-11-12).
+        if component_types.has_block(old_prompt):
             known_texts = [row.get("instructions") for row in self.profile_store.list_types(True)]
             restored_prompt, outcome = component_types.refresh_block(
                 old_prompt, selected_type, known_texts, written_digest=saved_digest)
@@ -11560,7 +11779,7 @@ class MainWindow(QMainWindow):
         if reason:
             QMessageBox.information(self, self.i18n.text("Rilettura parziale"), reason)
             return
-        if not self._ensure_api_key():
+        if not self._ensure_api_key("reread", field=field):
             self.group_ai_tools.setExpanded(True)
             return
         try:
@@ -11598,7 +11817,10 @@ class MainWindow(QMainWindow):
                 **(accepted_kwargs(worker_class.__init__, answers=dict(self._extraction_answers))
                    if self._extraction_answers else {}),
                 # The pad and body reading prompts of the profile (step P2).
-                **accepted_kwargs(worker_class.__init__, prompts=self._profile_prompt_texts()))
+                **accepted_kwargs(worker_class.__init__, prompts=self._profile_prompt_texts()),
+                # The model of every step («Modello AI» table, 2026-11-12):
+                # the pad and body re-reads use their step's model.
+                **accepted_kwargs(worker_class.__init__, step_models=self._step_models()))
             self._reread_worker = worker
             worker.done.connect(self._on_reread_done)
             worker.error.connect(self._on_extract_error)
@@ -19100,7 +19322,6 @@ class MainWindow(QMainWindow):
 
     def _end_preview_layer(self) -> None:
         """@brief Close the block opened by `_begin_preview_layer` and tag the items it added."""
-        from PyQt6.QtWidgets import QGraphicsSimpleTextItem
         from .footprint_view import BODY_PART_ROLE, HOLE_ROLE, LAYER_ROLE
         stack = getattr(self, "_fp_layer_stack", None)
         if not stack:
@@ -19118,7 +19339,12 @@ class MainWindow(QMainWindow):
             if tag == "pads":
                 if item.data(HOLE_ROLE):
                     layer = "holes"
-                elif isinstance(item, QGraphicsSimpleTextItem):
+                # The REAL type, asked through the virtual `type()`: a wrapper
+                # from scene.items() may be a stale one of a deleted item at
+                # the same address, with that item's Python type, so
+                # isinstance could tag a pad as a number (review 2026-11-12,
+                # see `_refresh_drawing_selection`).
+                elif item.type() == _QT_SIMPLE_TEXT_ITEM_TYPE:
                     layer = "numbers"
             item.setData(LAYER_ROLE, layer)
 
@@ -22090,29 +22316,43 @@ class MainWindow(QMainWindow):
 
         @note The single hook of every selection change (plan C4): the
             «Proprietà» panel follows it here (`_refresh_fp_properties`).
-        @note An item whose drawn kind (`DRAWING_KIND_ROLE`) is not the kind
-            of the record now at its index is skipped (review B3): the list
-            was replaced without a redraw, and styling, say, a line item with
-            a text's rules would call a method the item lacks. The next
-            redraw draws the right items.
+        @note An item whose drawn kind is not the kind of the record now at
+            its index is skipped (review B3): the list was replaced without a
+            redraw, and styling, say, a line item with a text's rules would
+            call a method the item lacks. The next redraw draws the right items.
+        @note The items come from the lists the drawers filled
+            (`_fp_drawn_drawing_items`, `_fp_drawn_pad_items`), NEVER from
+            `scene.items()`: an item Qt built itself (`addLine`,
+            `addEllipse`) has a Python wrapper Qt does not tell when it
+            deletes the item, so a wrapper still referenced after a
+            `scene.clear()` (a test's loop variable, any closure) is handed
+            back by `scene.items()` for a NEW item at the same address, with
+            the OLD item's Python type; `setPen` of a line called on a text
+            then wrote through the wrong layout (Windows access violation,
+            GitHub runs of 2026-11-09 and 2026-11-12, reproduced by holding
+            the wrappers of 300 redraws). The lists hold the wrappers made at
+            draw time, of the right type, and are emptied before every clear
+            (`_forget_preview_items`).
         """
-        from .footprint_view import DRAWING_KEY_ROLE, DRAWING_KIND_ROLE, PAD_KEY_ROLE
+        from PyQt6 import sip
         self._refresh_fp_properties()
         scene = getattr(self, "preview_scene", None)
-        if scene is None:
+        # A late signal after the window's scene was destroyed: the listed
+        # items died with it, and asking them anything would read freed memory.
+        if scene is None or sip.isdeleted(scene):
             return
         selected = set(self._fp_selected_indices())
         pads = set(self._fp_selected_pads())
-        for item in scene.items():
-            index = item.data(DRAWING_KEY_ROLE)
-            if index is not None and 0 <= int(index) < len(self.footprint_drawings):
-                record = self.footprint_drawings[int(index)]
-                if item.data(DRAWING_KIND_ROLE) == record["kind"]:
-                    self._style_drawing_item(item, record, int(index) in selected, _FP_PREVIEW_MM_TO_PX)
+        for item, index, kind in getattr(self, "_fp_drawn_drawing_items", ()):
+            # A drawing removed from the scene some other way is skipped.
+            if item.scene() is not scene or not 0 <= index < len(self.footprint_drawings):
                 continue
-            parts = str(item.data(PAD_KEY_ROLE) or "").split(":", 2)
-            if parts[0] == "package" and len(parts) == 3:
-                item.setPen(self._fp_pad_pen(int(parts[1]) in pads))
+            record = self.footprint_drawings[index]
+            if kind == record["kind"]:
+                self._style_drawing_item(item, record, index in selected, _FP_PREVIEW_MM_TO_PX)
+        for item, pad_index in getattr(self, "_fp_drawn_pad_items", ()):
+            if item.scene() is scene:
+                item.setPen(self._fp_pad_pen(pad_index in pads))
 
     def _fp_pad_pen(self, selected: bool) -> QPen:
         """@brief Outline of a package pad in the preview: plain, or in the selection colour.
@@ -23632,7 +23872,11 @@ class MainWindow(QMainWindow):
         """
         from .footprint_view import DRAWING_KEY_ROLE, DRAWING_KIND_ROLE, LAYER_ROLE, ZONE_COPPER_ROLE
         hint = self.i18n.text("Disegno: tasto destro per eliminarlo o modificarlo.")
+        # The wrappers made now, of the right type, for the restyle
+        # (`_refresh_drawing_selection` note); emptied before every clear.
+        drawn = self.__dict__.setdefault("_fp_drawn_drawing_items", [])
         for item in items:
+            drawn.append((item, index, record["kind"]))
             if copper is not None:
                 item.setData(ZONE_COPPER_ROLE, copper)
             if selected:
@@ -24079,6 +24323,10 @@ class MainWindow(QMainWindow):
         # A layer block left open by an exception in a drawer would pin the
         # dead items of the cleared scene: every redraw starts with no block.
         self._fp_layer_stack = []
+        # The drawn drawings and pads die with the scene: their lists must
+        # not outlive it (`_refresh_drawing_selection` note).
+        self._fp_drawn_drawing_items = []
+        self._fp_drawn_pad_items = []
         # The photo anchor is declared again by the drawer that knows it
         # (the pin header); the others centre the photo on the drawn body.
         self._fp_photo_anchor_mm = None
@@ -25130,15 +25378,26 @@ class MainWindow(QMainWindow):
         except (ValueError, OSError, RuntimeError) as exc:
             QMessageBox.warning(self, self.i18n.text('Suggerisci tipi pin con AI'), str(exc))
             return
-        if not self._ensure_api_key():
+        if not self._ensure_api_key("pin_types"):
             return
         snapshot = self.symbol_tab.draft_rows()
         # The profile's pin-type prompt (step P2); None when the profile
         # cannot be read, which sends the default.
         pin_prompt = (self._profile_prompt_texts() or {}).get('pin_type_prompt')
+        # The step's own model when one is chosen in «Modello AI» (2026-11-12).
+        # A service that takes the table resolves it itself, with the
+        # usability check (prompt_models.usable_model) against the single
+        # model as fallback; an older one receives the step's model directly.
+        step_models = self._step_models()
+        from ..services.pin_type_ai import suggest_pin_types
+        takes_table = step_models is not None and accepts_keyword(suggest_pin_types, "step_models")
         dialog = PinTypeDialog(dict(name=self._component_name(), rows=snapshot,
-                                   documents=documents, model=self._vision_model(),
-                                   **({'prompt': pin_prompt} if pin_prompt is not None else {})),
+                                   documents=documents,
+                                   model=(self._vision_model() if takes_table else
+                                          model_for('pin_type_prompt', step_models,
+                                                    self._vision_model())),
+                                   **({'prompt': pin_prompt} if pin_prompt is not None else {}),
+                                   **({'step_models': step_models} if takes_table else {})),
                                self, tx=self.i18n.text)
         account = getattr(self, 'ai_account', None)
         if account:
@@ -26367,7 +26626,8 @@ class MainWindow(QMainWindow):
                 self.i18n.text(
                     "Usa prima Rileva terminali dalla foto. L'affinamento conserva corpo e terminali esistenti."))
             return
-        if not self._ensure_api_key():
+        step_field = 'lead_prompt' if only_leads else 'terminal_prompt'
+        if not self._ensure_api_key("leads" if only_leads else "terminals"):
             return
         question_key = ('terminal.confirm_leads' if only_leads
                         else 'terminal.confirm_geometry')
@@ -26387,8 +26647,11 @@ class MainWindow(QMainWindow):
             self.i18n.text("Analisi dei terminali nella foto in corso..."), STATUS_INFO)
         worker = TerminalDetailWorker(self._photo_png, components,
                                       self._vision_model(), only_leads=only_leads,
-                                      system_prompt=profile['lead_prompt' if only_leads else 'terminal_prompt'],
-                                      cache_dir=self._photo_cache_dir() if self._named() else None)
+                                      system_prompt=profile[step_field],
+                                      cache_dir=self._photo_cache_dir() if self._named() else None,
+                                      # The step's own model, if chosen (2026-11-12).
+                                      **accepted_kwargs(TerminalDetailWorker.__init__,
+                                                        step_models=self._step_models()))
         worker._model_revision = self._model_revision
         worker._photo_snapshot = self._photo_png
         self._terminal_worker = worker
@@ -28271,6 +28534,9 @@ class MainWindow(QMainWindow):
             item.setBrush(pad_brush)
             item.setToolTip(self._pad_tooltip(pin.number, getattr(pin, "sources", None)))
             item.setData(PAD_KEY_ROLE, f"package:{pad_index}:{pin.number}")
+            # Restyled from this list, never from scene.items()
+            # (`_refresh_drawing_selection` note); emptied before every clear.
+            self.__dict__.setdefault("_fp_drawn_pad_items", []).append((item, pad_index))
             if movable:
                 # The move cursor says the pad can be dragged, as on a pin
                 # of the symbol editor and on a footprint drawing.

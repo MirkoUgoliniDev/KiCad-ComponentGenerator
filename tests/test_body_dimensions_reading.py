@@ -62,7 +62,8 @@ def test_the_reading_uses_the_body_tool_and_the_given_model(tmp_path, monkeypatc
     kwargs = call.call_args.kwargs
     assert kwargs["model"] == "vendor/reader"
     assert kwargs["tool"]["function"]["name"] == "report_body_dimensions"
-    assert "UN SOLO numero STAMPATO" in kwargs["system_prompt"]
+    # CONTRACT CHANGED 2026-11-12: prompts in English.
+    assert "ONE SINGLE PRINTED number" in kwargs["system_prompt"]
 
 
 # ── apply_dedicated_body ────────────────────────────────────────────────

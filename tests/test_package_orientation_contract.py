@@ -61,11 +61,12 @@ def _codes(data):
 
 def test_package_geometry_schema_states_y_down_and_counter_clockwise_angles():
     description = _schema()["package_geometry"]["description"]
-    assert "Y cresce verso il BASSO" in description
-    assert "ANTIORARIO" in description
+    # CONTRACT CHANGED 2026-11-12: prompts in English.
+    assert "Y grows DOWNWARDS" in description
+    assert "COUNTERCLOCKWISE" in description
     properties = _schema()["package_geometry"]["properties"]
-    assert "ANTIORARI" in properties["orientation_deg"]["description"]
-    assert "ANTIORARI" in properties["pins"]["items"]["properties"]["rotation_deg"]["description"]
+    assert "COUNTERCLOCKWISE" in properties["orientation_deg"]["description"]
+    assert "COUNTERCLOCKWISE" in properties["pins"]["items"]["properties"]["rotation_deg"]["description"]
 
 
 def test_package_geometry_body_axes_follow_the_coordinate_frame():
@@ -73,17 +74,19 @@ def test_package_geometry_body_axes_follow_the_coordinate_frame():
     properties = _schema()["package_geometry"]["properties"]
     length = properties["body_length_mm"]["description"]
     width = properties["body_width_mm"]["description"]
-    assert "asse X di queste coordinate" in length and "TRASVERSALE" in length
-    assert "asse Y di queste coordinate" in width and "LUNGO le file" in width
+    # CONTRACT CHANGED 2026-11-12: prompts in English.
+    assert "X axis of these coordinates" in length and "ACROSS" in length
+    assert "Y axis of these coordinates" in width and "ALONG the pin rows" in width
 
 
 def test_top_level_body_length_no_longer_ties_x_to_the_pitch_for_explicit_pads():
     """The old text «asse X, stessa direzione del pitch» is wrong when the rows run along Y."""
     main = _schema()
     text = main["body_length_mm"]["description"]
-    assert "stessa direzione del pitch" not in text
-    assert "trasversale alle file" in text and "asse X del footprint" in text
-    assert "asse Y del footprint" in main["body_width_mm"]["description"]
+    # CONTRACT CHANGED 2026-11-12: prompts in English.
+    assert "same direction as the pitch" not in text
+    assert "across the rows" in text and "X axis of the footprint" in text
+    assert "Y axis of the footprint" in main["body_width_mm"]["description"]
     # The single-component tool reuses the same descriptions.
     single = de._single_component_tool()["function"]["parameters"]["properties"]
     assert single["body_length_mm"] == main["body_length_mm"]
