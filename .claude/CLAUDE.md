@@ -230,7 +230,8 @@ contradicts the measure; point 150, `FIX` only: profile field «Modello lettura 
 checkbox, one review window in two stages with the detector's reading kept beside the AI's,
 three-section «Parametri» modal, phantom sides excluded by the photo, pulsing running mark,
 unread row spacing ignored, pad width at the pitch downgraded, lands measured on the photo)
-is 13788 passed,
+is 13831 passed,
+13 skipped and 19 subtests (2026-11-13, branch `FOOTPRINT-ADVANCE`, commit `HASHHERE`, NOT merged into `main`, halves 8397/9/19 and 5434/4 with one red test -- the KiCad usage wizard page 1 text translated only in part -- fixed and re-run alone, not a second full run: fresh-install case -- the start-up warning also names a missing AI key, with «Account AI...», «Non avvisare più» and a switch back on in «Account AI»; every provider gets the same missing-key question; delivery to KiCad without a STEP model (preview, project and global install, component check WARN, no empty or linked .3dshapes removed); see HANDOFF.md «STATO 13/11/2026»); before that, 13788 passed,
 13 skipped and 19 subtests (2026-11-12 evening, branch `FOOTPRINT-ADVANCE`, commit `807375f`, merged into `main`, halves 8353/9/19 and 5435/4, no red: one AI model per analysis step chosen in «Modello AI», every prompt in English, «Account AI» redesigned with «Verifica e salva» and «Spostala in Windows» for a key in a .env file, stale PyQt wrappers in the footprint preview fixed; see HANDOFF.md «STATO 12/11/2026 SERA»); before that, 13630 passed,
 13 skipped and 19 subtests (2026-11-12, branch `FOOTPRINT-ADVANCE`, commit `d8990e8`, merged into `main` as `965eccd`, halves 8298/9/19 and 5332/4 with one red test
 — the «Strumenti» menu list without the new entry — fixed and re-run alone, not a second full run: body review step

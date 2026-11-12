@@ -166,7 +166,10 @@ def _install(window, tmp_path, monkeypatch):
                         SimpleNamespace(identifier="KiCadGen:SCHEDA", footprint_path=tmp_path,
                                         table_path=tmp_path))
     monkeypatch.setattr(gui, "record_kicad_export", lambda **k: True)
-    artifacts = SimpleNamespace(name="SCHEDA", component_dir=tmp_path / "SCHEDA")
+    # CONTRACT CHANGED 2026-11-12: the install plan reads whether the component
+    # ships a STEP (delivery without STEP, user decision A); the fake says it does.
+    artifacts = SimpleNamespace(name="SCHEDA", component_dir=tmp_path / "SCHEDA", has_step=True, wrl_path=None,
+                                step_path=tmp_path / "SCHEDA" / "SCHEDA.3dshapes" / "SCHEDA.step")
     # CONTRACT CHANGED 2026-10-15 (review pass 2, M1): the installation also
     # waits for the required metadata to be filled and written into the
     # files; these tests are about the KLC confirmation, so that is satisfied.

@@ -182,11 +182,15 @@ def test_several_missing_fields_are_all_named_in_form_order(window, tmp_path):  
 
 
 def test_without_outputs_the_file_reason_wins(window, tmp_path):  # noqa: F811
-    """Negative of the gate's scope: with no STEP the commands keep «Genera prima…»,
-    the metadata reason never hides the missing file."""
+    """Negative of the gate's scope: with no footprint the commands keep «Genera prima…»,
+    the metadata reason never hides the missing file.
+
+    CONTRACT CHANGED 2026-11-12 (user decision A: delivery without STEP): the missing file is the footprint;
+    a missing STEP no longer blocks.
+    """
     window.field_library_root.setText(str(tmp_path))
     _write_outputs(tmp_path, window=window)
-    (tmp_path / NAME / f"{NAME}.3dshapes" / f"{NAME}.step").unlink()
+    (tmp_path / NAME / f"{NAME}.pretty" / f"{NAME}.kicad_mod").unlink()
     window.field_name.setText(NAME)
     window._refresh_output_actions()
     assert not any(_install_enabled(window).values())
@@ -238,7 +242,10 @@ def test_the_common_sink_refuses_too(window, tmp_path, no_dialogs):  # noqa: F81
     """A caller that skips the two entry points (wizard, future code) is refused by the sink."""
     _open(window, tmp_path)
     window.field_meta_description.setText("")
-    artifacts = SimpleNamespace(name=NAME, component_dir=tmp_path / NAME)
+    # CONTRACT CHANGED 2026-11-12: the install plan reads whether the component
+    # ships a STEP (delivery without STEP, user decision A); the fake says it does.
+    artifacts = SimpleNamespace(name=NAME, component_dir=tmp_path / NAME, has_step=True, wrl_path=None,
+                                step_path=tmp_path / NAME / f"{NAME}.3dshapes" / f"{NAME}.step")
     window._install_kicad_library(tmp_path / "dest", project_library=True, artifacts=artifacts)
     assert no_dialogs["installed"] == [] and no_dialogs["question"] == []
     assert len(no_dialogs["warning"]) == 1
@@ -256,7 +263,10 @@ def test_the_disabled_menu_entries_do_nothing(window, tmp_path, no_dialogs):  # 
 def test_with_the_fields_filled_the_direct_call_installs(window, tmp_path, no_dialogs):  # noqa: F811
     """Positive of the sink: same call, required fields filled -> installed, no question."""
     _open(window, tmp_path)
-    artifacts = SimpleNamespace(name=NAME, component_dir=tmp_path / NAME)
+    # CONTRACT CHANGED 2026-11-12: the install plan reads whether the component
+    # ships a STEP (delivery without STEP, user decision A); the fake says it does.
+    artifacts = SimpleNamespace(name=NAME, component_dir=tmp_path / NAME, has_step=True, wrl_path=None,
+                                step_path=tmp_path / NAME / f"{NAME}.3dshapes" / f"{NAME}.step")
     window._install_kicad_library(tmp_path / "dest", project_library=True, artifacts=artifacts)
     assert len(no_dialogs["installed"]) == 1
     assert no_dialogs["question"] == [] and no_dialogs["warning"] == []
@@ -266,7 +276,10 @@ def test_other_klc_errors_still_ask_but_missing_fields_never_do(window, tmp_path
     """The confirmation of the other KLC errors is unchanged; a required-field
     error is never offered as «install anyway»."""
     _open(window, tmp_path)
-    artifacts = SimpleNamespace(name=NAME, component_dir=tmp_path / NAME)
+    # CONTRACT CHANGED 2026-11-12: the install plan reads whether the component
+    # ships a STEP (delivery without STEP, user decision A); the fake says it does.
+    artifacts = SimpleNamespace(name=NAME, component_dir=tmp_path / NAME, has_step=True, wrl_path=None,
+                                step_path=tmp_path / NAME / f"{NAME}.3dshapes" / f"{NAME}.step")
     other = klc_checks.Finding("reference_letters", "error", "Designatore errato")
     monkeypatch.setattr(klc_checks, "check_all", lambda *a, **k: [other])
     window._install_kicad_library(tmp_path / "dest", project_library=True, artifacts=artifacts)
@@ -576,7 +589,10 @@ def test_symbol_and_name_errors_keep_the_install_confirmation(window, tmp_path, 
     monkeypatch.setattr(window, "_generate", lambda **k: True)
     window.btn_apply_metadata.click()
     assert no_dialogs["warning"] == []
-    artifacts = SimpleNamespace(name=NAME, component_dir=tmp_path / NAME)
+    # CONTRACT CHANGED 2026-11-12: the install plan reads whether the component
+    # ships a STEP (delivery without STEP, user decision A); the fake says it does.
+    artifacts = SimpleNamespace(name=NAME, component_dir=tmp_path / NAME, has_step=True, wrl_path=None,
+                                step_path=tmp_path / NAME / f"{NAME}.3dshapes" / f"{NAME}.step")
     window._install_kicad_library(tmp_path / "dest", project_library=True, artifacts=artifacts)
     assert len(no_dialogs["question"]) == 1 and "Errore " + code in no_dialogs["question"][0][2]
     assert len(no_dialogs["installed"]) == 1

@@ -98,11 +98,14 @@ def test_a2_a_deepseek_session_vision_model_without_its_key_stops_the_run(window
         asked.append(1)
         raise providers.ProviderKeyMissing("no deepseek key")
     monkeypatch.setattr(providers, "deepseek_api_key", missing)
-    warned = []
-    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warned.append(a))
+    # CONTRACT CHANGED 2026-11-12 (fresh-install review): a missing DeepSeek
+    # key gets the same «open Account AI?» question as OpenRouter, not a warning.
+    questions = []
+    monkeypatch.setattr(QMessageBox, "question",
+                        lambda *a, **k: questions.append(a) or QMessageBox.StandardButton.No)
     assert window._photo_detector_model() in window._run_models()
     assert window._ensure_api_key() is False
-    assert asked and warned
+    assert asked and len(questions) == 1 and "DeepSeek" in questions[0][2]
 
 
 def test_a2_without_a_session_vision_model_the_set_is_the_extraction_model(window):

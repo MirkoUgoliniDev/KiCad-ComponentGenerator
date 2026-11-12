@@ -9,7 +9,10 @@ def test_missing_files_and_cli_are_explicit(tmp_path, monkeypatch):
     monkeypatch.setattr(check, 'find_kicad_cli', lambda: None)
     results = check.verify_component(tmp_path, 'Demo', [{'pin': '1', 'name': 'GPIO1'}], pending=True)
     assert any(r.status == 'ERROR' and r.title == 'Footprint su disco' for r in results)
-    assert any(r.status == 'ERROR' and r.title == 'Modello STEP' for r in results)
+    # CONTRACT CHANGED 2026-11-12 (delivery without STEP): a missing STEP is a
+    # warning, not an ERROR; a truncated STEP stays an ERROR (test below).
+    assert any(r.status == 'WARN' and r.title == 'Modello STEP' for r in results)
+    assert not any(r.status == 'ERROR' and r.title == 'Modello STEP' for r in results)
     assert any(r.status == 'SKIP' and 'lettura' in r.title for r in results)
     assert any(r.title == 'Modifiche non applicate' for r in results)
 
@@ -146,3 +149,27 @@ def test_original_invalid_model_transform_is_not_hidden_by_import_copy(tmp_path,
     monkeypatch.setattr(check, 'find_kicad_cli', lambda: None)
     results = check.verify_component(art.component_dir, 'Demo', [{'pin': '1', 'name': 'GPIO1'}])
     assert any(r.title == 'Collegamento 3D originale' and r.status == 'ERROR' and 'Trasformazione' in r.detail for r in results)
+
+
+def test_a_footprint_without_step_is_warned_never_refused(tmp_path, monkeypatch):
+    """@brief Positive: no STEP -> WARN «Modello STEP», 3D import skipped, no ERROR from the model."""
+    art = _artifacts(tmp_path)
+    art.step_path.unlink()
+    art.wrl_path.unlink()
+    monkeypatch.setattr(check, 'find_kicad_cli', lambda: None)
+    results = check.verify_component(art.component_dir, 'Demo', [{'pin': '1', 'name': 'GPIO1'}])
+    assert any(r.status == 'WARN' and r.title == 'Modello STEP' and 'senza vista 3D' in r.detail
+               for r in results)
+    assert any(r.status == 'SKIP' and r.title == 'Importazione 3D in KiCad' for r in results)
+    assert not any(r.status == 'ERROR' for r in results), [r for r in results if r.status == 'ERROR']
+    assert not any(r.title == 'Collegamento 3D originale' for r in results)
+
+
+def test_a_truncated_step_is_still_an_error(tmp_path, monkeypatch):
+    """@brief Negative: a STEP that exists but lacks its trailer stays an ERROR («NON USARE»)."""
+    art = _artifacts(tmp_path)
+    art.step_path.write_bytes(b"ISO-10303-21;\nHEADER;\n")
+    monkeypatch.setattr(check, 'find_kicad_cli', lambda: None)
+    results = check.verify_component(art.component_dir, 'Demo', [{'pin': '1', 'name': 'GPIO1'}])
+    assert any(r.status == 'ERROR' and r.title == 'Modello STEP' for r in results)
+

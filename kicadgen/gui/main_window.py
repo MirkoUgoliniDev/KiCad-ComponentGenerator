@@ -1917,6 +1917,10 @@ def _project_list(mapping: dict, key: str, skipped: list, label: str | None = No
 _QT_SIMPLE_TEXT_ITEM_TYPE = 9
 
 
+#: config.json key of «Non avvisare più per la chiave AI» (app_config.DEFAULTS).
+STARTUP_KEY_NOTICE_DISMISSED_KEY = "startup_key_notice_dismissed"
+
+
 class MainWindow(QMainWindow):
     """@brief Coordinate the six-tab component generation workflow."""
 
@@ -4143,16 +4147,35 @@ class MainWindow(QMainWindow):
             dialog.deleteLater()
 
     def _warn_missing_external_applications(self) -> bool:
-        """@brief Warn once when KiCad or FreeCAD is not installed.
+        """@brief Warn once when KiCad, FreeCAD or the AI key of the analysis is missing.
 
         @return True when the warning was displayed, otherwise False.
+        @note Fresh-install review (user, 2026-11-12): the warning used to
+            list only KiCad and FreeCAD, so a new user met the missing AI key
+            only at the first analysis. The key line names the providers of
+            the models the analysis would call (`_run_models("analysis")`), and
+            «Account AI...» opens the window on the first one that lacks it.
         """
         if self._startup_dependencies_checked:
             return False
         self._startup_dependencies_checked = True
 
+        from ..services.providers import PROVIDER_SHORT_LABELS
         applications = detect_external_applications()
-        if not applications.missing:
+        try:
+            key_problems = self._key_problems(self._run_models("analysis"))
+        except Exception as exc:  # noqa: BLE001 - a start-up warning must never stop the start
+            # Logged, not raised: the key line is left out, the rest of the
+            # warning (KiCad, FreeCAD) still shows.
+            self._append_log(tx("Controllo della chiave AI all'avvio non riuscito: {error}", error=exc),
+                             persist=False)
+            key_problems = []
+        if self._config.get(STARTUP_KEY_NOTICE_DISMISSED_KEY) is True:
+            # The user ticked «Non avvisare più per la chiave AI»: the key is not
+            # named at start-up any more; a missing KiCad or FreeCAD still is.
+            key_problems = []
+        missing_keys = [provider for provider, _error in key_problems]
+        if not applications.missing and not missing_keys:
             return False
 
         def status(name: str, path: str | None) -> str:
@@ -4162,23 +4185,48 @@ class MainWindow(QMainWindow):
             return self.i18n.tr(
                 "dependencies.not_detected", application=name)
 
-        statuses = "\n".join((
-            status("KiCad", applications.kicad_cli),
-            status("FreeCAD", applications.freecadcmd),
-        ))
+        lines = [status("KiCad", applications.kicad_cli),
+                 status("FreeCAD", applications.freecadcmd)]
+        names = list(applications.missing)
+        for provider, error in key_problems:
+            label = PROVIDER_SHORT_LABELS.get(provider, provider)
+            line_key = ("dependencies.key_invalid" if self._key_is_malformed(error)
+                        else "dependencies.key_missing")
+            lines.append(self.i18n.tr(line_key, provider=label))
+            names.append(self.i18n.tr("dependencies.key_name", provider=label))
+        statuses = "\n".join(lines)
         message = QMessageBox(self)
         message.setIcon(QMessageBox.Icon.Warning)
         message.setWindowTitle(self.i18n.tr("dependencies.title"))
         message.setText(self.i18n.tr(
-            "dependencies.missing", applications=", ".join(applications.missing)))
+            "dependencies.missing", applications=", ".join(names)))
         message.setInformativeText(self.i18n.tr(
             "dependencies.explanation", statuses=statuses))
         message.setTextFormat(Qt.TextFormat.PlainText)
         message.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        account_button = None
+        if missing_keys:
+            account_button = message.addButton(
+                self.i18n.text("Account AI..."), QMessageBox.ButtonRole.ActionRole)
         continue_button = message.addButton(
             self.i18n.text("Continua"), QMessageBox.ButtonRole.AcceptRole)
         message.setDefaultButton(continue_button)
+        # With two buttons Qt finds no escape button by itself: Escape and the
+        # title-bar close would do nothing (review 2026-11-12). They mean «Continua».
+        message.setEscapeButton(continue_button)
+        dismiss_box = None
+        if missing_keys:
+            dismiss_box = QCheckBox(self.i18n.text("Non avvisare più per la chiave AI"))
+            dismiss_box.setToolTip(self.i18n.text(
+                "All'avvio la chiave AI non viene più segnalata; prima di un'analisi a pagamento "
+                "il programma la chiede comunque."))
+            message.setCheckBox(dismiss_box)
         self._run_modal(message)
+        if dismiss_box is not None and dismiss_box.isChecked():
+            # Switched back on from «Account AI» (`_set_startup_key_notice`).
+            self._set_startup_key_notice(False)
+        if account_button is not None and message.clickedButton() is account_button:
+            self._open_ai_account_for(missing_keys[0])
         return True
 
     # ── Layout ──────────────────────────────────────────────────────
@@ -5881,7 +5929,8 @@ class MainWindow(QMainWindow):
             step = project / f"{name}.3dshapes" / f"{name}.step"
             symbol = project / f"{name}.kicad_sym"
             footprint_available = footprint.is_file()
-            complete_available = footprint_available and step.is_file()
+            # The STEP is optional (user decision A, 2026-11-12).
+            complete_available = footprint_available
         else:
             # Without a name there is no folder, so nothing to open or to
             # install: no path to show and no file to look for.
@@ -5943,9 +5992,12 @@ class MainWindow(QMainWindow):
             alignment = self._kicad_command_block_reason() if complete_available else ""
             status = (alignment if alignment else
                       self.i18n.text("Footprint e modello STEP pronti per la verifica.")
+                      if complete_available and step_available else
+                      self.i18n.text("Footprint pronto per la verifica, senza modello STEP: in KiCad "
+                                     "il componente non avrà la vista 3D.")
                       if complete_available else
-                      self.i18n.text("Genera footprint e modello STEP per continuare."))
-            if complete_available and _step_older_than_footprint(footprint, step):
+                      self.i18n.text("Genera il footprint per continuare."))
+            if complete_available and step_available and _step_older_than_footprint(footprint, step):
                 status += "\n" + self.i18n.text(
                     "ATTENZIONE: il modello STEP è più vecchio del footprint. Se dopo "
                     "l'ultimo modello STEP hai cambiato il corpo, rigenera il modello STEP prima di "
@@ -5970,7 +6022,8 @@ class MainWindow(QMainWindow):
     #: attribute name; the menu entries keep the reason-only tooltip.
     OUTPUT_ACTION_TOOLTIPS = {
         "btn_test_kicad": "Apre un progetto temporaneo: non installa e non modifica librerie KiCad",
-        "btn_export": "Crea KiCadGen.pretty e KiCadGen.3dshapes nel progetto selezionato",
+        "btn_export": ("Crea KiCadGen.pretty (e KiCadGen.3dshapes se c'è il modello STEP) nel "
+                       "progetto selezionato"),
         "btn_install_global": "Installa nella cartella scelta e registra la libreria globale di KiCad",
     }
 
@@ -6651,39 +6704,105 @@ class MainWindow(QMainWindow):
         """
         return self._ensure_keys_for(self._run_models(command, **step_options))
 
-    def _ensure_keys_for(self, models) -> bool:
-        """@brief True when every provider of `models` has a key; otherwise tell the user.
+    def _key_problems(self, models) -> list:
+        """@brief The providers of `models` whose key cannot be used, with the reason.
 
-        @param models Model identifiers a paid command will call.
-        @return False when a key is missing (a DeepSeek one is reported, an
-            OpenRouter one offers «Account AI...»).
+        @param models Model identifiers a command would call.
+        @return (provider, exception) pairs in the pickers' order
+            (providers.PROVIDERS); the exception is a MissingApiKeyError /
+            ProviderKeyMissing, or their «invalid key» subclasses
+            (InvalidApiKeyError / ProviderKeyInvalid) when a key is configured
+            but malformed. Empty when every provider has a usable key.
+        @note Reads no network: the environment, the Windows Credential
+            Manager and the `.env` files (openrouter.api_key,
+            providers.deepseek_api_key). Shared by the start-up warning and
+            the check before a paid command, so both name the same providers.
         """
         from ..services import openrouter
-        from ..services.providers import (PROVIDER_DEEPSEEK, ProviderKeyMissing,
-                                          deepseek_api_key, provider_of)
-        models = tuple(models)
-        if any(provider_of(model) == PROVIDER_DEEPSEEK for model in models):
+        from ..services.providers import (PROVIDER_DEEPSEEK, PROVIDER_OPENROUTER, PROVIDERS,
+                                          ProviderKeyMissing, deepseek_api_key, provider_of)
+        needed = {provider_of(model) for model in models}
+        found = {}
+        if PROVIDER_OPENROUTER in needed:
+            try:
+                openrouter.api_key()
+            except openrouter.MissingApiKeyError as exc:
+                found[PROVIDER_OPENROUTER] = exc
+        if PROVIDER_DEEPSEEK in needed:
             try:
                 deepseek_api_key()
             except ProviderKeyMissing as exc:
-                QMessageBox.warning(self, self.i18n.text("Account AI"), str(exc))
-                return False
-            if all(provider_of(model) == PROVIDER_DEEPSEEK for model in models):
-                return True
-        try:
-            openrouter.api_key()
-        except openrouter.MissingApiKeyError:
-            answer = QMessageBox.question(
-                self, self.i18n.text("Account AI"),
-                self.i18n.text("Nessuna chiave OpenRouter configurata. Aprire «Account AI...» "
-                               "per inserirla?"))
-            if answer == QMessageBox.StandardButton.Yes:
-                self._open_ai_account()
-            return False
-        return True
+                found[PROVIDER_DEEPSEEK] = exc
+        return [(provider, found[provider]) for provider in PROVIDERS if provider in found]
+
+    def _providers_without_key(self, models) -> list:
+        """@brief The providers of `models` without a usable key, in the pickers' order.
+
+        @param models Model identifiers a command would call.
+        @return Provider identifiers; empty when every provider has a usable key.
+        """
+        return [provider for provider, _error in self._key_problems(models)]
+
+    @staticmethod
+    def _key_is_malformed(error) -> bool:
+        """True when `error` says a key IS configured but cannot be one (not «no key»)."""
+        from ..services import openrouter
+        from ..services.providers import ProviderKeyInvalid
+        return isinstance(error, (openrouter.InvalidApiKeyError, ProviderKeyInvalid))
+
+    def _ensure_keys_for(self, models) -> bool:
+        """@brief True when every provider of `models` has a usable key; otherwise offer «Account AI...».
+
+        @param models Model identifiers a paid command will call.
+        @return False when a key is missing or unusable; the command does not
+            start either way (a key saved in the window is used by the next run).
+        @note Fresh-install review (user, 2026-11-12): a missing DeepSeek key
+            used to show only «OK» while a missing OpenRouter key offered the
+            window; every provider now gets the same question, naming every
+            provider that lacks a key, and the window opens on the first one.
+            A configured but malformed key keeps its own explanation (which
+            source, what is wrong) instead of being called «no key».
+        """
+        from ..services.providers import PROVIDER_SHORT_LABELS
+        problems = self._key_problems(tuple(models))
+        if not problems:
+            return True
+        malformed = [error for _provider, error in problems if self._key_is_malformed(error)]
+        if malformed:
+            text = "\n\n".join([str(error) for error in malformed]
+                                + [self.i18n.text("Aprire «Account AI...» per sostituirla?")])
+        else:
+            names = ", ".join(PROVIDER_SHORT_LABELS.get(provider, provider)
+                              for provider, _error in problems)
+            text = self.i18n.text("Nessuna chiave {provider} configurata. Aprire «Account AI...» "
+                                  "per inserirla?").format(provider=names)
+        answer = QMessageBox.question(self, self.i18n.text("Account AI"), text)
+        if answer == QMessageBox.StandardButton.Yes:
+            self._open_ai_account_for(problems[0][0])
+        return False
+
+    def _startup_key_notice_on(self) -> bool:
+        """@brief True while the start-up warning names a missing AI key (not dismissed)."""
+        return self._config.get(STARTUP_KEY_NOTICE_DISMISSED_KEY) is not True
+
+    def _set_startup_key_notice(self, on: bool) -> None:
+        """@brief «Avvisa all'avvio se manca una chiave AI» from «Account AI»: saved in config.json.
+
+        @param on True to warn again at start-up about a missing AI key.
+        """
+        self._config[STARTUP_KEY_NOTICE_DISMISSED_KEY] = not on
+        if save_config(self._config) is False:
+            self._append_log(self.i18n.text("Impostazione non salvata in config.json."), persist=False)
 
     def _open_ai_account(self) -> None:
+        """@brief «Account AI...» from the menu: opens on the provider of the model in use."""
+        self._open_ai_account_for(None)
+
+    def _open_ai_account_for(self, provider) -> None:
         """@brief «Account AI...»: every provider's key and balance; paste, verify, save or remove.
+
+        @param provider The provider to select (one that lacks a key), or None
+            for the provider of the model in use.
 
         @note The dialog translates itself through this window's `i18n`; it
             opens on the provider of the model in use and reads the balances
@@ -6691,8 +6810,10 @@ class MainWindow(QMainWindow):
             balance line at once.
         """
         from .ai_account_dialog import AiAccountDialog
-        dialog = AiAccountDialog(self, read_balances=True)
-        dialog.select_provider(self._balance_provider())
+        dialog = AiAccountDialog(self, read_balances=True,
+                                 startup_notice=(self._startup_key_notice_on,
+                                                 self._set_startup_key_notice))
+        dialog.select_provider(provider or self._balance_provider())
         dialog.key_changed.connect(self.ai_account.refresh_balance)
         self._ai_account_dialog = dialog
         self._run_modal(dialog)
@@ -15356,13 +15477,20 @@ class MainWindow(QMainWindow):
                 "corpo diversi da quelli attuali, e ora nessun modello STEP può essere costruito "
                 "({why}). Ripeti l'analisi con un disegno quotato del corpo, oppure premi "
                 "«Rimuovi il modello STEP obsoleto» nella scheda KiCad.").format(why=why))
+        # Without FreeCAD «Rigenera» cannot run: the other way out is named
+        # (delivery without STEP, review 2026-11-12).
+        no_freecad = (self.i18n.text(
+            " Senza FreeCAD: premi «Rimuovi il modello STEP obsoleto» per consegnare il footprint "
+            "senza vista 3D.") if self._freecad_available is False else "")
         if stale_pads:
             return ("step_pads", self.i18n.text(
                 "Modello STEP non aggiornato: è stato costruito su pad diversi da quelli dei "
-                "parametri attuali. Rigenera il modello STEP prima di provarlo o installarlo."))
+                "parametri attuali. Rigenera il modello STEP prima di provarlo o installarlo.")
+                + no_freecad)
         return ("step_body", self.i18n.text(
             "Modello STEP non aggiornato: corpo, colori o annotazioni 3D sono cambiati dopo "
-            "la sua costruzione. Rigenera il modello STEP prima di provarlo o installarlo."))
+            "la sua costruzione. Rigenera il modello STEP prima di provarlo o installarlo.")
+            + no_freecad)
 
     def _step_body_fingerprint(self, body=_BODY_OVERRIDE_UNSET, fillets=None, face_texts=None):
         """@brief JSON-normal fingerprint of what a STEP is built from besides the pads.
@@ -15762,7 +15890,7 @@ class MainWindow(QMainWindow):
     def _apply_kicad_command_states(self, complete: bool, metadata_reason: str | None = None) -> None:
         """@brief Enable or disable the six KiCad commands with the reason in their tooltip.
 
-        @param complete True while footprint and STEP exist on disk.
+        @param complete True while the footprint exists on disk (the STEP is optional).
         @param metadata_reason The installation block of the metadata
             (`_install_block_reason`), applied to the installations only;
             None when not computed here (`_refresh_install_gate` adds it).
@@ -15777,7 +15905,7 @@ class MainWindow(QMainWindow):
                 continue
             if not complete:
                 self._set_output_action_state(
-                    action, False, "Genera prima footprint e modello STEP del componente corrente")
+                    action, False, "Genera prima il footprint del componente corrente")
                 continue
             reason = block or (metadata_reason or "" if attr in self.INSTALL_ACTION_ATTRS else "")
             self._set_output_action_state(
@@ -16042,7 +16170,7 @@ class MainWindow(QMainWindow):
             "1. Installa la libreria del componente",
             "La libreria di progetto è consigliata se il componente serve solo in questo progetto. "
             "La libreria globale è disponibile in tutti i progetti di questo computer. "
-            "L’installazione registra footprint e modello STEP in KiCad.",
+            "L’installazione registra in KiCad il footprint e, se c’è, il modello STEP.",
             (("Installa nel progetto KiCad…", self._install_project_library),
              ("Installa come libreria globale…", self._install_global_library)),
         )
@@ -16129,8 +16257,11 @@ class MainWindow(QMainWindow):
         try:
             # The model offset of the APPLIED anchor, the one the .kicad_mod
             # on disk was written with (plan F2, `applied_footprint_anchor`).
+            # require_3d=False: a footprint without STEP is delivered without
+            # a 3D model (user decision A, 2026-11-12); a truncated STEP is
+            # still refused by the library (`step_incomplete`).
             return discover_component_artifacts(
-                self._project_dir(), self._component_name(), require_3d=True,
+                self._project_dir(), self._component_name(), require_3d=False,
                 model_offset=self._kicad_model_offset())
         except (KiCadLibraryError, OSError, ValueError) as exc:
             QMessageBox.warning(
@@ -16163,14 +16294,41 @@ class MainWindow(QMainWindow):
             self._project_dir() / f"{name}.3dshapes" / f"{name}.step").is_file()
 
     def _kicad_output_complete(self) -> bool:
-        """@brief Return whether the current footprint and STEP both exist."""
+        """@brief Return whether the current component can be delivered to KiCad: its footprint exists.
+
+        @note CONTRACT CHANGED 2026-11-12 (user decision A, fresh install without
+            FreeCAD): the STEP model is no longer required. Without it the
+            preview and the installations deliver the footprint with no 3D
+            model, after `_confirm_without_step` has said so; before, the
+            whole KiCad tab stayed off on a PC without FreeCAD.
+        """
         name = self._component_name()
         if not name:
             return False
-        project = self._project_dir()
-        return (
-            project / f"{name}.pretty" / f"{name}.kicad_mod").is_file() and (
-            project / f"{name}.3dshapes" / f"{name}.step").is_file()
+        return (self._project_dir() / f"{name}.pretty" / f"{name}.kicad_mod").is_file()
+
+    def _confirm_without_step(self, artifacts) -> bool:
+        """@brief True when the component has its STEP, or the user accepts delivering it without one.
+
+        @param artifacts The ComponentArtifacts about to be delivered.
+        @return False when the user declines; nothing is written then.
+        @note User decision A (2026-11-12): on a PC without FreeCAD the
+            footprint reaches KiCad with no 3D model; the question says so,
+            why, and how to add the model later.
+        """
+        if artifacts.has_step:
+            return True
+        reason = (self.i18n.text("FreeCAD non è installato.") if self._freecad_available is False
+                  else self.i18n.text("Il modello STEP non è stato generato."))
+        answer = QMessageBox.question(
+            self, self.i18n.text("Componente senza modello STEP"),
+            reason + "\n\n" + self.i18n.text(
+                "In KiCad arriverà il footprint senza vista 3D. Per aggiungerlo dopo: installa "
+                "FreeCAD, rigenera il modello STEP e ripeti questo comando. Continuare senza "
+                "modello STEP?"),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        return answer == QMessageBox.StandardButton.Yes
 
     def _test_in_kicad(self) -> None:
         """@brief Open an isolated preview board without installing a library.
@@ -16195,6 +16353,9 @@ class MainWindow(QMainWindow):
                 self.i18n.text(
                     "PCB Editor non rilevato. Installa KiCad e riavvia l'applicazione."))
             return
+        # Asked last, once nothing else can refuse (simulation 2026-11-12).
+        if not self._confirm_without_step(artifacts):
+            return
         try:
             preview = create_preview_project(artifacts)
             launch_preview(applications.pcbnew, preview.board_path)
@@ -16205,6 +16366,9 @@ class MainWindow(QMainWindow):
             return
         message = self.i18n.tr(
             "kicad.preview_opened", path=preview.board_path)
+        if not artifacts.has_step:
+            message += " " + self.i18n.text(
+                "Anteprima senza modello STEP: la vista 3D mostra solo la scheda.")
         self._append_log(message)
         self.label_kicad_status.setText(message)
 
@@ -16225,6 +16389,9 @@ class MainWindow(QMainWindow):
         if artifacts is None:
             return
         if self._refuse_install_for_metadata():
+            return
+        # Asked last, once nothing else can refuse (simulation 2026-11-12).
+        if not self._confirm_without_step(artifacts):
             return
         destination = QFileDialog.getExistingDirectory(
             self, self.i18n.text("Scegli la cartella del progetto KiCad"),
@@ -16270,6 +16437,9 @@ class MainWindow(QMainWindow):
                 self, self.i18n.text("KiCad non disponibile"),
                 self.i18n.text(
                     "KiCad non è stato rilevato: la libreria globale non può essere registrata."))
+            return
+        # Asked last, once nothing else can refuse (simulation 2026-11-12).
+        if not self._confirm_without_step(artifacts):
             return
         destination = QFileDialog.getExistingDirectory(
             self, self.i18n.text("Scegli la cartella per le librerie globali"),
@@ -16518,6 +16688,10 @@ class MainWindow(QMainWindow):
         message = self.i18n.tr(
             "kicad.install_complete", identifier=result.identifier,
             footprint=result.footprint_path, table=result.table_path)
+        if getattr(result, "step_path", True) is None:
+            # Delivery without STEP (user decision A, 2026-11-12): the report says so.
+            message += "\n\n" + self.i18n.text(
+                "Installato senza modello STEP: in KiCad il componente non ha la vista 3D.")
         # The report says what the install did to files that were already
         # there (K): overwritten, or deleted because the source lost them.
         replaced = tuple(getattr(result, "replaced", ()) or ())

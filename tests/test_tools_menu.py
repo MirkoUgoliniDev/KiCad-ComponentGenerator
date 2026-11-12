@@ -34,18 +34,19 @@ def test_the_menu_bar_order_and_the_tools_entries(window):  # noqa: F811
                      "Prompt inviati..."]
 
 
-def test_kicad_entries_are_off_with_the_reason_until_footprint_and_step_exist(window):  # noqa: F811
+def test_kicad_entries_are_off_with_the_reason_until_the_footprint_exists(window):  # noqa: F811
     window._refresh_output_actions()
     for attr in KICAD_ACTIONS + ("action_open_output",):
         action = getattr(window, attr)
         assert not action.isEnabled() and action.toolTip().startswith("Genera prima")
-    # Solo il footprint: la cartella si apre, i comandi KiCad no (serve anche lo STEP).
+    # CONTRACT CHANGED 2026-11-12 (user decision A: delivery without STEP): the footprint alone switches the
+    # KiCad entries on (the STEP only adds the 3D model). The install entries
+    # also need the required metadata (CONTRACT CHANGED 2026-10-15), filled here
+    # so this test keeps checking the file gate.
+    fill_required_metadata(window)
     _write_outputs(window, step=False)
     assert window.action_open_output.isEnabled()
-    assert not any(getattr(window, attr).isEnabled() for attr in KICAD_ACTIONS)
-    # CONTRACT CHANGED 2026-10-15: the install entries also need the required
-    # metadata (user); filled so this test keeps checking the file gate.
-    fill_required_metadata(window)
+    assert all(getattr(window, attr).isEnabled() for attr in KICAD_ACTIONS)
     _write_outputs(window, step=True)
     assert all(getattr(window, attr).isEnabled() for attr in KICAD_ACTIONS)
 

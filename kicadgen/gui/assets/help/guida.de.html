@@ -126,8 +126,12 @@ KiCad-Bibliothek, die nach ähnlichen Maßen ausgewählt werden.</p>
   <code>%LOCALAPPDATA%\KiCadGen</code> (Zeilen <code>OPENROUTER_API_KEY=sk-or-...</code>
   und/oder <code>DEEPSEEK_API_KEY=...</code>) bleibt gültig; ein mit
   „KI-Konto...“ gespeicherter Schlüssel hat Vorrang vor dem aus der Datei. Fehlt der
-  Schlüssel, meldet das Programm dies vor dem Start einer Analyse und bietet an, das
-  Fenster zu öffnen. Sobald der Schlüssel funktioniert, zeigt die Zeile
+  Schlüssel, meldet das Programm dies schon beim Start, zusammen mit KiCad und FreeCAD, falls
+  sie fehlen, und erneut vor dem Start einer Analyse; beide Male bietet es an, das
+  Fenster zu öffnen. Wer ohne KI arbeitet, aktiviert <span class="ui">Nicht mehr wegen des
+  KI-Schlüssels warnen</span>: Der Starthinweis nennt den Schlüssel nicht mehr, die Frage vor
+  einer Analyse bleibt. Wieder einschalten lässt er sich mit <span class="ui">Beim Start warnen,
+  wenn ein KI-Schlüssel fehlt</span> im Fenster <span class="ui">KI-Konto...</span>. Sobald der Schlüssel funktioniert, zeigt die Zeile
   <span class="ui">KI-Guthaben</span> der Registerkarte <span class="ui">Projekt</span>
   das Guthaben des Anbieters des gewählten Modells an.</li>
 </ul>
@@ -607,6 +611,10 @@ auf fünf Seiten: installieren, Footprint platzieren, Symbol exportieren und reg
 beide verknüpfen, PCB aktualisieren), <span class="ui">Bauteil für
 KiCad prüfen</span> (siehe unten) und <span class="ui">In KiCad testen …</span>. Unter
 <span class="ui">Bibliotheksinstallation</span> die beiden Installationen.</p>
+<p>Ohne STEP-Modell (zum Beispiel auf einem Computer ohne FreeCAD) funktionieren die drei Befehle
+trotzdem: Nach einer Bestätigung kommt der Footprint ohne 3D-Ansicht in KiCad an, und
+<code>KiCadGen.3dshapes</code> wird nicht angelegt. Um das Modell hinzuzufügen, FreeCAD
+installieren, das STEP-Modell neu erzeugen und den Befehl wiederholen.</p>
 <table>
   <tr><th>Befehl</th><th>Was er macht</th></tr>
   <tr><td class="ui">In KiCad testen …</td>

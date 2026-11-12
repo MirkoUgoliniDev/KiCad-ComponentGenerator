@@ -40,6 +40,7 @@ from PyQt6 import sip
 from PyQt6.QtCore import QThread, Qt, pyqtSignal
 from PyQt6.QtGui import QIcon, QKeySequence
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QAbstractItemView, QApplication, QDialog, QDialogButtonBox, QGroupBox, QHBoxLayout,
     QHeaderView, QLabel, QLineEdit, QMessageBox, QProgressBar, QPushButton, QTableWidget,
     QTableWidgetItem, QVBoxLayout, QWidget,
@@ -210,7 +211,8 @@ class AiAccountDialog(QDialog):
                  checker: Optional[Callable] = None,
                  source: Optional[Callable] = None,
                  accounts: Optional[list] = None,
-                 read_balances: bool = False):
+                 read_balances: bool = False,
+                 startup_notice: Optional[tuple] = None):
         """@brief Build the list of providers and the panel of the selected one.
 
         @param parent Parent window; its `i18n` translates the texts.
@@ -222,6 +224,10 @@ class AiAccountDialog(QDialog):
         @param read_balances Read each configured provider's balance in the
             background when the window opens and after a save or removal.
             The application passes True; tests leave it off (no network).
+        @param startup_notice (getter, setter) of «warn at start-up when an AI
+            key is missing»; None hides the checkbox. The start-up warning's
+            «Non avvisare più per la chiave AI» switches it off; this is the
+            only way back on without editing config.json (user, 2026-11-12).
         """
         super().__init__(parent)
         self.i18n = getattr(parent, "i18n", None)
@@ -398,6 +404,20 @@ class AiAccountDialog(QDialog):
         result_row.addWidget(self.busy, 0, Qt.AlignmentFlag.AlignTop)
         panel.addLayout(result_row)
         layout.addWidget(self.panel)
+
+        #: «Avvisa all'avvio se manca una chiave AI» ("warn at start-up when an
+        #: AI key is missing"), or None when the caller keeps no such setting.
+        self.check_startup_notice = None
+        if startup_notice is not None:
+            read_notice, write_notice = startup_notice
+            self.check_startup_notice = QCheckBox(self._tr("Avvisa all'avvio se manca una chiave AI"))
+            self.check_startup_notice.setObjectName("ai_startup_notice")
+            self.check_startup_notice.setToolTip(self._tr(
+                "Se è spenta, all'avvio la chiave AI mancante non viene segnalata; prima di "
+                "un'analisi a pagamento il programma la chiede comunque."))
+            self.check_startup_notice.setChecked(bool(read_notice()))
+            self.check_startup_notice.toggled.connect(lambda on: write_notice(bool(on)))
+            layout.addWidget(self.check_startup_notice)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, self)
         close = buttons.button(QDialogButtonBox.StandardButton.Close)

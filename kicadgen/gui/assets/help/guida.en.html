@@ -126,7 +126,12 @@ library chosen because their dimensions are similar.</p>
   <code>%LOCALAPPDATA%\KiCadGen</code> (lines <code>OPENROUTER_API_KEY=sk-or-...</code>
   and/or <code>DEEPSEEK_API_KEY=...</code>) remains valid; a key saved with
   «AI account...» takes precedence over the one in the file. If the key is missing,
-  the program says so before starting an analysis and offers to open the window.
+  the program says so at start-up, together with KiCad and FreeCAD when they are missing, and
+  again before starting an analysis; both times it offers to open the window. If you work
+  without AI, tick <span class="ui">Do not warn about the AI key again</span>: the start-up
+  notice no longer names the key, the question before an analysis stays. It is switched back on
+  with <span class="ui">Warn at start-up when an AI key is missing</span> in the
+  <span class="ui">AI account...</span> window.
   When the key works, the <span class="ui">AI credit</span> line of the
   <span class="ui">Project</span> tab shows the balance of the provider of the chosen
   model.</li>
@@ -606,6 +611,10 @@ procedure: install, place the footprint, export and register the
 symbol, link them, update the PCB), <span class="ui">Check component for
 KiCad</span> (see below) and <span class="ui">Test in KiCad...</span>. In
 <span class="ui">Library installation</span> the two installations.</p>
+<p>Without a STEP model (for example on a computer without FreeCAD) the three commands still
+work: after a confirmation the footprint reaches KiCad without a 3D view and
+<code>KiCadGen.3dshapes</code> is not created. To add the model, install FreeCAD,
+regenerate the STEP model and repeat the command.</p>
 <table>
   <tr><th>Command</th><th>What it does</th></tr>
   <tr><td class="ui">Test in KiCad...</td>

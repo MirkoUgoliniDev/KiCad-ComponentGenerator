@@ -1,5 +1,84 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## STATO 13/11/2026 — COMMITTATO su FOOTPRINT-ADVANCE come `HASHHERE` e pushato (utente: «Ok»), NON mergiato in main. Suite wb23: A 8397/9/19, B 5434/4 + 1 rosso corretto e rilanciato da solo.
+
+## (era IN CORSO 12/11/2026 notte) PC appena installato (utente: «cosa succede se dopo il setup non trovo kicad, freecad o una key? devi simularlo», poi «Ok» alla proposta)
+
+Simulazione (script in scratchpad, MainWindow vera, rilevamento finto, niente scritto): avviso d'avvio con KiCad e
+FreeCAD; STEP spento con il motivo; analisi senza chiave non parte. DIFETTI trovati e AUTORIZZATI: A) l'avviso
+d'avvio non dice nulla della chiave AI dei modelli dell'analisi -> riga «✗ Nessuna chiave AI per <servizio>» e
+pulsante «Account AI...» accanto a «Continua» (aperto sul servizio che manca); avviso anche quando manca SOLO la
+chiave. B) chiave DeepSeek mancante: solo «OK», mentre OpenRouter chiede «Aprire Account AI?» -> stessa domanda per
+ogni servizio, un solo helper `_providers_without_key` usato da avvio e comandi a pagamento. C) «riavvia
+KiCadGen-Tool» -> «KiCadGen» (testo dependencies.explanation riscritto, vecchi testi in SUPERSEDED_DEFAULTS).
+Test positivi/negativi in tests/test_ai_account_menu.py e tests/test_photo_inventory_gui.py.
+FATTO A, B, C + revisione read-only (agente): corretti — test_review_1029_mw A2 riallineato (contratto: domanda,
+non avviso); Esc/X sulla finestra d'avvio a due pulsanti = «Continua» (setEscapeButton); chiave configurata ma
+malformata NON detta «mancante» (`_key_problems` restituisce l'eccezione: domanda con il motivo + «Aprire Account
+AI per sostituirla?», riga d'avvio «✗ Chiave AI per X non utilizzabile»); domanda con TUTTI i servizi senza chiave;
+errore di `_run_models` all'avvio scritto nel registro; guide 4 lingue e INSTALLATION-WINDOWS aggiornate. 16 test
+del file verdi, 378 dell'area verdi. APERTO (decisione dell'utente): chi lavora senza AI vedrebbe l'avviso della
+chiave a ogni avvio (nessun «non mostrare piu'»). Suite completa NON ancora lanciata.
+DECISO dall'utente: opzione A -> casella «Non avvisare più per la chiave AI» nell'avviso d'avvio, solo quando
+manca una chiave; spuntata = config.json «startup_key_notice_dismissed» True: l'avviso d'avvio non nomina piu' la
+chiave (se manca solo quella non compare affatto), KiCad/FreeCAD mancanti lo fanno comparire comunque; la domanda
+prima di un comando a pagamento resta. FATTO (test 186 + guide 91 verdi; seconda revisione read-only in corso).
+SCOPERTO nella simulazione della scheda KiCad (progetto HLK-5M05B copiato in scratchpad, STEP tolto, cartelle
+annullate: niente installato): SENZA FreeCAD la scheda KiCad e' abilitata ma «Prova in KiCad», «Installa nel
+progetto» e «Installa libreria globale» sono spenti e, chiamati, rispondono «File KiCad incompleti — Modello STEP
+non trovato», con o senza KiCad. Cioe' senza FreeCAD NON si puo' portare nulla in KiCad (require_3d=True in
+_current_kicad_artifacts, _kicad_output_complete chiede lo STEP). La mia spiegazione all'utente («senza FreeCAD
+simbolo e footprint si usano normalmente») era SBAGLIATA: corretta col messaggio successivo. DA DECIDERE con
+l'utente: permettere prova/installazione senza STEP (footprint senza modello 3D) oppure lasciare cosi'.
+DECISO dall'utente: A -> prova e installazione funzionano anche SENZA STEP. PIANO: (1) kicad_library: preview,
+installazione di progetto e globale con artifacts senza STEP -> niente copia di STEP/WRL, nessun nodo (model ...)
+che punti a un file inesistente (si toglie dal .kicad_mod installato; resta com'e' nel file generato), rollback e
+storico invariati; una reinstallazione CON STEP aggiunge modello e riferimento; uno STEP troncato resta rifiutato.
+(2) GUI: _kicad_output_complete/_current_kicad_artifacts senza obbligo di STEP; pulsanti accesi col solo footprint;
+stato della scheda KiCad e avviso al momento della prova/installazione «senza modello STEP: in KiCad il componente
+non avra' il 3D; installa FreeCAD e rigenera per aggiungerlo»; i controlli di allineamento dei file ignorano lo STEP
+assente. (3) test positivi/negativi; test_kicad_library; revisione kicad-workflow-reviewer; simulazione ripetuta.
+FATTO (1)+(2): agente packaging (has_step, detach_3d_model, InstallPlan.with_model, reinstallazione senza STEP
+toglie il vecchio STEP/WRL con conferma di sovrascrittura e rollback; 17 test in
+tests/test_kicad_library_without_step.py) + coordinatore GUI (_confirm_without_step chiesto PER ULTIMO, dopo i
+rifiuti di KiCad e dei metadati: la simulazione aveva mostrato la domanda prima di un rifiuto). Contratti di 9 test
+aggiornati («CONTRACT CHANGED 2026-11-12»). Simulazione su copia di HLK-5M05B senza STEP, in scratchpad: prova in
+KiCad apre la scheda senza nodo model; installazione di progetto riuscita in una cartella temporanea, .kicad_mod
+senza (model), nessun file 3D, fp-lib-table con ${KIPRJMOD}; globale fino alla scelta della cartella (annullata).
+NOTO, non corretto: tooltip «Crea KiCadGen.pretty e KiCadGen.3dshapes» inesatto senza STEP; descr «Generated by
+KiCadGen-Tool» nella tabella (vecchio nome). Revisione kicad-workflow-reviewer IN CORSO; poi suite completa.
+REVISIONE kicad-workflow-reviewer FATTA (KiCad 10 CLI su HLK-5M05B senza STEP: svg/step/drc puliti). Corretti:
+«Verifica componente per KiCad» dava «NON USARE» senza STEP -> WARN «Modello STEP» + SKIP importazione 3D (STEP
+troncato resta ERROR; test positivo/negativo in test_component_check); domanda che prometteva il simbolo (i comandi
+non lo installano) riscritta; tooltip «Crea KiCadGen.pretty (e .3dshapes se c'e' il modello STEP)»; pagina 1 della
+guida d'uso; anteprima e rapporto d'installazione dicono «senza modello STEP»; motivo dello STEP obsoleto senza
+FreeCAD nomina «Rimuovi il modello STEP obsoleto»; test dell'ordine della domanda e del «Si'»/«No»; guide 4 lingue
+con un paragrafo sulla consegna senza STEP. Termine «modello 3D» (vietato) sostituito da «vista 3D» nei testi nuovi.
+kicad_exports.json nella radice: scritto dalla MIA simulazione (da sorgenti user_data_dir = radice), 2 righe tutte
+in scratchpad, CANCELLATO. Le simulazioni future devono isolare user_data_dir. NON corretti (bassi, da dire
+all'utente): la scelta «Non avvisare più per la chiave AI» non si riattiva dall'interfaccia; descr «KiCadGen-Tool»
+nella fp-lib-table; cartella .3dshapes vuota lasciata da una reinstallazione senza STEP. Test mirati 244 verdi.
+PROSSIMO: suite completa wb22 a codice fermo.
+POI (utente: «riprendi anche i tre punti»): suite wb22 FERMATA; fatti: (a) casella «Avvisa all'avvio se manca una
+chiave AI» in «Account AI» (parametro startup_notice=(getter, setter), _startup_key_notice_on /
+_set_startup_key_notice, salvataggio fallito scritto nel registro); (b) nuove righe di fp-lib-table con descr
+«Generated by KiCadGen» (le righe esistenti restano com'erano); (c) reinstallazione senza STEP: la cartella
+.3dshapes rimasta VUOTA viene tolta dopo il commit (rmdir rifiuta se ci sono altri modelli). Test pos/neg, guide.
+268 + 87 test verdi. Revisione read-only breve, poi suite completa.
+REVISIONE FATTA: ALTO — rmdir di una .3dshapes che e' una junction/symlink rimuove il COLLEGAMENTO (Windows
+RemoveDirectoryW) anche se la cartella puntata ha altri modelli -> CORRETTO: rmdir solo se QUESTA installazione ha
+tolto lo STEP (model_removed) e la cartella non e' un collegamento (_is_directory_link: islink, isjunction, resolve);
+test con mklink /J (verificato per mutazione: senza la guardia fallisce) + test cartella vuota dell'utente tenuta.
+BASSO: database profili riallineato (ProfileStore aperto una volta: chiavi nuove nelle 4 lingue, explanation senza
+«KiCadGen-Tool»). Non toccato: settings_dialog crea AiAccountDialog senza la casella solo se manca l'opener (in
+produzione la finestra principale lo passa sempre).
+SUITE COMPLETA wb23 (13/11) a codice fermo: A 8397 passati 9 saltati 19 sottotest; B 5434 passati 4 saltati 1
+FALLITO (test_review_1027_main_window_b::test_b7_every_wizard_text_is_in_the_catalogue: il testo della pagina 1
+della guida rapida e' UNA sorgente del catalogo, io avevo tradotto solo la frase cambiata -> voce intera
+sostituita nelle 4 lingue, voce spuria tolta, DB riallineato; file rilanciato da solo + i18n: 98 verdi, NON una
+seconda suite completa). Totale 13831 passati + 1 corretto, 13 saltati, 19 sottotest. NULLA COMMITTATO: in attesa
+dell'OK dell'utente.
+
 ## STATO 12/11/2026 SERA — lavoro della serata COMMITTATO su FOOTPRINT-ADVANCE come `807375f` (base `4dde1e8`) e mergiato in main (utente: «committa e pusha, poi mergia in main e pusha, poi torna qui»)
 
 Suite completa a codice fermo (wb21): A 8353 passati 9 saltati 19 sottotest, B 5435 passati 4 saltati = 13788
