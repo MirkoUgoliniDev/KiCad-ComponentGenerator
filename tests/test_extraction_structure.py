@@ -79,13 +79,27 @@ def test_explicit_pads_with_informative_matrix_keep_the_valid_values():
     assert "row_spacing_mm scartato" in params.notes
 
 
-def test_invalid_explicit_pads_are_still_an_error():
+def test_malformed_explicit_pads_are_still_an_error_and_overlapping_ones_block():
+    """A malformed value is an error; well-formed pads that overlap are unread geometry with a block.
+
+    Contract changed on 2026-11-11 (review round 4): two pads on one spot
+    used to raise «Geometria package non valida» and lose the paid answer.
+    Each value is well formed, they only cannot all be true: the pads are
+    now dropped with a `pin_map_conflict` naming them, the rest is kept.
+    """
     geometry = _soic8()
-    geometry["pins"][1]["x_mm"] = geometry["pins"][0]["x_mm"]
-    geometry["pins"][1]["y_mm"] = geometry["pins"][0]["y_mm"]
+    geometry["pins"][1]["x_mm"] = "0.5"
     with pytest.raises(ExtractionError, match="Geometria package"):
         _params_from_tool_arguments(dict(layout="matrix", confidence="high",
                                          package_geometry=geometry))
+    geometry = _soic8()
+    geometry["pins"][1]["x_mm"] = geometry["pins"][0]["x_mm"]
+    geometry["pins"][1]["y_mm"] = geometry["pins"][0]["y_mm"]
+    params = _params_from_tool_arguments(dict(layout="matrix", confidence="high",
+                                              package_geometry=geometry))
+    assert params.package_geometry is None and params.footprint_pads_dropped()
+    assert "pad sovrapposti tra i pin 1 e 2" in params.pin_map_conflict
+    assert len(params.unread_pad_geometry["pins"]) == 8
 
 
 def test_one_row_needs_no_row_spacing_and_two_rows_do():

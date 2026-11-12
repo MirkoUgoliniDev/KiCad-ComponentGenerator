@@ -17,7 +17,12 @@ from tests.ui_flow_helpers import header_extraction, run_extraction
 def _header_on_disk(window, monkeypatch, tmp_path):
     """A single-THT project with a header footprint written on disk."""
     _single_tht(window, monkeypatch, tmp_path, "HDR")
-    run_extraction(window, header_extraction())
+    params = header_extraction()
+    # What every real analysis keeps: the main answer a partial re-read
+    # starts from. Without it the re-read entry is disabled and, since
+    # review F2-3 (2026-11-11), the block no longer names it as a remedy.
+    params.raw_main = {"name": "HDR", "_candidates": {}}
+    run_extraction(window, params)
     assert _footprint(window, "HDR").exists()
     assert window._footprint_alignment_block() is None
 

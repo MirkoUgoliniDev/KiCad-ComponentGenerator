@@ -33,7 +33,7 @@ from .drawing_transform import bounds_centre, mirror_points_x, rotate_points_90
 from .footprint_layers import default_width, drawable_layers, is_back_layer, layer as draw_layer
 from .kicad_text import (KICAD_PEN_CLAMP_RATIO, kicad_advance_units, kicad_centre_from_corner,
                          kicad_centre_to_corner, kicad_text_width)
-from .sexpr import YES, SExpr, Symbol, bare, sx
+from .sexpr import YES, SExpr, Symbol, bare, format_number, sx
 from ..services.messages import tx
 
 KICAD_VERSION = 20260206
@@ -147,6 +147,20 @@ def normalised_attribute_flags(flags) -> Tuple[str, ...]:
     if unknown:
         raise ValueError(tx("Attributo del footprint sconosciuto: {flags}", flags=", ".join(unknown)))
     return tuple(flag for flag in FOOTPRINT_ATTRIBUTE_FLAGS if flag in wanted)
+
+
+def same_kicad_length(first: float, second: float) -> bool:
+    """@brief Whether two lengths are one value in a KiCad file.
+
+    @param first A finite length, mm.
+    @param second A finite length, mm.
+    @return True when both are written as the same number by the file's
+        formatter (`core.sexpr.format_number`: 6 decimals, KiCad's 1 nm
+        internal unit). 1.7 and 1.7000000000000002 are the same length; 1.7
+        and 1.700001 are not.
+    @throws ValueError When a value is NaN or infinite.
+    """
+    return format_number(float(first)) == format_number(float(second))
 
 
 def validate_pad_number(number) -> None:
@@ -310,6 +324,8 @@ class Pad(Movable):
       exactly one of the two is non-zero and its magnitude is below the
       corresponding pad size, as KiCad's pad editor requires. Required for
       shape="trapezoid" and refused for every other shape.
+    - lead, sources: metadata for the checks (the terminal's section and the
+      provenance of hole, pad size and shape); NOT part of the file format.
     """
 
     number: str
@@ -323,6 +339,13 @@ class Pad(Movable):
     roundrect_rratio: Optional[float] = None
     rect_delta: Optional[Tuple[float, float]] = None
     drill_slot: Optional[Tuple[float, float]] = None
+    #: METADATA, never written to the file (`to_sexpr` ignores both): the
+    #: declared section of the terminal in the hole and the provenance of the
+    #: pad's values, as `core.package_geometry.PinSpec` carries them (contract
+    #: in `core.tht_estimates`). Read by `services.footprint_checks` and the
+    #: preview. None states nothing.
+    lead: Optional[dict] = None
+    sources: Optional[dict] = None
 
     #: `at` is the hole; a drill offset is pad-local and moves with it.
     _POINT_FIELDS = ("at",)
@@ -350,7 +373,10 @@ class Pad(Movable):
                 first, second = (float(v) for v in self.size)
             except (TypeError, ValueError):
                 first = second = None
-            if first is not None and first != second:
+            # Two sizes KiCad would write as the same number are one
+            # diameter: float noise does not make a circle an oval.
+            if first is not None and not (math.isfinite(first) and math.isfinite(second)
+                                          and same_kicad_length(first, second)):
                 self.shape = "oval"
         self._validate_rect_delta()
 

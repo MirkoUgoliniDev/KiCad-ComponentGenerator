@@ -89,8 +89,17 @@ def test_a_clean_package_reports_no_problem_and_no_footprint_says_so(window):  #
     assert _checks(window) == ["Nessun footprint da controllare."]
 
 
-def test_a_thin_annular_ring_is_reported_and_its_row_selects_that_pad(window):  # noqa: F811
+def _capture_details(monkeypatch):
+    """Replace the modal details window with a recorder of what it was given."""
+    shown = []
+    monkeypatch.setattr(gui, "show_finding_details",
+                        lambda parent, details, translate: shown.append(details) or True)
+    return shown
+
+
+def test_a_thin_annular_ring_is_reported_and_its_row_selects_that_pad(window, monkeypatch):  # noqa: F811
     """A pad edit the draft accepts (drill below the pad side) but the guide discourages."""
+    shown = _capture_details(monkeypatch)
     acquire(window)
     index = next(i for i, pin in enumerate(window.package_geometry.pins) if pin.drill_mm is not None)
     pin = window.package_geometry.pins[index]
@@ -106,6 +115,9 @@ def test_a_thin_annular_ring_is_reported_and_its_row_selects_that_pad(window):  
     assert item.toolTip()
     window._on_footprint_check_clicked(item)
     assert window._fp_selected_pads() == [index]
+    # The click also opens the full text and the remedy (2026-11-12).
+    severity, message, hint = shown[-1]
+    assert severity == "warning" and "anello" in message and hint == item.toolTip()
     # Undo restores the ring and the row goes away.
     window._undo_footprint_drawing()
     assert not any("anello" in row for row in _checks(window))
@@ -129,8 +141,9 @@ def test_a_silkscreen_line_over_a_pad_is_a_warning_and_its_row_selects_the_drawi
     assert not any("Serigrafia" in row for row in _checks(window))
 
 
-def test_a_polyline_before_the_silk_line_does_not_shift_the_drawing_the_row_selects(window):  # noqa: F811
+def test_a_polyline_before_the_silk_line_does_not_shift_the_drawing_the_row_selects(window, monkeypatch):  # noqa: F811
     """Review 2026-11-06: a line record yields one graphic per segment; the map is built per record."""
+    shown = _capture_details(monkeypatch)
     acquire(window)
     pin = window.package_geometry.pins_seen_from_top()[0]
     window.footprint_drawings = [
@@ -145,6 +158,7 @@ def test_a_polyline_before_the_silk_line_does_not_shift_the_drawing_the_row_sele
     assert item.data(window._FP_CHECK_TARGETS_ROLE) == ((0,), (1,))
     window._on_footprint_check_clicked(item)
     assert window._fp_selected_indices() == [1] and window._fp_selected_pads() == []
+    assert len(shown) == 1 and "Serigrafia" in shown[0][1]
 
 
 def test_the_rubber_band_ignores_hidden_layers(window):  # noqa: F811

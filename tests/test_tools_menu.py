@@ -28,7 +28,10 @@ def test_the_menu_bar_order_and_the_tools_entries(window):  # noqa: F811
                      # Recorded answers of the analysis questions (2026-11-04, H7)
                      # and the partial re-reads (M16), visible with RereadWorker.
                      "Dimentica le risposte", "Rileggi solo le quote del corpo",
-                     "Rileggi solo le posizioni dei pad"]
+                     "Rileggi solo le posizioni dei pad",
+                     # The registry number of the analysis log back to the
+                     # prompt text (2026-11-12).
+                     "Prompt inviati..."]
 
 
 def test_kicad_entries_are_off_with_the_reason_until_footprint_and_step_exist(window):  # noqa: F811

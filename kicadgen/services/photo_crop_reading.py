@@ -1431,14 +1431,17 @@ def effective_prompt(system_prompt=None):
     """@brief Return the instructions a crop reading actually sends.
 
     @param system_prompt Text of the profile field 'crop_prompt', or None.
-    @return `system_prompt` unchanged when it has visible text, otherwise the
-        factory default SYSTEM_PROMPT.
+    @return prompt_catalog.effective_text of 'crop_prompt': `system_prompt`
+        unchanged when it has visible text and is not the default, otherwise
+        the factory default SYSTEM_PROMPT, byte for byte.
     @note A blank text is treated as absent: an empty system prompt would send
-        the model the crop with no criteria at all.
+        the model the crop with no criteria at all. A text equal to the
+        default apart from surrounding blanks and line ends sends the
+        default's bytes, so it never changes the request or the cache key
+        (review V4-5, 2026-11-11).
     """
-    if isinstance(system_prompt, str) and system_prompt.strip():
-        return system_prompt
-    return SYSTEM_PROMPT
+    from .prompt_catalog import effective_text
+    return effective_text('crop_prompt', {'crop_prompt': system_prompt})
 
 
 def _cache_key(png, model, text, index, system_prompt=SYSTEM_PROMPT):

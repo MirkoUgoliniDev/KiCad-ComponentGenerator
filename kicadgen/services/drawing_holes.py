@@ -19,13 +19,98 @@ actually drawn in the image, without any AI and without any network access:
    circles by similarity hypotheses built on its longest baselines;
 5. "confirmed" means a displacement test: mapped by a similarity (uniform
    scale, rotation, translation, never a mirror) fitted on the other pads,
-   every pad lies within the tolerance of its circle, and the stretch or
-   shear an affine fit would add, expressed as a displacement over the
-   reading's shorter extent, stays within the same tolerance. A reading
-   that only fits after a stretch is "distorted";
-6. optionally the outline rectangle drawn around the matched holes (solid,
-   dashed or dotted, see :func:`_outline_rect`) is compared with the body
-   size of the reading, also as a displacement.
+   every pad lies within the per-hole tolerance (pixels) of its circle, or
+   -- on a page stretched within PAGE_STRETCH_RATIO (a ratio) -- of where
+   the affine map fitted on the other pads puts it. A reading that only
+   fits after a larger stretch is "distorted"; one that fits only on a
+   page turned beyond MAX_ROTATION_DEG is "page_skewed" (unverifiable).
+   A fit that a coincidence satisfies easily (three pads, or a stretched
+   page) confirms only on circles drawn like holes, else "unanchored";
+6. optionally the rectangles drawn around the matched holes (solid,
+   dashed or dotted, see :func:`_outline_rects`) are compared with the
+   body size of the reading (:func:`_body_check`): one with the body's
+   proportions is the body, and ties the reading to an absolute size
+   (``scale_verified``) or contradicts it ("body_scale"); rectangles of
+   other proportions say nothing. All of them are judged, by the decision
+   table below. Without an agreement, a confirmation covers the
+   reading's proportions only (see :class:`LayoutCheck`).
+
+Body check: the decision table (2026-11-11, review finding V1-1). Every
+rectangle drawn around the matched holes is asked two independent
+questions (:func:`_judge_outline`). PROPORTIONS, scale-free: are its two
+sides the body's two sizes at ONE scale -- within its own measurement
+uncertainty ("identified": OUTLINE_EDGE_PX per edge), or only within the
+drafting allowance ("loose": BODY_SCALE_RATIO per side)? SIZE: are its
+sides the body's AT THE PADS' SCALE, within the allowance ("here"), or
+not ("elsewhere")? Either way the rectangle is a CANDIDATE for the body:
+it could be the declared body, drawn as loosely as the allowance admits,
+at the pads' scale or at another. A rectangle of other proportions and
+other sizes is no candidate, says nothing and is left out. Then, by
+which candidates the page holds::
+
+    row  here (identified   elsewhere,   elsewhere,   verdict
+         or loose)          identified   loose
+    1    yes                no           no           agrees
+    2    yes                at least one of the two   unverifiable
+    3    no                 yes          any          contradicted
+    4    no                 no           any          unverifiable
+
+Why each row, and what it rests on:
+
+- Row 1 (derived, with one declared limit). Every candidate for the body
+  on the page is at the pads' scale. The limit is the page whose only
+  candidate is not the body: see the residue below.
+- Row 2 (derived: it is an ambiguity, not a rule). The page holds a
+  candidate at the pads' scale and one at another scale, and two
+  different pages produce this SAME evidence. A correct reading of a body
+  with a step or a shield can inside it: the outer rectangle is the body,
+  here, and the inner one is a candidate elsewhere. And a wrongly scaled
+  reading of a body with a clearance frame outside it: the inner
+  rectangle is the body, elsewhere, and the frame falls inside the
+  allowance of the wrong scale (V1-1 was found on a 19.1 x 15.5 mm
+  body). No structural fact tells them apart: "the innermost is the
+  body" fails on the step; "the body encloses its pads" holds for every
+  rectangle found (:func:`_outline_rects`) and is not true of every part
+  anyway (gull-wing leads reach outside the body); "a step keeps one
+  margin on its four sides" is as true of the frame. Nor does "exact
+  proportions outrank loose ones": real outlines are drawn up to 1.5 %
+  out of proportion (the sample pages), a frame around a nearly square
+  body keeps the proportions within a pixel, and :func:`_outline_rects`
+  also closes rectangles out of the sides of two nested outlines, some
+  of which have the body's proportions by geometry (measured on
+  synthetic pages: 45 wrong scales certified in 2100 by that ranking).
+  Resolving the row towards the smallest rectangle refused correct
+  readings (F7-1, until 2026-11-10); resolving it towards the agreeing
+  one certified wrong scales (V1-1, the morning of 2026-11-11). The pads
+  stay confirmed by their shape; the scale is not verified.
+- Row 3 (derived, on a declared identification). Nothing is drawn at the
+  reading's scale and the body's exact proportions are drawn at another:
+  the reading is scaled wrongly ("body_scale"). Only EXACT proportions
+  refuse: a loose candidate elsewhere may be a frame, or a body with one
+  size misread, and a mistake of the body reading must not judge the
+  pads (audit A9).
+- Row 4 (derived). No candidate at the pads' scale and none identified:
+  the page does not say where the body is.
+
+Cost of row 2, accepted: a correct reading loses ``scale_verified`` (it
+is still confirmed) whenever a second rectangle near the outline could
+be the body within the allowance -- a step or a frame whose margin
+changes the proportions by less than about 10 %.
+
+Residue of false verdicts, pinned by tests in
+``tests/test_drawing_holes_generality.py``:
+
+- row 1, a wrong scale certified: the page does NOT draw the body, only
+  a frame around it (or draws the two so close that they are one line),
+  and the reading's error brings that frame inside the allowance. A
+  single candidate cannot be told from a loosely drawn body (the SRD
+  sample page draws 19.06 x 15.25 mm for 19.1 x 15.5 mm), and a tighter
+  proportion bound would be a number chosen on the sample pages;
+- row 3, a correct reading refused: the page does not draw the body
+  outline and its only candidate is a step or a frame that keeps the
+  body's exact proportions (a square or nearly square body);
+- errors of the reading within the allowance itself (5 % plus two
+  tolerances): below the check's resolution.
 
 A third entry point, :func:`measured_outline`, returns that drawn outline
 in the reading's own mm frame through the inverse of the confirmed fit.
@@ -241,24 +326,94 @@ SIMILAR_RADIUS = 1.6
 #: make it unnecessary, at a much higher cost.
 DISTORTION_GATE = 0.35
 
-#: Final tolerance floor, mm, and its pixel term: tolerance =
-#: max(0.15 mm, 3 px / scale). 3 px = about 1 px of centre noise plus the
-#: drafting inaccuracy measured on the sample drawings (residuals
-#: 0.02-0.13 mm = 0.3-1 px).
+#: PER-HOLE term of the error budget: where ONE drawn hole centre may sit
+#: against the fit. tolerance = max(0.15 mm, 3 px / scale). 3 px = about
+#: 1 px of centre noise plus the drafting inaccuracy measured on the sample
+#: drawings (residuals 0.02-0.13 mm = 0.3-1 px). It stays in pixels because
+#: it does not grow with the size of the part: errors that DO grow with it
+#: (a page stretched by its scan, a body drawn slightly off its quote) are
+#: bounded as ratios, see PAGE_STRETCH_RATIO and BODY_SCALE_RATIO.
 MIN_TOLERANCE_MM = 0.15
 TOLERANCE_PX = 3.0
 
-#: Maximum rotation, degrees: a page skewed more than that should be
-#: deskewed first, not absorbed by the fit.
+#: PROPORTIONAL term of the error budget (generality audit A10,
+#: 2026-11-10): how much the page itself may be stretched along one axis or
+#: sheared (anisotropy + shear of the affine map fitted on the pads, a
+#: ratio) before the reading is called "distorted". A scanned or re-rendered
+#: page is never exactly isotropic, and that error grows with the distance
+#: between two holes, so a pixel tolerance refused correct readings of
+#: large or finely scanned parts. Declared heuristic: the sample pages of
+#: the repository measured 0.2-1.6 %; each reproduction step (print, copy,
+#: scan) is commonly credited with about 1 % of magnification error (stated
+#: from experience, no cited standard). What the bound gives up: a whole
+#: axis misread by less than it (2.50 taken for 2.54 is 1.6 %) is not seen
+#: -- it could not be told from the scan stretch of the samples anyway.
+#: What would make it unnecessary: a vector drawing, or two printed quotes
+#: per axis used to calibrate each axis on its own.
+PAGE_STRETCH_RATIO = 0.02
+
+#: Largest page rotation within which a fit confirms, degrees. The fit
+#: itself removes a rotation (a similarity has one), so this is no bound on
+#: the reading: it is the limit of the line-based steps of this module
+#: (hole evidence from horizontal/vertical centre lines, the outline
+#: rectangle, the removal of straight runs), which assume a page whose
+#: lines run along the image axes. A fit beyond it is reported
+#: "page_skewed" (unverifiable: deskew the page), never "distorted": a
+#: rigidly turned page says nothing against the reading (audit A10).
 MAX_ROTATION_DEG = 3.0
 
-#: Body check: the outline drawn around the matched holes and the body size
-#: of the reading, both in px at the fitted scale, may differ by two
-#: tolerances (two edges) plus this drafting allowance, mm. Declared
-#: heuristic: datasheets quote bodies to +-0.2-0.5 mm and the sample
-#: outlines differed from their quotes by up to about 0.4 mm. A body quote
-#: with its own tolerance would make it unnecessary.
-BODY_ALLOWANCE_MM = 0.5
+#: Largest page skew searched when nothing fits upright, degrees. Derived,
+#: not tuned: a page turned by more than an eighth of a turn is nearer to
+#: the next quarter-turn orientation, and a reading matching there would be
+#: a reading in another orientation, not a skewed page.
+MAX_SKEW_DEG = 45.0
+
+#: Pads a fit must hold BEYOND the two that fix a similarity (scale,
+#: rotation, position) before circles of any kind may confirm it. Each such
+#: pad is one independent witness: it had to land on a circle. With a
+#: single witness (three pads) one coincidence among the glyph counters of
+#: a page is enough, so such a fit confirms only on circles drawn like
+#: holes (:func:`_hole_evidence`), else it is "unanchored"
+#: (audit A8). Measured on the five sample pages with random wrong
+#: readings (2026-11-10, 200 per page and pad count): three pads were
+#: "confirmed" 29 times in 1000 (up to 9.5 % on one page), four and five
+#: pads never in 2000. Two is the smallest count at which a chance fit
+#: needs two coincidences; it is a declared heuristic all the same (a page
+#: crowded with hundreds of circles could still offer two). An explicit
+#: hole list of the drawing (vector source) would make it unnecessary.
+MIN_WITNESS_PADS = 2
+
+#: Body check, PROPORTIONAL term: a body outline drawn within this ratio of
+#: its quoted size (plus two per-hole tolerances for its two edges) agrees
+#: with the reading. Declared heuristic, replacing a fixed 0.5 mm that
+#: accepted a 16 x 12 mm body drawn at 95 % and refused a 64 x 48 mm one
+#: drawn at 97 % (audit A10): datasheets quote bodies with +-0.2-0.5 mm on
+#: 10-25 mm (1-5 %), often as maxima while the drawing shows the nominal
+#: size; the sample outlines differ from their quotes by 0.4-2.7 % (T7NS
+#: page: 22.5 x 16.5 mm quoted, about 21.9 x 16.1 mm drawn; VE12H: 20.5 x
+#: 10.5 quoted, 20.6 x 10.7 drawn). What it must still catch are scale
+#: errors of the reading -- another unit, a pitch of another series (2.0
+#: for 2.54: 21 %; 3.5 for 3.81: 8 %) -- all far above it; the near pairs
+#: (2.50 / 2.54) are below any outline's accuracy. A body quote read with
+#: its printed tolerance would make it unnecessary.
+BODY_SCALE_RATIO = 0.05
+
+#: Accuracy of ONE edge of a drawn rectangle, px: an edge is the centre of
+#: the band of rows (columns) of its line, quantised to half a pixel, and
+#: anti-aliasing or JPEG blur shifts that centre by about as much. It is
+#: the rectangle's own measurement uncertainty, with no part of the pads'
+#: fit in it, used to compare the PROPORTIONS of a rectangle with those of
+#: the declared body (:func:`_judge_outline`). Declared heuristic (no
+#: measurement of the detector's edge error was made); a vector drawing
+#: would make it unnecessary.
+OUTLINE_EDGE_PX = 1.0
+
+#: Values of ``body_check`` (:class:`LayoutCheck`, :class:`MeasuredLayout`):
+#: what the drawn outline said about the declared body size.
+BODY_AGREES = "agrees"
+BODY_CONTRADICTED = "contradicted"
+BODY_UNVERIFIABLE = "unverifiable"
+BODY_NONE = "none"
 
 #: Minimum coverage of the four sides of an outline rectangle, measured after
 #: the dash gaps are bridged (see OUTLINE_GAP_STROKES): 10 % tolerates JPEG
@@ -357,12 +512,31 @@ NO_MATCH_UNOBSERVABLE = "no_match_unobservable"
 #: such circles than pads.
 NO_ROUND_HOLES = "no_round_holes"
 
+#: Reason of a fit that holds only on a page turned by more than
+#: MAX_ROTATION_DEG: unverifiable, the page must be deskewed (audit A10).
+PAGE_SKEWED = "page_skewed"
+
+#: Reason of a fit that would confirm but may be a coincidence, because its
+#: circles are not all drawn like holes AND it is one of the two fits a
+#: coincidence satisfies most easily: fewer than MIN_WITNESS_PADS witness
+#: pads, or pads that fit only on a stretched page (audit A8). Unverifiable.
+UNANCHORED = "unanchored"
+
 # Order of the not-confirmed stages: a later stage means the reading got
 # further through the checks, so its reason is the more informative one.
-_STAGES = ("no_match", "distorted", "body_scale", "low_resolution", "confirmed")
+# PAGE_SKEWED ranks just above "no_match" only: a fit at a rotation beyond
+# the limit is the easiest one for a coincidence to satisfy (the cells
+# between a ring and its centre lines offer many tilted fits), so it must
+# never hide an upright fit that put every pad on a circle and was then
+# found distorted or of another body scale.
+_STAGES = ("no_match", PAGE_SKEWED, "distorted", "body_scale", "low_resolution",
+           UNANCHORED, "confirmed")
 
 # Stages that contradict a reading (the others confirm it or cannot tell).
 _CONTRADICTING = ("no_match", "distorted", "body_scale")
+
+# Stages of a fit the image cannot judge, most informative first.
+_UNJUDGED = ("search_limit", "low_resolution", PAGE_SKEWED, UNANCHORED)
 
 
 @dataclass(frozen=True)
@@ -372,8 +546,9 @@ class LayoutCheck:
     @note ``status`` is "confirmed", "not_confirmed" or "unverifiable";
         ``reason`` is a machine code ("confirmed", "too_few_pads",
         "too_many_pads", "no_image", "not_a_drawing", "no_round_holes",
-        "too_few_circles", "low_resolution", "search_limit", "no_match",
-        "no_match_unobservable", "distorted", "body_scale"); ``image`` is
+        "too_few_circles", "low_resolution", "search_limit", "page_skewed",
+        "unanchored", "no_match", "no_match_unobservable",
+        "distorted", "body_scale"); ``image`` is
         the file name of the image that decided, None when none did;
         ``max_error_mm`` and ``tolerance_mm`` come from the best fit, None
         when no fit was made; ``circles`` is the number of circles found in
@@ -387,6 +562,45 @@ class LayoutCheck:
         cover the page's scale along either axis and a failure is reported
         as "no_match_unobservable": the caller must not take it for
         "wrong".
+    @note WHAT A CONFIRMATION COVERS (audit A7, 2026-11-10). "confirmed"
+        means the PROPORTIONS of the reading are those of the drawn holes.
+        A point set fits at any size, so the absolute scale -- the pitch,
+        the unit -- is covered only when a drawn body outline ties it to
+        the declared body size: ``body_check`` is "agrees" (a rectangle
+        drawn around the holes has the declared sizes at the pads' scale,
+        and no other rectangle could be the body at another scale),
+        "contradicted" (no rectangle has the declared sizes at the pads'
+        scale and one has the declared body's exact proportions at ANOTHER
+        scale: status "not_confirmed", reason "body_scale"),
+        "unverifiable" (a body was given, but the page does not say which
+        rectangle is it: none drawn, or only rectangles of other
+        proportions -- a page frame, a table cell, the frame around a
+        chamfered body -- or one rectangle has the declared sizes while
+        another could be the body at another scale (a step, a frame), or
+        the fit never reached the body check; the whole decision table is
+        in the module docstring) or
+        "none" (no body was given). ``scale_verified`` is True only for
+        "agrees". A confirmed reading with ``scale_verified`` False may
+        have every value multiplied by one factor (a 2.0 pitch read for
+        2.54, mils taken for mm): the caller must not present it as a
+        verified size. Even True ties the pads to the DECLARED body only:
+        pads and body both doubled agree with each other.
+    @note ``misplaced_pad`` (2026-11-11) is the key of ``pads_mm`` of the ONE
+        pad a refused fit ("no_match", "distorted") cannot blame on the page
+        (:func:`_single_misplaced`): no affine map of the whole reading puts
+        every pad on its circle within the per-hole tolerance, while the
+        other pads -- enough of them to show a stretch -- fit a similarity
+        within that tolerance. None in every other case, including a page
+        that may simply be stretched: then the refusal says nothing about
+        which pad is wrong, or whether any is.
+    @note ``stretch_ratio`` (round 7b, 2026-11-11) is the stretch
+        (:func:`_stretch_ratio`: anisotropy plus shear, as a ratio) of the
+        affine map fitted on the pads of a "distorted" refusal -- how much
+        the page would have to be stretched for the reading to land on its
+        holes -- or None when the decisive fit could not show one or the
+        verdict is another. Read-only evidence for the caller, which may
+        compare it with HYPOTHESIS_TOL_SPAN, the stretch the search itself
+        attributes to a page not to scale.
     """
 
     status: str
@@ -396,6 +610,10 @@ class LayoutCheck:
     tolerance_mm: float | None
     circles: int
     scale_observable: bool = False
+    body_check: str = BODY_NONE
+    scale_verified: bool = False
+    misplaced_pad: object | None = None
+    stretch_ratio: float | None = None
 
 
 @dataclass(frozen=True)
@@ -455,11 +673,23 @@ class _Region:
 
 @dataclass(frozen=True)
 class _Fit:
-    """Result of one refined assignment: its stage and errors."""
+    """Result of one refined assignment: its stage, its errors and what the body outline said.
+
+    ``body_check`` is one of the BODY_* values; it stays BODY_NONE for a
+    fit made without a body. ``misplaced`` is the index of the one pad
+    :func:`_single_misplaced` singles out in a refused fit, else None.
+    ``stretch`` is the :func:`_stretch_ratio` of the affine map fitted on
+    the pads when they can show one (:func:`_affine_observable`), else None;
+    the wide second pass of :func:`_check_image` caps a confirmation by it,
+    and a "distorted" fit reports it (``LayoutCheck.stretch_ratio``).
+    """
 
     stage: str
     max_error_mm: float
     tolerance_mm: float
+    body_check: str = BODY_NONE
+    misplaced: int | None = None
+    stretch: float | None = None
 
 
 @dataclass(frozen=True)
@@ -494,9 +724,16 @@ def check_pad_layout(images: Sequence[Path], pads_mm: Mapping[object, Sequence[f
         mirrored fit does not confirm (see :func:`mirror_variants` for the
         layouts a caller tests the other face with).
     @param body_mm Optional (length along page X, width along page Y) in mm.
-        When given and an outline rectangle enclosing the matched holes is
-        found, its width and height at the fitted scale must agree with
-        the body within two tolerances plus BODY_ALLOWANCE_MM.
+        When given, the rectangles drawn around the matched holes are
+        compared with it at the fitted scale (:func:`_body_check`): the
+        answer is ``body_check`` of the result. Only a rectangle with the
+        body's own proportions at another scale contradicts the reading
+        ("body_scale"), and only when no rectangle has the declared sizes
+        at the pads' scale; with one that has, the page shows two
+        candidates and verifies nothing (see :func:`_body_check` and the
+        decision table of the module docstring). A rectangle of other
+        proportions is not the body
+        and leaves the status as it is, with ``scale_verified`` False.
     @param hole_kinds Optional pad number -> "terminal" | "mounting" | "slot",
         what the reading DECLARED each pad's hole to be (the extractor
         passes the kinds of the chain reading's stops). A declared pad is
@@ -515,10 +752,18 @@ def check_pad_layout(images: Sequence[Path], pads_mm: Mapping[object, Sequence[f
         the page's scale, see ``scale_observable``); else "unverifiable"
         with the most informative reason ("too_few_pads" below MIN_PADS
         pads, "too_many_pads" above MAX_PADS, then "search_limit" >
-        "low_resolution" > "too_few_circles" > "no_round_holes" >
-        "not_a_drawing" > "no_image"). A pad whose reading lands inside a
-        closed non-circular contour (a slot, an outlined land) is
-        unverifiable, never a miss that contradicts.
+        "low_resolution" > "page_skewed" > "too_few_circles" >
+        "no_round_holes" > "unanchored" > "not_a_drawing" > "no_image").
+        A pad whose reading lands inside a closed non-circular contour (a
+        slot, an outlined land) is unverifiable, never a miss that
+        contradicts. "page_skewed": the pads fit only on a page turned by
+        more than MAX_ROTATION_DEG (deskew it); "unanchored": the pads fit
+        circles that are not all drawn like holes, with fewer than
+        MIN_WITNESS_PADS witness pads or only on a stretched page -- it
+        may be a coincidence (see :func:`_anchored_on_holes`).
+    @note A confirmation covers the proportions of the reading; whether it
+        covers its absolute scale is told by ``scale_verified`` (see
+        :class:`LayoutCheck`).
     @throws ValueError When a pad coordinate, a body size or a reference
         hole is not a finite number (a positive one for the body).
     @note Deterministic and local: no AI, no network, no millimetres derived
@@ -529,12 +774,15 @@ def check_pad_layout(images: Sequence[Path], pads_mm: Mapping[object, Sequence[f
     kinds = _required_kinds(list(pads_mm.keys()), hole_kinds)
     references = _validated_references(reference_holes_mm)
     observable = _affine_observable(points) if len(points) else False
+    # A body that no fit compared with an outline is "unverifiable", not "none".
+    unchecked = BODY_NONE if body is None else BODY_UNVERIFIABLE
     if len(points) < MIN_PADS:
-        return LayoutCheck(UNVERIFIABLE, "too_few_pads", None, None, None, 0, observable)
+        return LayoutCheck(UNVERIFIABLE, "too_few_pads", None, None, None, 0, observable, unchecked)
     if len(points) > MAX_PADS:
-        return LayoutCheck(UNVERIFIABLE, "too_many_pads", None, None, None, 0, observable)
+        return LayoutCheck(UNVERIFIABLE, "too_many_pads", None, None, None, 0, observable, unchecked)
 
     results: list[_ImageResult] = []
+    confirmed: _ImageResult | None = None
     for path in images:
         path = Path(path)
         if path.suffix.lower() not in IMAGE_SUFFIXES:
@@ -544,10 +792,21 @@ def check_pad_layout(images: Sequence[Path], pads_mm: Mapping[object, Sequence[f
             continue
         result = _check_image(path.name, analysis, points, body, kinds, references)
         if result.fit is not None and result.fit.stage == "confirmed":
-            return LayoutCheck(CONFIRMED, "confirmed", result.name, round(result.fit.max_error_mm, 4),
-                               round(result.fit.tolerance_mm, 4), result.circles, observable)
+            # The first confirming image decides, unless a body was given
+            # and that image could not tie it to an outline: a later image
+            # that confirms AND shows the body covers the scale as well.
+            if confirmed is None or result.fit.body_check == BODY_AGREES:
+                confirmed = result
+            if confirmed.fit.body_check in (BODY_NONE, BODY_AGREES):
+                break
+            continue
         results.append(result)
-    return _summarise(results, observable)
+    if confirmed is not None:
+        fit = confirmed.fit
+        return LayoutCheck(CONFIRMED, "confirmed", confirmed.name, round(fit.max_error_mm, 4),
+                           round(fit.tolerance_mm, 4), confirmed.circles, observable,
+                           fit.body_check, fit.body_check == BODY_AGREES)
+    return _summarise(results, observable, unchecked, list(pads_mm.keys()))
 
 
 def mirror_variants(pads_mm: Mapping[object, Sequence[float]]) -> list[dict]:
@@ -1518,6 +1777,22 @@ def _line_bands(mask: np.ndarray, horizontal: bool, min_length: int,
 def _outline_rect(mask: np.ndarray, circles: Sequence[_Circle]) -> tuple[float, float, float, float] | None:
     """Smallest drawn rectangle enclosing all the circles: (left, top, right, bottom) px, or None.
 
+    The first of :func:`_outline_rects`. It is A drawn rectangle, not
+    necessarily the body: nothing but its size against a declared body
+    (:func:`_judge_outline`) can tell a body outline from a keep-out
+    frame, a table cell or the page border.
+    """
+    return next(_outline_rects(mask, circles), None)
+
+
+def _outline_rects(mask: np.ndarray, circles: Sequence[_Circle]):
+    """Every drawn rectangle enclosing all the circles, smallest area first: (left, top, right, bottom) px.
+
+    A generator: the caller stops at the first rectangle it can use (the
+    body check asks which of them, if any, is the declared body, see
+    :func:`_body_check`); listing them all costs no more than finding that
+    none closes.
+
     Each side is a straight horizontal or vertical band lying outside every
     circle, and the four sides close into a rectangle (each side is measured
     between the centres of the two sides it meets). A side counts when:
@@ -1614,16 +1889,144 @@ def _outline_rect(mask: np.ndarray, circles: Sequence[_Circle]) -> tuple[float, 
         ya, yb = int(centre(t)), int(centre(b))
         if (side_ok(True, t, xa, xb) and side_ok(True, b, xa, xb)
                 and side_ok(False, l, ya, yb) and side_ok(False, r, ya, yb)):
-            return centre(l), centre(t), centre(r), centre(b)
-    return None
+            yield centre(l), centre(t), centre(r), centre(b)
 
 
-def _outline_around(mask: np.ndarray, circles: Sequence[_Circle]) -> tuple[float, float] | None:
-    """Width and height, px, of the smallest drawn rectangle enclosing all the circles (see :func:`_outline_rect`)."""
-    rect = _outline_rect(mask, circles)
-    if rect is None:
-        return None
-    return rect[2] - rect[0], rect[3] - rect[1]
+def _within_allowance(outline_px: tuple[float, float], body: tuple[float, float], scale: float,
+                      tolerance_px: float) -> bool:
+    """True when both sizes of a rectangle (width, height px) are the body's (mm) AT THE PADS' SCALE.
+
+    Each within two per-hole tolerances (the two edges of a side against a
+    scale that the pads fix no better than that) plus the proportional
+    drafting allowance BODY_SCALE_RATIO (:func:`body_allowance_mm`, in
+    pixels).
+
+    @note NECESSARY for an agreement, never sufficient (review finding
+        V1-1, 2026-11-11). The allowance is several percent of each size,
+        taken side by side: a clearance frame one margin outside the body
+        falls inside it for a whole range of wrongly scaled readings. Alone
+        it says "nothing excludes this size", not "this is the body"; what
+        else is drawn around the holes decides (:func:`_body_check`).
+    """
+    return all(abs(drawn - size * scale) <= 2 * tolerance_px + BODY_SCALE_RATIO * size * scale
+               for drawn, size in zip(outline_px, body))
+
+
+def _has_body_proportions(outline_px: tuple[float, float], body: tuple[float, float],
+                          drafting_ratio: float = 0.0) -> bool:
+    """True when ONE scale maps both body sizes (mm) onto a rectangle (width, height px).
+
+    Scale-free: nothing of the pads enters the test, so it holds or fails
+    whatever scale the reading was taken at.
+
+    - ``drafting_ratio`` 0 (the default): within the rectangle's own
+      measurement uncertainty alone (two edges of OUTLINE_EDGE_PX per
+      side). The rectangle has the declared proportions as exactly as it
+      can be measured: it is IDENTIFIED as the body.
+    - ``drafting_ratio`` BODY_SCALE_RATIO: each side may also be off its
+      quote by the drafting allowance, at that one scale. The rectangle
+      COULD be the body, drawn as loosely as the allowance admits; so could
+      a frame a small margin from it.
+    """
+    own = 2 * OUTLINE_EDGE_PX
+    # Scales (px per mm) at which each body size alone could be the drawn
+    # one: the proportions are the body's when the two ranges meet.
+    lowest = max((drawn - own) / (size * (1 + drafting_ratio)) for drawn, size in zip(outline_px, body))
+    highest = min((drawn + own) / (size * (1 - drafting_ratio)) for drawn, size in zip(outline_px, body))
+    return lowest <= highest
+
+
+# What ONE rectangle says about a declared body (:func:`_judge_outline`).
+# "Identified": the body's proportions within the measurement uncertainty.
+# "Loose": only within the drafting allowance. "Here": its sizes are the
+# body's at the pads' scale. "Elsewhere": they are not.
+_IDENTIFIED_HERE = "identified_here"
+_IDENTIFIED_ELSEWHERE = "identified_elsewhere"
+_LOOSE_HERE = "loose_here"
+_LOOSE_ELSEWHERE = "loose_elsewhere"
+
+
+def _judge_outline(outline_px: tuple[float, float], body: tuple[float, float], scale: float,
+                   tolerance_px: float) -> str | None:
+    """What ONE drawn rectangle (width, height px) says about a body size (mm), or None when nothing.
+
+    Two independent questions: does it have the body's PROPORTIONS
+    (:func:`_has_body_proportions`, scale-free, asked exactly and then
+    within the drafting allowance), and are its sizes the body's AT THE
+    PADS' SCALE (:func:`_within_allowance`)?
+
+    - _IDENTIFIED_HERE: exact proportions, sizes at the pads' scale.
+    - _IDENTIFIED_ELSEWHERE: exact proportions, at another scale than the
+      pads were read at.
+    - _LOOSE_HERE: sizes at the pads' scale, proportions off by more than
+      the measurement uncertainty. A body drawn loosely (the sample pages
+      draw bodies up to 1.5 % out of proportion) -- or a frame that happens
+      to fall inside the allowance of a wrongly scaled reading (V1-1).
+    - _LOOSE_ELSEWHERE: proportions within the drafting allowance only,
+      sizes not at the pads' scale. A loosely drawn body at another scale,
+      or a step or a frame a small margin from the body.
+    - None: other proportions altogether (a page frame, a table cell, a
+      keep-out area, the frame around a chamfered body; audit A9). A body
+      with ONE size misread falls here too: that is a mistake of the body
+      reading, which must not judge the pads.
+
+    @note Limits of the identification, declared. A rectangle that merely
+        shares the body's proportions is taken for the body: a square
+        frame around a square body that is not drawn as a rectangle, or a
+        frame a constant margin outside a nearly square body. The fewer
+        pixels the rectangle spans, the wider "the same proportions" is.
+        The body's POSITION against the pads would identify it far better;
+        the reading does not carry it to this module.
+    """
+    here = _within_allowance(outline_px, body, scale, tolerance_px)
+    if _has_body_proportions(outline_px, body):
+        return _IDENTIFIED_HERE if here else _IDENTIFIED_ELSEWHERE
+    if here:
+        return _LOOSE_HERE
+    return _LOOSE_ELSEWHERE if _has_body_proportions(outline_px, body, BODY_SCALE_RATIO) else None
+
+
+def _body_check(mask: np.ndarray, holes: Sequence[_Circle], body: tuple[float, float], scale: float,
+                tolerance_px: float) -> tuple[str, tuple[float, float, float, float] | None]:
+    """Compare a declared body with the rectangles drawn around the matched holes.
+
+    EVERY rectangle is judged (:func:`_judge_outline`) before anything is
+    decided, because the order they come in (smallest first) says nothing
+    about which one is the body. The decision table, with its reasons, is
+    in the module docstring ("Body check: the decision table"):
+
+    1. something at the pads' scale (identified or loose) and nothing
+       elsewhere: BODY_AGREES, with the rectangle at the pads' scale
+       nearest the declared sizes;
+    2. something at the pads' scale AND something elsewhere (identified or
+       loose): BODY_UNVERIFIABLE, no rectangle -- two candidates for the
+       body at two scales;
+    3. nothing at the pads' scale, one identified elsewhere:
+       BODY_CONTRADICTED, with the smallest such rectangle;
+    4. nothing at the pads' scale and none identified elsewhere (loose
+       elsewhere only, other proportions only, nothing drawn):
+       BODY_UNVERIFIABLE, no rectangle.
+    """
+    found: dict[str, list[tuple[float, float, float, float]]] = {
+        _IDENTIFIED_HERE: [], _IDENTIFIED_ELSEWHERE: [], _LOOSE_HERE: [], _LOOSE_ELSEWHERE: []}
+    for rect in _outline_rects(mask, holes):
+        verdict = _judge_outline((rect[2] - rect[0], rect[3] - rect[1]), body, scale, tolerance_px)
+        if verdict is not None:
+            found[verdict].append(rect)
+
+    def distance(rect: tuple[float, float, float, float]) -> float:
+        """Largest relative gap between a rectangle's sizes and the declared ones at the pads' scale."""
+        return max(abs(drawn - size * scale) / (size * scale)
+                   for drawn, size in zip((rect[2] - rect[0], rect[3] - rect[1]), body))
+
+    here = found[_IDENTIFIED_HERE] + found[_LOOSE_HERE]
+    if here:
+        if found[_IDENTIFIED_ELSEWHERE] or found[_LOOSE_ELSEWHERE]:
+            return BODY_UNVERIFIABLE, None
+        return BODY_AGREES, min(here, key=distance)
+    if found[_IDENTIFIED_ELSEWHERE]:
+        return BODY_CONTRADICTED, found[_IDENTIFIED_ELSEWHERE][0]
+    return BODY_UNVERIFIABLE, None
 
 
 # ---------------------------------------------------------------------------
@@ -1633,12 +2036,14 @@ def _outline_around(mask: np.ndarray, circles: Sequence[_Circle]) -> tuple[float
 def _hypothesis_assignments(points: np.ndarray, circles: Sequence[_Circle],
                             max_misses: int = 0,
                             gate_fraction: float = HYPOTHESIS_TOL_SPAN,
-                            kinds: Sequence[str | None] | None = None) -> list[np.ndarray]:
+                            kinds: Sequence[str | None] | None = None,
+                            max_rotation_deg: float = MAX_ROTATION_DEG + 2) -> list[np.ndarray]:
     """Circle assignments (one distinct circle per pad, -1 = none) proposed by similarity hypotheses.
 
     Each of the BASELINES longest pad pairs is mapped onto every ordered pair
-    of circles whose direction differs by at most MAX_ROTATION_DEG + 2 degrees
-    (no mirror: the reading is in page orientation). A hypothesis survives
+    of circles whose direction differs by at most ``max_rotation_deg``
+    (MAX_ROTATION_DEG + 2 degrees unless a skewed page is searched, see
+    :func:`_skewed_fit`; no mirror: the reading is in page orientation). A hypothesis survives
     only while at most ``max_misses`` pads project farther than the gate
     distance from every circle; pads are tested farthest-from-the-baseline
     first, so most hypotheses are dropped after a few pads. Cost:
@@ -1682,7 +2087,7 @@ def _hypothesis_assignments(points: np.ndarray, circles: Sequence[_Circle],
         i, j = int(pair_i[k]), int(pair_j[k])
         dq = q[j] - q[i]
         z = (centres[b_idx] - centres[a_idx]) / dq  # scale * exp(i rotation)
-        keep = np.abs(np.degrees(np.angle(z))) <= MAX_ROTATION_DEG + 2
+        keep = np.abs(np.degrees(np.angle(z))) <= max_rotation_deg
         # Two pads closer than two tolerances could share one circle's
         # neighbourhood: such a scale cannot tell pads apart.
         keep &= np.abs(z) * min_spacing >= 2 * TOLERANCE_PX
@@ -1804,23 +2209,87 @@ def _leave_one_out_px(points: np.ndarray, targets: np.ndarray) -> np.ndarray:
     return np.abs(c - (c_mean + gain * (q - q_mean)))
 
 
-def _stretch_displacement_mm(points: np.ndarray, linear: np.ndarray) -> float:
-    """Displacement, mm, that the affine part beyond a similarity implies on the reading.
+def _leave_one_out_affine_px(points: np.ndarray, targets: np.ndarray) -> np.ndarray:
+    """Displacement of each pad from where the AFFINE map fitted on the other pads puts it, px.
 
-    The fit cannot tell which axis is drawn to scale, so the anisotropy
-    (|sx / sy - 1|) and the shear (radians) are expressed as the
-    displacement they cause over the reading's SHORTER extent along the page
-    axes: the smaller of the two possible errors, i.e. the one the reading
-    must at least have. A whole X axis read 2.45 instead of 2.54 on a
-    2 x 20 header (3.5 %) is 0.27 mm over its 7.62 mm rows, while the
-    least-squares similarity would split it into +-0.14 mm.
+    The affine counterpart of :func:`_leave_one_out_px`, for a page that is
+    stretched within the allowed ratio: a stretch moves every pad by one
+    common linear map, a misread pad moves alone, and only fitting on the
+    others shows the difference (a least-squares affine fit of four pads
+    hides three quarters of one pad's error). Closed form: the ordinary
+    residual divided by one minus the pad's leverage; a pad the others do
+    not determine (leverage 1) gets an infinite displacement.
+    """
+    design = np.column_stack([points, np.ones(len(points))])
+    pseudo = np.linalg.pinv(design)
+    residual = np.linalg.norm(targets - design @ (pseudo @ targets), axis=1)
+    leverage = np.einsum("ij,ji->i", design, pseudo)
+    free = 1.0 - leverage
+    return np.where(free > 1e-9, residual / np.maximum(free, 1e-9), np.inf)
+
+
+def _stretch_ratio(linear: np.ndarray) -> float:
+    """Stretch of an affine map beyond a similarity, as a ratio: anisotropy |sx / sy - 1| plus shear (radians).
+
+    ``linear`` is the 2x2 linear part (reading mm -> px); sx and sy are the
+    scales it gives the reading's X and Y axes. A whole X axis read 2.45
+    instead of 2.54 on a 2 x 20 header shows as 3.5 % here, while the
+    least-squares similarity would split it into +-0.14 mm of residual.
     """
     sx, sy = float(np.linalg.norm(linear[:, 0])), float(np.linalg.norm(linear[:, 1]))
     cos_angle = float(linear[:, 0] @ linear[:, 1] / max(sx * sy, 1e-12))
     shear = abs(math.pi / 2 - math.acos(max(-1.0, min(1.0, abs(cos_angle)))))
-    anisotropy = abs(sx / max(sy, 1e-12) - 1)
-    extent = min(float(np.ptp(points[:, 0])), float(np.ptp(points[:, 1])))
-    return (anisotropy + shear) * extent
+    return abs(sx / max(sy, 1e-12) - 1) + shear
+
+
+def _allowed_stretch(points: np.ndarray, tolerance_mm: float) -> float:
+    """Largest stretch ratio (:func:`_stretch_ratio`) a fit may show before it is "distorted".
+
+    Two separate terms (audit A10):
+
+    - PAGE_STRETCH_RATIO, what the page itself may be stretched by: a
+      ratio, the same for a small and a large part;
+    - the accuracy with which THESE pads can show a stretch at all: the
+      per-hole tolerance over the spread of the reading across its main
+      direction (second singular value of the centred pads, mm: the root
+      of the summed squared offsets from the main axis). That is the
+      standard error of a fitted scale, with the tolerance in the place of
+      the noise; it shrinks as pads are added, so a 2 x 20 header shows a
+      stretch far more finely than four pads of the same extent.
+
+    The first term is a declared heuristic (see the constant), the second
+    is derived from the fit.
+    """
+    spread = float(np.linalg.svd(points - points.mean(axis=0), compute_uv=False)[1])
+    return PAGE_STRETCH_RATIO + tolerance_mm / max(spread, 1e-9)
+
+
+def _anchored_on_holes(n_pads: int, holes: Sequence[_Circle], stretched: bool) -> bool:
+    """True when the circles of a fit may confirm it.
+
+    Any circle may confirm a reading (a hole drawn with a label close by is
+    still a hole), except in the two fits a coincidence satisfies most
+    easily, where every circle must be drawn like a hole:
+
+    - fewer than MIN_WITNESS_PADS witness pads (two pads fix the
+      similarity, every further pad is a witness): three pads;
+    - ``stretched``: the pads fit only on a stretched page (step 3 of
+      :func:`_fit_assignment`), the freest fit of this module, six
+      parameters instead of four. A page of text is a lattice of glyph
+      counters on which a reading on a regular grid fits with a little
+      stretch; the stretch of a page is believed only where it is
+      measured on drawn holes.
+
+    Evidence of the circles is preferred to uniqueness among the
+    alternative fits: a chance fit on glyph counters is usually the ONLY
+    fit of a wrong reading, so uniqueness would let it through, and it
+    would refuse a correct reading on a page that draws the pattern twice;
+    what the pads sit on is the thing in doubt, and evidence is what this
+    module already asks of a circle before it may contradict a reading.
+    """
+    if stretched or n_pads - 2 < MIN_WITNESS_PADS:
+        return all(c.evidence for c in holes)
+    return True
 
 
 def _affine_observable(points: np.ndarray) -> bool:
@@ -1838,20 +2307,106 @@ def _tolerance_mm(scale: float) -> float:
     return max(MIN_TOLERANCE_MM, TOLERANCE_PX / max(scale, 1e-9))
 
 
+def _single_misplaced(points: np.ndarray, targets: np.ndarray, tolerance_px: float) -> int | None:
+    """Index of the ONE pad of a refused fit that no stretch of the page explains, else None.
+
+    A page stretched by its scan or redrawn not to scale moves EVERY pad by
+    one linear map, by an amount proportional to the pad's position: one
+    affine map fits the whole reading with residuals at the per-hole noise.
+    A misplaced pad moves alone: no affine map of the whole set absorbs it,
+    and the other pads fit the page with no stretch at all. Three conditions,
+    each with the per-hole tolerance of the fit and nothing else (no
+    proportional allowance: the stretch allowance of :func:`_allowed_stretch`
+    grows as pads are removed, so a subset of a stretched page passes it
+    where the whole set does not -- review V3-1, 2026-11-11):
+
+    (i) the whole set is NOT an affine image of the drawn holes: some pad
+        lies beyond the tolerance from where the affine map fitted on the
+        OTHER pads puts it (:func:`_leave_one_out_affine_px`; a pad the
+        others do not determine says nothing and is ignored);
+    (ii) exactly one pad whose removal leaves pads that fit a SIMILARITY
+        (uniform scale, rotation, translation) within the tolerance, each
+        measured against the others (:func:`_leave_one_out_px`, the test of
+        step 1 of :func:`_fit_assignment`), the tolerance taken at the scale
+        of that fit;
+    (iii) those remaining pads can show a stretch (:func:`_affine_observable`:
+        AFFINE_MIN_PADS pads, not nearly collinear). Without it a similarity
+        fit of the rest proves nothing about the page's scale across them,
+        and the lone pad may only be the stretch seen where the rest cannot
+        show it. AFFINE_MIN_PADS = 4 is also 2 + MIN_WITNESS_PADS: two pads
+        fix a similarity and each further one is an independent witness of
+        it, so the whole reading needs at least five pads.
+
+    Two or more pads satisfying (ii) leave the culprit unknown: None.
+
+    @param points Reading pads (n, 2), mm.
+    @param targets Centres of the circles assigned to them (n, 2), px.
+    @param tolerance_px Per-hole tolerance of the whole fit, px.
+    @return The pad index, or None when the refusal may be the page's.
+    """
+    count = len(points)
+    if count < AFFINE_MIN_PADS + 1:
+        return None
+    stretched = _leave_one_out_affine_px(points, targets)
+    if not bool((np.isfinite(stretched) & (stretched > tolerance_px)).any()):
+        return None
+    singled = []
+    for index in range(count):
+        keep = np.arange(count) != index
+        rest, rest_targets = points[keep], targets[keep]
+        if not _affine_observable(rest):
+            continue
+        scale = _fit_similarity(rest, rest_targets).scale
+        if _leave_one_out_px(rest, rest_targets).max() <= _tolerance_mm(scale) * scale:
+            singled.append(index)
+    return singled[0] if len(singled) == 1 else None
+
+
 def _fit_assignment(points: np.ndarray, circles: Sequence[_Circle], assign: np.ndarray,
-                    mask: np.ndarray, body: tuple[float, float] | None) -> _Fit:
+                    mask: np.ndarray, body: tuple[float, float] | None, *,
+                    anchoring: bool = True, outlines: dict | None = None) -> _Fit:
     """Fit one complete assignment and classify it.
 
-    The verdict is a displacement test: the reading, mapped onto the page by
-    a similarity (uniform scale, rotation, translation, no mirror) fitted on
-    the other pads, must put every pad within the tolerance of its circle
-    (see :func:`_leave_one_out_px`; max_error_mm reports it). The affine fit
-    is used only (a) to bound the stretch and shear the drawing would need,
-    expressed as a displacement (see :func:`_stretch_displacement_mm`) and
-    held to the same tolerance, and (b) to call a failed reading "distorted"
-    when a stretch or shear explains it (a drawing not to scale, or a whole
-    axis read wrong) rather than "no_match". Three pads are checked by the
-    similarity alone: an affine map fits any three points exactly.
+    The error budget has two separate terms (audit A10, 2026-11-10): the
+    PER-HOLE tolerance in pixels (:func:`_tolerance_mm`) and the
+    PROPORTIONAL stretch of the page as a ratio (:func:`_allowed_stretch`).
+
+    1. Displacement test. The reading, mapped onto the page by a similarity
+       (uniform scale, rotation, translation, no mirror) fitted on the
+       other pads, must put every pad within the tolerance of its circle
+       (:func:`_leave_one_out_px`; max_error_mm reports it).
+    2. Stretch. When the pads can show one (:func:`_affine_observable`),
+       the affine map fitted on them must not mirror and its stretch
+       (:func:`_stretch_ratio`) must stay within the allowed ratio; else
+       the reading is "distorted" (a drawing not to scale, or a whole axis
+       read wrong).
+    3. A reading that fails 1 but whose pads show a stretch within the
+       allowed ratio is judged on the stretched page: every pad within the
+       tolerance of where the AFFINE map fitted on the other pads puts it
+       (:func:`_leave_one_out_affine_px`; max_error_mm then reports that),
+       and every circle must be drawn like a hole (step 5).
+       This is what lets a large or finely scanned part pass under the scan
+       stretch of a real page. A failed reading that an affine map explains
+       otherwise (beyond the ratio, or only when fitted on all pads) is
+       "distorted", any other "no_match". Fewer than AFFINE_MIN_PADS pads,
+       or nearly collinear ones, get no proportional allowance: they cannot
+       show a stretch, so nothing tells it from a misread pad.
+    4. Rotation beyond MAX_ROTATION_DEG: "page_skewed" (the fit removed the
+       rotation; the page must be deskewed before it can confirm).
+    5. Resolution ("low_resolution"), then the circles of the fit
+       ("unanchored", see :func:`_anchored_on_holes`): those of a fit with
+       too few witness pads (only with ``anchoring``), and those of a fit
+       on a stretched page.
+    6. With a body, the rectangles drawn around the holes
+       (:func:`_body_check`): "body_scale" when one has the body's
+       proportions at another scale and none has its sizes at this one;
+       the answer is carried in ``body_check`` either way.
+
+    ``anchoring`` False skips the witness rule: for the anchored subset of
+    a move, which must show the page's scale and therefore holds at least
+    AFFINE_MIN_PADS pads. ``outlines`` is an optional memo of the body check
+    per set of circles (the rectangles around a set of holes do not depend
+    on which pad sits on which).
     """
     targets = np.array([(circles[k].x, circles[k].y) for k in assign], float)
     sim = _fit_similarity(points, targets)
@@ -1859,40 +2414,93 @@ def _fit_assignment(points: np.ndarray, circles: Sequence[_Circle], assign: np.n
     tolerance = _tolerance_mm(sim.scale)
     tolerance_px = tolerance * sim.scale
     max_error = float(residual_px.max() / sim.scale)
-    affine = _affine_observable(points)
-    if residual_px.max() > tolerance_px:
-        if affine:
-            affine_projected, linear = _fit_affine(points, targets)
-            if (np.linalg.det(linear) > 0
-                    and np.linalg.norm(targets - affine_projected, axis=1).max() <= tolerance_px):
-                return _Fit("distorted", max_error, tolerance)
-        return _Fit("no_match", max_error, tolerance)
-    if affine:
-        _, linear = _fit_affine(points, targets)
-        if np.linalg.det(linear) <= 0 or _stretch_displacement_mm(points, linear) > tolerance:
-            return _Fit("distorted", max_error, tolerance)
+    # A body no outline was compared with: the fit stopped before step 6.
+    unchecked = BODY_NONE if body is None else BODY_UNVERIFIABLE
+    within_ratio = stretched = False
+    # The stretch this fit shows, carried by its confirmation (None: the
+    # pads cannot show one); see _Fit.stretch.
+    shown_stretch = None
+    if _affine_observable(points):
+        affine_projected, linear = _fit_affine(points, targets)
+        proper = bool(np.linalg.det(linear) > 0)
+        shown_stretch = _stretch_ratio(linear)
+        within_ratio = proper and shown_stretch <= _allowed_stretch(points, tolerance)
+        if residual_px.max() > tolerance_px:
+            # A refusal of a reading that can show the page's stretch says,
+            # when it can, which one pad no stretch explains.
+            misplaced = _single_misplaced(points, targets, tolerance_px)
+            if not proper or np.linalg.norm(targets - affine_projected, axis=1).max() > tolerance_px:
+                return _Fit("no_match", max_error, tolerance, unchecked, misplaced)
+            stretched_px = _leave_one_out_affine_px(points, targets)
+            if not within_ratio or stretched_px.max() > tolerance_px:
+                # The stretch is carried for the caller (LayoutCheck.stretch_ratio).
+                return _Fit("distorted", max_error, tolerance, unchecked, misplaced,
+                            stretch=shown_stretch)
+            max_error = float(stretched_px.max() / sim.scale)
+            stretched = True
+        elif not within_ratio:
+            # Every pad within the tolerance of a similarity fitted on the
+            # others: no pad stands out, only the page's shape is refused.
+            return _Fit("distorted", max_error, tolerance, unchecked, stretch=shown_stretch)
+    elif residual_px.max() > tolerance_px:
+        return _Fit("no_match", max_error, tolerance, unchecked)
     if abs(sim.rotation_deg) > MAX_ROTATION_DEG:
-        return _Fit("distorted", max_error, tolerance)
+        return _Fit(PAGE_SKEWED, max_error, tolerance, unchecked)
     if tolerance > LOW_RESOLUTION_FRACTION * _min_spacing_mm(points):
-        return _Fit("low_resolution", max_error, tolerance)
-    if body is not None:
-        outline = _outline_around(mask, [circles[k] for k in assign])
-        if outline is not None and _body_disagrees(outline, body, sim.scale, tolerance_px):
-            return _Fit("body_scale", max_error, tolerance)
-    return _Fit("confirmed", max_error, tolerance)
+        return _Fit("low_resolution", max_error, tolerance, unchecked)
+    holes = [circles[k] for k in assign]
+    # Without ``anchoring`` the witness rule is waived (pad count taken as
+    # sufficient); a fit on a stretched page is held to its circles anyway.
+    if not _anchored_on_holes(len(points) if anchoring else MIN_WITNESS_PADS + 2, holes, stretched):
+        return _Fit(UNANCHORED, max_error, tolerance, unchecked)
+    if body is None:
+        return _Fit("confirmed", max_error, tolerance, BODY_NONE, stretch=shown_stretch)
+    key = (frozenset(int(k) for k in assign), round(sim.scale, 6), round(tolerance_px, 6))
+    if outlines is not None and key in outlines:
+        verdict = outlines[key]
+    else:
+        verdict, _rect = _body_check(mask, holes, body, sim.scale, tolerance_px)
+        if outlines is not None:
+            outlines[key] = verdict
+    stage = "body_scale" if verdict == BODY_CONTRADICTED else "confirmed"
+    return _Fit(stage, max_error, tolerance, verdict, stretch=shown_stretch)
 
 
-def _body_disagrees(outline_px: tuple[float, float], body: tuple[float, float], scale: float,
-                    tolerance_px: float) -> bool:
-    """True when a drawn outline (width, height px) and a body size (mm) differ beyond the allowance.
+def body_allowance_mm(size_mm: float, tolerance_mm: float) -> float:
+    """@brief How far a drawn body side may be from its quoted size and still agree with it, mm.
 
-    The outline width is the distance between two drawn edges, each placed
-    within the tolerance: their difference may reach two tolerances, plus
-    the drafting allowance of a body outline (BODY_ALLOWANCE_MM).
+    @param size_mm The quoted size of that side, mm.
+    @param tolerance_mm Per-hole tolerance of the fit, mm (``LayoutCheck.tolerance_mm``).
+    @return Two tolerances (the two drawn edges of the side) plus
+        BODY_SCALE_RATIO of the size (the drafting allowance, proportional).
+    @note The one definition of the allowance of the body check
+        (:func:`_within_allowance` applies it in pixels), for callers and
+        tests that need to reason about it.
     """
-    allowed = 2 * tolerance_px + BODY_ALLOWANCE_MM * scale
-    return (abs(outline_px[0] - body[0] * scale) > allowed
-            or abs(outline_px[1] - body[1] * scale) > allowed)
+    return 2 * float(tolerance_mm) + BODY_SCALE_RATIO * float(size_mm)
+
+
+def body_axes_distinguishable(body_mm: Sequence[float], tolerance_mm: float | None) -> bool:
+    """@brief Whether a drawn outline can tell which of two body sizes runs along which page axis.
+
+    @param body_mm The two plan sizes of the body, mm, in any order.
+    @param tolerance_mm Residual tolerance of the fit, mm (``LayoutCheck.tolerance_mm``);
+        None when no fit was made.
+    @return True when the two sizes differ by more than the sum of their
+        two allowances (:func:`body_allowance_mm`).
+    @note Derived from the check, not tuned: a drawn side agrees with a
+        size within that size's allowance, so two sizes closer than the sum
+        of their allowances can both agree with the same drawn side and
+        the outline says nothing about their order. A caller that tests
+        the body the other way round must not read an agreement as a
+        measure below this separation. The allowance is necessary for an
+        agreement, not sufficient (:func:`_body_check`), so above this
+        separation two orders still cannot both agree.
+    """
+    if tolerance_mm is None:
+        return False
+    first, second = (float(v) for v in body_mm)
+    return abs(first - second) > body_allowance_mm(first, tolerance_mm) + body_allowance_mm(second, tolerance_mm)
 
 
 class _BudgetExceeded(Exception):
@@ -2086,9 +2694,44 @@ def clear_analysis_cache() -> None:
 
 
 def _better(fit: _Fit, best: _Fit | None) -> bool:
-    """True when ``fit`` got further through the checks than ``best``."""
-    return best is None or (_STAGES.index(fit.stage), -fit.max_error_mm) > \
-        (_STAGES.index(best.stage), -best.max_error_mm)
+    """True when ``fit`` got further through the checks than ``best``.
+
+    At the same stage a fit whose body outline agrees comes first (a
+    confirmation that also covers the scale), then the smaller error.
+    """
+    def rank(item: _Fit) -> tuple:
+        """Stage, body agreement, then smaller error."""
+        return _STAGES.index(item.stage), item.body_check == BODY_AGREES, -item.max_error_mm
+
+    return best is None or rank(fit) > rank(best)
+
+
+def _skewed_fit(points: np.ndarray, circles: Sequence[_Circle], mask: np.ndarray,
+                kinds: Sequence[str | None] | None, references: np.ndarray) -> _Fit | None:
+    """The fit of a reading on a page turned beyond MAX_ROTATION_DEG, or None.
+
+    Run when nothing fits upright (audit A10): the hypotheses are searched
+    again with the rotation free up to MAX_SKEW_DEG, and an assignment that
+    passes every pad test there is a reading on a skewed page, reported
+    "page_skewed" instead of contradicted. Only for a reading that can show
+    the page's stretch (:func:`_affine_observable`): the failure of any
+    other is "no_match_unobservable", which contradicts nothing, and three
+    pads would find a rotated chance fit on most crowded pages.
+
+    @note At most MAX_ASSIGNMENTS assignments are fitted, upright ones
+        first, so on a page crowded with circles a skewed fit can be
+        missed and the reading stay "no_match".
+    """
+    if not _affine_observable(points):
+        return None
+    for assign in _hypothesis_assignments(points, circles, kinds=kinds,
+                                          max_rotation_deg=MAX_SKEW_DEG)[:MAX_ASSIGNMENTS]:
+        if _on_reference(points, circles, assign, references):
+            continue
+        fit = _fit_assignment(points, circles, assign, mask, None)
+        if fit.stage == PAGE_SKEWED:
+            return fit
+    return None
 
 
 def _on_reference(points: np.ndarray, circles: Sequence[_Circle], assign: np.ndarray,
@@ -2124,33 +2767,76 @@ def _check_image(name: str, analysis: _Analysis, points: np.ndarray,
     if len(circles) < len(points):
         return _ImageResult(name, True, len(circles), None, hole_like)
     best: _Fit | None = None
+    outlines: dict = {}
     for assign in _hypothesis_assignments(points, circles, kinds=kinds)[:MAX_ASSIGNMENTS]:
         if _on_reference(points, circles, assign, references):
             continue
-        fit = _fit_assignment(points, circles, assign, mask, body)
+        fit = _fit_assignment(points, circles, assign, mask, body, outlines=outlines)
         if _better(fit, best):
             best = fit
-        if best.stage == "confirmed":
-            return _ImageResult(name, True, len(circles), best, hole_like)
+        # A confirmation ends the search, unless a body was given and this
+        # fit could not tie it to an outline: another fit (the same pattern
+        # drawn in another view of the page) may still do so.
+        if best.stage == "confirmed" and best.body_check in (BODY_NONE, BODY_AGREES):
+            break
+    if best is not None and best.stage == "confirmed":
+        return _ImageResult(name, True, len(circles), best, hole_like)
     if best is None or best.stage == "no_match":
         # Second pass with a wide gate: a reading that fits only after a
         # stretch (drawing not to scale, a whole axis read wrong) is
         # reported "distorted", which is a stronger statement than
         # "no_match" and must not be lost to the narrow confirmation gate.
+        # A fit of this pass that CONFIRMS is a confirmation (review V3-1,
+        # 2026-11-11): the gate only proposes assignments, the fit judges
+        # them, and the stretch the fit accepts on a small part
+        # (_allowed_stretch: PAGE_STRETCH_RATIO + tolerance / spread) can
+        # exceed the narrow gate's HYPOTHESIS_TOL_SPAN, so a correct reading
+        # on a page stretched by about 6 % was proposed only here and,
+        # dropped, ended as a "no_match" with no fit at all. A fit on a
+        # stretched page still needs every circle drawn like a hole
+        # (step 5 of _fit_assignment), the guard against chance fits.
+        # Review V4-3 (2026-11-11): the confirmation of this pass is capped
+        # at the narrow gate's span. The stretch _allowed_stretch accepts on
+        # a small part (its tolerance / spread term) reached 6-7 %, and a
+        # reading with a whole axis WRONG by that much (pitch 2.54 read on
+        # holes drawn at 2.72, a row spacing 7 % short) was confirmed here.
+        # A fit whose stretch exceeds HYPOTHESIS_TOL_SPAN -- what the narrow
+        # gate would let through -- is reported "distorted" instead: the
+        # wide search may find a fit the narrow one missed, never confirm
+        # a stretch the narrow one would refuse.
         for assign in _hypothesis_assignments(points, circles, gate_fraction=DISTORTION_GATE,
                                               kinds=kinds)[:MAX_ASSIGNMENTS]:
             if _on_reference(points, circles, assign, references):
                 continue
-            fit = _fit_assignment(points, circles, assign, mask, body)
-            if fit.stage != "confirmed" and _better(fit, best):
+            fit = _fit_assignment(points, circles, assign, mask, body, outlines=outlines)
+            if (fit.stage == "confirmed" and fit.stretch is not None
+                    and fit.stretch > HYPOTHESIS_TOL_SPAN):
+                fit = replace(fit, stage="distorted",
+                              body_check=BODY_NONE if body is None else BODY_UNVERIFIABLE)
+            if _better(fit, best):
                 best = fit
-    if best is not None and best.stage == "low_resolution":
+            if best.stage == "confirmed" and best.body_check in (BODY_NONE, BODY_AGREES):
+                break
+        if best is not None and best.stage == "confirmed":
+            return _ImageResult(name, True, len(circles), best, hole_like)
+    if best is None or best.stage == "no_match":
+        # Still nothing: a page turned beyond the upright window is not a
+        # wrong reading.
+        skewed = _skewed_fit(points, circles, mask, kinds, references)
+        if skewed is not None:
+            best = replace(skewed, body_check=BODY_NONE if body is None else BODY_UNVERIFIABLE)
+    if best is not None and best.stage in ("low_resolution", PAGE_SKEWED):
         return _ImageResult(name, True, len(circles), best, hole_like)
     # Every circle may confirm (a hole drawn with a label close by is still a
     # hole), but only circles drawn like holes may contradict: a page whose
     # circles are glyph counters says nothing against the reading.
     if hole_like < len(points):
         return _ImageResult(name, True, len(circles), None, hole_like)
+    if best is not None and best.stage == UNANCHORED:
+        # The pads do fit, on circles that cannot vouch for them: said as
+        # such, after the page-level reasons above (a page with too few
+        # circles drawn like holes is the more telling answer).
+        return _ImageResult(name, True, len(circles), best, hole_like)
     if best is None or best.stage == "no_match":
         # Nothing fits: before calling the reading wrong, check whether a hole
         # the detector missed, or a closed contour that is not a circle (a
@@ -2170,15 +2856,22 @@ def _check_image(name: str, analysis: _Analysis, points: np.ndarray,
     return _ImageResult(name, True, len(circles), best, hole_like)
 
 
-def _summarise(results: Sequence[_ImageResult], observable: bool = False) -> LayoutCheck:
+def _summarise(results: Sequence[_ImageResult], observable: bool = False,
+               unchecked: str = BODY_NONE, keys: Sequence[object] | None = None) -> LayoutCheck:
     """Choose the overall non-confirmed answer from the per-image results.
 
     "not_confirmed" needs an image whose reading reached a contradicting
     stage (no_match, distorted, body_scale); a "no_match" of a reading that
     cannot show the page's scale (``observable`` False) is reported as
     "no_match_unobservable". Otherwise the most informative unverifiable
-    reason wins: search_limit > low_resolution > too_few_circles >
-    no_round_holes > not_a_drawing > no_image.
+    reason wins: search_limit > low_resolution > page_skewed > unanchored
+    > too_few_circles > no_round_holes > not_a_drawing > no_image (within
+    one image "unanchored" comes after the last two, see
+    :func:`_check_image`). ``unchecked`` is the ``body_check`` of an
+    answer no fit carries one for (BODY_UNVERIFIABLE when a body was given,
+    else BODY_NONE); ``scale_verified`` is never True here. ``keys`` are the
+    pad keys of the reading, in the order of its points: the decisive fit's
+    ``misplaced`` index is reported as its key (``misplaced_pad``).
     """
     def rounded(value: float) -> float | None:
         """Finite values rounded to 0.1 um, others None."""
@@ -2189,22 +2882,31 @@ def _summarise(results: Sequence[_ImageResult], observable: bool = False) -> Lay
         decisive = max(contradicting, key=lambda r: (_STAGES.index(r.fit.stage), -r.fit.max_error_mm))
         fit = decisive.fit
         reason = NO_MATCH_UNOBSERVABLE if fit.stage == "no_match" and not observable else fit.stage
+        body_check = BODY_CONTRADICTED if fit.stage == "body_scale" else unchecked
+        # The pad the decisive fit singles out (_single_misplaced), by key.
+        misplaced = (keys[fit.misplaced] if keys is not None and fit.misplaced is not None
+                     else None)
+        # The stretch a "distorted" refusal needed (None for any other stage).
+        stretch = (rounded(fit.stretch) if fit.stage == "distorted" and fit.stretch is not None
+                   else None)
         return LayoutCheck(NOT_CONFIRMED, reason, decisive.name, rounded(fit.max_error_mm),
-                           rounded(fit.tolerance_mm), decisive.circles, observable)
-    for reason in ("search_limit", "low_resolution"):
+                           rounded(fit.tolerance_mm), decisive.circles, observable, body_check,
+                           misplaced_pad=misplaced, stretch_ratio=stretch)
+    for reason in _UNJUDGED:
         flagged = [r for r in results if r.fit is not None and r.fit.stage == reason]
         if flagged:
             decisive = flagged[0]
             return LayoutCheck(UNVERIFIABLE, reason, decisive.name, rounded(decisive.fit.max_error_mm),
-                               rounded(decisive.fit.tolerance_mm), decisive.circles, observable)
+                               rounded(decisive.fit.tolerance_mm), decisive.circles, observable, unchecked)
     drawings = [r for r in results if r.drawing]
     if drawings:
         decisive = max(drawings, key=lambda r: (r.hole_like, r.circles))
         reason = "too_few_circles" if decisive.hole_like else NO_ROUND_HOLES
-        return LayoutCheck(UNVERIFIABLE, reason, decisive.name, None, None, decisive.circles, observable)
+        return LayoutCheck(UNVERIFIABLE, reason, decisive.name, None, None, decisive.circles, observable,
+                           unchecked)
     if results:
-        return LayoutCheck(UNVERIFIABLE, "not_a_drawing", None, None, None, 0, observable)
-    return LayoutCheck(UNVERIFIABLE, "no_image", None, None, None, 0, observable)
+        return LayoutCheck(UNVERIFIABLE, "not_a_drawing", None, None, None, 0, observable, unchecked)
+    return LayoutCheck(UNVERIFIABLE, "no_image", None, None, None, 0, observable, unchecked)
 
 
 # ---------------------------------------------------------------------------
@@ -2230,7 +2932,13 @@ class MeasuredLayout:
     @note ``scale_observable`` (2026-11-04) says whether the anchored pads
         could show the page's stretch and shear (see
         :func:`_affine_observable`); a pad is moved only when they could
-        and showed none.
+        and showed none beyond the allowed ratio (PAGE_STRETCH_RATIO).
+    @note ``body_check`` and ``scale_verified`` (2026-11-10) are those of
+        :class:`LayoutCheck`, for the completed layout: the positions are
+        tied to an absolute size only when ``scale_verified`` is True (a
+        drawn outline agrees with the body given); a contradicting outline
+        refuses the layout ("body_scale"), so ``body_check`` is never
+        "contradicted" here.
     """
 
     positions_mm: dict
@@ -2241,6 +2949,8 @@ class MeasuredLayout:
     tolerance_mm: float
     image: str
     scale_observable: bool = False
+    body_check: str = BODY_NONE
+    scale_verified: bool = False
 
 
 @dataclass(frozen=True)
@@ -2254,8 +2964,12 @@ class MeasureOutcome:
         (several anchorings, or several free holes for the missing pad),
         "scale_unobservable" (the anchored pads cannot show the page's
         stretch: fewer than AFFINE_MIN_PADS or nearly collinear),
-        "distorted" (the anchored pads fit only with a stretch, shear or
-        rotation beyond the limit: the page is not to scale), "hole_kind"
+        "distorted" (the anchored pads fit only with a stretch or shear
+        beyond the allowed ratio: the page is not to scale), "page_skewed"
+        (they fit only on a page turned by more than MAX_ROTATION_DEG),
+        "unanchored" (the pads fit circles that are not all drawn like
+        holes, with three pads only or on a stretched page, see
+        :func:`_anchored_on_holes`), "hole_kind"
         (the only free hole is of another kind than the pad's declared kind
         or than the anchored pads' holes), "not_a_hole" (the only free
         circle is not drawn like a hole), "no_free_hole" (no free circle of
@@ -2278,7 +2992,8 @@ _AMBIGUOUS = "ambiguous"
 # Refusal codes of one image, most informative first: the code of the
 # anchoring that got furthest is reported when nothing is measured.
 _REFUSALS = ("mirror", "body_scale", "low_resolution", "no_match", "ambiguous", "hole_kind",
-             "not_a_hole", "no_free_hole", "distorted", "scale_unobservable", "no_fit")
+             "not_a_hole", "no_free_hole", "distorted", PAGE_SKEWED, "scale_unobservable",
+             UNANCHORED, "no_fit")
 
 
 def measured_layout(images: Sequence[Path], pads_mm: Mapping[object, Sequence[float]],
@@ -2433,14 +3148,22 @@ def _layout_candidates(points: np.ndarray, circles: Sequence[_Circle], mask: np.
             continue
         missing = np.nonzero(assign < 0)[0]
         if missing.size == 0:
-            if _fit_assignment(points, circles, assign, mask, None).stage == "confirmed":
+            stage = _fit_assignment(points, circles, assign, mask, None).stage
+            if stage == "confirmed":
                 full.add(tuple(int(v) for v in assign))
+            elif stage in (PAGE_SKEWED, UNANCHORED):
+                # The reading fits as it is, but the image cannot vouch for
+                # it: named, so the caller does not read "nothing fits".
+                refusals.add(stage)
             continue
         pad = int(missing[0])
         anchored = np.nonzero(assign >= 0)[0]
         if len(anchored) < MIN_PADS:
             continue
-        stage = _fit_assignment(points[anchored], circles, assign[anchored], mask, None).stage
+        # The witness rule is for whole readings: an anchoring that may
+        # move a pad must show the page's scale, which takes more pads.
+        stage = _fit_assignment(points[anchored], circles, assign[anchored], mask, None,
+                                anchoring=False).stage
         if stage != "confirmed":
             refusals.add(stage if stage in _REFUSALS else "no_fit")
             continue
@@ -2508,7 +3231,8 @@ def _stretched_anchorings(points: np.ndarray, circles: Sequence[_Circle], mask: 
         for anchored in subsets:
             if len(anchored) < MIN_PADS or not _affine_observable(points[anchored]):
                 continue
-            if _fit_assignment(points[anchored], circles, assign[anchored], mask, None).stage == "distorted":
+            if _fit_assignment(points[anchored], circles, assign[anchored], mask, None,
+                               anchoring=False).stage == "distorted":
                 return {"distorted"}
     return set()
 
@@ -2552,7 +3276,7 @@ def _measure_image(name: str, analysis: _Analysis, points: np.ndarray, keys: lis
         assign = np.array(complete)
     measured = _measured_points(points, circles, assign, pad)
     anchored = [p for p in range(len(points)) if p != pad]
-    anchored_fit = _fit_assignment(points[anchored], circles, assign[anchored], mask, None)
+    anchored_fit = _fit_assignment(points[anchored], circles, assign[anchored], mask, None, anchoring=False)
     if pad is not None:
         # A reading of the other face (mirrored about a page axis, the same
         # flips as mirror_variants) that also fits is a second explanation.
@@ -2576,9 +3300,9 @@ def _measure_image(name: str, analysis: _Analysis, points: np.ndarray, keys: lis
     if pad is not None:
         final[pad] = measured[pad]
     # The completed layout must pass the whole check, body outline included.
-    stage = _fit_assignment(final, circles, assign, mask, body).stage
-    if stage != "confirmed":
-        return None, stage if stage in _REFUSALS else "no_fit"
+    final_fit = _fit_assignment(final, circles, assign, mask, body)
+    if final_fit.stage != "confirmed":
+        return None, final_fit.stage if final_fit.stage in _REFUSALS else "no_fit"
 
     def pair(row: np.ndarray) -> tuple[float, float]:
         """Point rounded to 0.01 mm, without negative zero."""
@@ -2594,6 +3318,8 @@ def _measure_image(name: str, analysis: _Analysis, points: np.ndarray, keys: lis
         tolerance_mm=round(anchored_fit.tolerance_mm, 4),
         image=name,
         scale_observable=_affine_observable(points[anchored]),
+        body_check=final_fit.body_check,
+        scale_verified=final_fit.body_check == BODY_AGREES,
     ), None
 
 
@@ -2645,8 +3371,9 @@ def measured_outline(images: Sequence[Path], pads_mm: Mapping[object, Sequence[f
     The reading is matched to the drawn holes exactly as by
     :func:`check_pad_layout` without a body: the first assignment whose fit
     is confirmed (displacement test, stretch and shear, rotation,
-    resolution) decides. The smallest rectangle drawn around ITS holes,
-    solid or dashed/dotted (see :func:`_outline_rect`), is then mapped back
+    resolution) decides. A rectangle drawn around ITS holes, solid or
+    dashed/dotted (see :func:`_outline_rects`) -- the smallest one, or with
+    ``body_mm`` the one identified as that body -- is then mapped back
     into the reading's mm frame through the inverse of the similarity fitted
     on all the pads. Each edge is the mean of its two mapped corners (the
     fit may rotate the page by up to MAX_ROTATION_DEG).
@@ -2655,23 +3382,32 @@ def measured_outline(images: Sequence[Path], pads_mm: Mapping[object, Sequence[f
     @param pads_mm Pad key -> (x, y) mm AS SEEN ON THE PAGE (X right, Y
         down, arbitrary origin); the outline comes back in this frame.
     @param body_mm Optional (length along page X, width along page Y) mm;
-        when given, the outline's width and height must agree with it
-        within two fit tolerances plus BODY_ALLOWANCE_MM, as in the body
-        check of :func:`check_pad_layout`.
+        when given, the outline returned is the rectangle the body check
+        of :func:`check_pad_layout` identifies as that body and finds
+        agreeing with it (:func:`_body_check`: within two fit tolerances
+        plus BODY_SCALE_RATIO of each size; of several agreeing ones, the
+        nearest to the declared sizes); rectangles of other
+        proportions around the holes are passed over.
     @return A :class:`MeasuredOutline`, or None when fewer than MIN_PADS or
         more than MAX_PADS pads are given, no image confirms the reading,
         the confirmed image has no closed rectangle around the matched
-        holes, the outline of any image disagrees with ``body_mm``, or two
-        images give outlines whose edges differ by more than their larger
-        tolerance.
+        holes (with ``body_mm``: the body check is "unverifiable" -- none
+        taken for the body, or two candidates at two scales, e.g. a nearly
+        square body with a step inside), the rectangles
+        of any image contradict ``body_mm`` (the body's proportions at
+        another scale and none with its sizes at this one), or two images
+        give outlines whose edges differ by
+        more than their larger tolerance.
     @throws ValueError When a pad coordinate or a body size is not a finite
         number (a positive one for the body).
     @note A MEASUREMENT in pixels, scaled by the reading's own quotes: it is
         as good as the drawing's proportions (the T7NS relay page draws its
         22.5 x 16.5 mm body about 21.9 x 16.1 mm). The rectangle is a DRAWN
-        outline (often the body seen from the solder side); it is not told
-        apart from another drawn rectangle that encloses the holes more
-        tightly, such as a keep-out frame.
+        outline (often the body seen from the solder side). WITHOUT
+        ``body_mm`` it is the smallest rectangle around the holes, whatever
+        it is: a keep-out frame, a table cell or the page border when the
+        body is not drawn as a rectangle (audit A9). Only a body size
+        identifies the body, see :func:`_judge_outline` for the limits.
     """
     points = _validated_points(pads_mm)
     body = _validated_body(body_mm)
@@ -2727,14 +3463,17 @@ def _outline_image(name: str, analysis: _Analysis, points: np.ndarray,
             continue
         if not all(circles[k].evidence for k in assign):
             continue
-        rect = _outline_rect(mask, [circles[k] for k in assign])
+        holes = [circles[k] for k in assign]
+        sim = _fit_similarity(points, _centres(circles, assign))
+        if body is None:
+            rect = _outline_rect(mask, holes)
+        else:
+            verdict, rect = _body_check(mask, holes, body, sim.scale, fit.tolerance_mm * sim.scale)
+            if verdict == BODY_CONTRADICTED:
+                return _REFUSED
         if rect is None:
             return None
-        sim = _fit_similarity(points, _centres(circles, assign))
         left, top, right, bottom = rect
-        if body is not None and _body_disagrees((right - left, bottom - top), body, sim.scale,
-                                                fit.tolerance_mm * sim.scale):
-            return _REFUSED
         corners = np.array([left + 1j * top, right + 1j * top, right + 1j * bottom, left + 1j * bottom])
         mm = (corners - sim.shift) / sim.gain
 

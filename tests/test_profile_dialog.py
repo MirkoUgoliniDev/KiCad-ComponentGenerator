@@ -18,10 +18,16 @@ def test_new_profile_save_inheritance_and_cancel(app, store):
     try:
         assert dialog.tabs.count() == 3
         # Prompts only: the model is one for every analysis (user, 2026-10-02).
+        # CONTRACT CHANGED 2026-11-11 (step P2): the prompts that lived only in
+        # the code are profile fields the analysis sends, so they are edited
+        # here too (schema 8 and 9); still no model field.
+        from kicadgen.services.analysis_profiles import (SCHEMA8_PROMPT_FIELDS,
+                                                         SCHEMA9_PROMPT_FIELDS)
         assert set(dialog.fields) == {'system_prompt', 'grounding_prompt', 'image_instructions',
                                       'terminal_prompt', 'lead_prompt', 'crop_prompt',
                                       'verification_prompt', 'system_prompt_single',
-                                      'numbering_prompt'}
+                                      'numbering_prompt', *SCHEMA8_PROMPT_FIELDS,
+                                      *SCHEMA9_PROMPT_FIELDS}
         assert all(check.isChecked() for check in dialog.inherit.values())
         dialog.name.setText('My module')
         dialog.family.setCurrentIndex(dialog.family.findData('aggregate_castellated'))
@@ -139,9 +145,14 @@ def test_crop_prompt_is_editable_next_to_the_other_photo_prompts(app, store):
         field = editor.fields['crop_prompt']
         assert field.toPlainText() == SYSTEM_PROMPT and not field.isReadOnly()
         page = editor.tabs.widget(1)
-        [sub] = page.findChildren(QTabWidget)
+        # CONTRACT CHANGED 2026-11-11 (step P2): the photo stage now also holds
+        # the wired registry prompts (one nested group, «Inventario
+        # fotografico») and the read-only «Testi nel codice»: the stage's own
+        # sub-tab row is the direct child, and the hand-made tabs come first.
+        from PyQt6.QtCore import Qt
+        [sub] = page.findChildren(QTabWidget, '', Qt.FindChildOption.FindDirectChildrenOnly)
         captions = [sub.tabText(i) for i in range(sub.count())]
-        assert captions[-3:] == ['Terminali', 'Reofori', 'Lettura ritagli']
+        assert captions[2:5] == ['Terminali', 'Reofori', 'Lettura ritagli']
         assert sub.widget(captions.index('Lettura ritagli')).isAncestorOf(field)
         field.setPlainText('global crop')
         editor._save()

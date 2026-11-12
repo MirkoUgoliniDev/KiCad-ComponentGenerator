@@ -223,8 +223,8 @@ files together.
 
 Above the tabs, a bar shows the phases of the work — **Documents › AI analysis
 › Body review › STEP model › KiCad** — with the completed ones ticked, the
-current one highlighted and the ones that do not apply dimmed (the body review
-for a single component). Clicking a phase goes to its tab. On the right, the
+current one highlighted. A phase that does not apply is not shown: a single
+component has no body review, so its bar has four phases numbered 1-4. Clicking a phase goes to its tab. On the right, the
 language selector: Italian, English, French, German (the texts come from the
 same SQLite catalogue; missing entries fall back to English).
 

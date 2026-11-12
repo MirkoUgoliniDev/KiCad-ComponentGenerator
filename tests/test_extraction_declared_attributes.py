@@ -508,7 +508,15 @@ def test_measured_candidates_with_different_origins_count_as_one():
     reading = dict(pads_from_chains([CHAINS[0], {"axis": "y", "stops": ["edge", "1,2,3", "4,5", "edge"],
                                                  "values": [2.0, 7.0, 3.0]}]), view="bottom", notes="")
     apply_dedicated_pads(data, reading, check_layout=FakeHoles(TRUE), measure_layout=Measure())
-    assert "_pin_map_conflict" not in data and "misurate sui fori" in data["_numbering_note"]
+    # CONTRACT CHANGED (user, 2026-11-11, round 6 (a)): the measured layout of two agreeing
+    # readings the holes refute is OFFERED, not written. The point of M10 stands: the two
+    # readings, measured in their own origins, are ONE measured layout -- one option of the
+    # question beside the readings' layout, not two and not none.
+    assert "_pin_map_conflict" not in data
+    question, = data["_questions"]
+    measured = [option for option in question["options"] if option["value"].startswith("holes:")]
+    assert len(question["options"]) == 2 and len(measured) == 1
+    assert "misurate sui fori" in measured[0]["label"]
 
 
 # ── generality audit 2026-11-05: M7 (view key on the layout), M5 (references reach the witness) ──

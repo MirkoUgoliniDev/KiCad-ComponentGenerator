@@ -20,7 +20,7 @@ WORKFLOW_STEPS = (
     ("kicad", "KiCad"),
 )
 
-_DONE, _CURRENT, _TODO, _SKIPPED = "#a6e3a1", "#f5e0dc", "#a6adc8", "#6c7086"
+_DONE, _CURRENT, _TODO, _ARROW = "#a6e3a1", "#f5e0dc", "#a6adc8", "#6c7086"
 
 
 class WorkflowBar(QWidget):
@@ -44,13 +44,16 @@ class WorkflowBar(QWidget):
         layout.setContentsMargins(10, 0, 0, 0)
         layout.setSpacing(6)
         self.labels: dict[str, QLabel] = {}
-        self._state = {"done": set(), "current": None, "skipped": {}}
+        #: The «›» arrow drawn BEFORE each step but the first, hidden with it.
+        self.arrows: dict[str, QLabel] = {}
+        self._state = {"done": set(), "current": None, "hidden": set()}
         for index, (key, _label) in enumerate(WORKFLOW_STEPS):
             if index:
                 arrow = QLabel("›")
                 arrow.setProperty("i18n_skip", True)
-                arrow.setStyleSheet(f"color: {_SKIPPED};")
+                arrow.setStyleSheet(f"color: {_ARROW};")
                 layout.addWidget(arrow)
+                self.arrows[key] = arrow
             label = QLabel()
             label.setProperty("i18n_skip", True)
             label.setTextFormat(Qt.TextFormat.PlainText)
@@ -64,16 +67,21 @@ class WorkflowBar(QWidget):
         if event.button() == Qt.MouseButton.LeftButton:
             self.step_clicked.emit(step)
 
-    def set_state(self, done, current, skipped=None):
+    def set_state(self, done, current, hidden=()):
         """@brief Show which steps are done, which one is current, which do not apply.
 
         @param done Keys of the completed steps.
         @param current Key of the step to do next, or None.
-        @param skipped Optional {key: reason}: steps that do not apply to this
-            project (e.g. the body review for a single component), drawn dimmed
-            with the reason in the tooltip.
+        @param hidden Keys of the steps that do not apply to this project
+            (e.g. the body review for a single component): they are not shown
+            at all, with the arrow before them, and the visible steps are
+            numbered 1..n without a gap (user request, 2026-11-12: a struck
+            through step read as an error, not as a step that does not exist).
+        @note The first step is never hidden by the callers; if it were, the
+            arrow before the next visible step would be hidden too, so the bar
+            never starts with an arrow.
         """
-        self._state = {"done": set(done), "current": current, "skipped": dict(skipped or {})}
+        self._state = {"done": set(done), "current": current, "hidden": set(hidden)}
         self._render()
 
     def retranslate(self):
@@ -81,28 +89,36 @@ class WorkflowBar(QWidget):
         self._render()
 
     def state(self):
-        """@brief Return (done keys, current key, skipped keys) as last set.
+        """@brief Return (done keys, current key, hidden keys) as last set.
 
         @return A tuple (set of done step keys, current step key or None,
-            set of skipped step keys); the sets are copies.
+            set of hidden step keys); the sets are copies.
         """
-        return (set(self._state["done"]), self._state["current"], set(self._state["skipped"]))
+        return (set(self._state["done"]), self._state["current"], set(self._state["hidden"]))
 
     def _render(self):
-        done, current, skipped = (self._state["done"], self._state["current"],
-                                  self._state["skipped"])
-        for number, (key, source) in enumerate(WORKFLOW_STEPS, 1):
-            text = f"{number} · {self._translate(source)}"
+        done, current, hidden = (self._state["done"], self._state["current"],
+                                 self._state["hidden"])
+        number = 0
+        for key, source in WORKFLOW_STEPS:
             label = self.labels[key]
+            shown = key not in hidden
+            # setHidden, not setVisible: the bar may not be shown yet, and a
+            # hidden widget takes no room in the layout either way.
+            label.setHidden(not shown)
+            arrow = self.arrows.get(key)
+            if arrow is not None:
+                # The arrow belongs to the step it points to; no arrow before
+                # the first VISIBLE step.
+                arrow.setHidden(not shown or number == 0)
+            if not shown:
+                continue
+            number += 1
+            text = f"{number} · {self._translate(source)}"
             font = label.font()
-            font.setStrikeOut(key in skipped)
-            font.setBold(key == current and key not in skipped and key not in done)
+            font.setBold(key == current and key not in done)
             label.setFont(font)
-            if key in skipped:
-                label.setText(text)
-                label.setStyleSheet(f"color: {_SKIPPED};")
-                label.setToolTip(self._translate(skipped[key]))
-            elif key in done:
+            if key in done:
                 label.setText(f"✓ {text}")
                 label.setStyleSheet(f"color: {_DONE};")
                 label.setToolTip("")

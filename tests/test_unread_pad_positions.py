@@ -152,8 +152,25 @@ def test_a_malformed_value_beside_a_null_coordinate_is_still_an_error(field, bad
     pads = _pads(unread=("5",))
     target = pads[4] if field == "number" else pads[1]
     target[field] = bad
-    with pytest.raises(ExtractionError, match="Geometria package"):
+    # A pad without its number is a broken answer SHAPE since review
+    # 2026-11-10 (an empty number is refused by the pad contract): the error
+    # names it and earns the one corrective retry; any other malformed value
+    # stays an invalid geometry.
+    expected = "Pad senza numero stampato" if field == "number" else "Geometria package"
+    with pytest.raises(ExtractionError, match=expected):
         _params_from_tool_arguments(single_answer_to_data(_answer(pads)))
+
+
+def test_a_malformed_size_is_reported_even_where_the_program_would_derive_the_land():
+    """Review 2026-11-11: the derived land must not hide a malformed size the answer gave."""
+    pads = _pads()
+    pads[1]["pad_width_mm"] = 0.0
+    with pytest.raises(ExtractionError, match="pad_width_mm"):
+        _params_from_tool_arguments(single_answer_to_data(_answer(pads)))
+    # Negative twin: the size simply absent is the rule's to derive, not an error.
+    pads = _pads()
+    del pads[1]["pad_width_mm"]
+    _params_from_tool_arguments(single_answer_to_data(_answer(pads)))
 
 
 def test_an_unread_pad_with_a_malformed_present_coordinate_is_an_error():
@@ -164,12 +181,31 @@ def test_an_unread_pad_with_a_malformed_present_coordinate_is_an_error():
         _params_from_tool_arguments(single_answer_to_data(_answer(pads)))
 
 
-def test_overlapping_read_pads_beside_an_unread_one_are_still_an_error():
-    """M1: the read pads are validated together, overlaps included."""
+def test_overlapping_read_pads_beside_an_unread_one_are_named_in_the_block():
+    """M1: the read pads are validated together, overlaps included -- and the overlap is NAMED, not hidden.
+
+    Contract changed on 2026-11-11 (review round 4): the overlap used to
+    raise and lose the paid answer although the geometry was being dropped
+    for pad 5 anyway. The values are well formed and only cannot all be
+    true, so they block with their own reason beside the unread position;
+    a malformed value beside it stays an error (the tests above).
+    """
     pads = _pads(unread=("5",))
     pads[1]["x_mm"], pads[1]["y_mm"] = pads[0]["x_mm"] + 0.5, pads[0]["y_mm"]
-    with pytest.raises(ExtractionError, match="Geometria package"):
-        _params_from_tool_arguments(single_answer_to_data(_answer(pads)))
+    params = _params_from_tool_arguments(single_answer_to_data(_answer(pads)))
+    assert params.package_geometry is None
+    assert set(params.unread_pads) >= {"5", "1", "2"}
+    # These pads' lands are derived by the program: half a millimetre apart
+    # there is no room for the two holes, which is how the overlap is named.
+    # Contract changed on 2026-11-11 (review round 5, V1-9): pads that share
+    # one reason and one pair of values are named together in ONE entry
+    # («pad 1, 2: ...»), so the block does not grow with the pad count.
+    for text in (params.pin_map_conflict, params.notes):
+        assert "pad 1, 2: a questo passo non c'e' posto" in text
+    assert "pad 5 senza coordinate" in params.pin_map_conflict
+    # Negative twin: without the overlap only pad 5 is unread and nothing names a lack of room.
+    clean = _params_from_tool_arguments(single_answer_to_data(_answer(_pads(unread=("5",)))))
+    assert clean.unread_pads == ["5"] and "non c'e' posto" not in clean.pin_map_conflict
 
 
 def _note(params, start):

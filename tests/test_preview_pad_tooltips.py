@@ -74,3 +74,21 @@ def test_matrix_pads_carry_the_tooltip_too(window):
     window._draw_preview()
     copper, numbers = _tips(window)
     assert "Pin 2: TX" in copper and "Pin 2: TX" in numbers and "Pin 1" in copper
+
+
+def test_a_pad_the_program_estimated_says_which_values_to_verify(window):
+    """Review 2026-11-10, A1: an estimated hole or size is drawn like a measure, so its tooltip names it."""
+    window.pinout = [{"pin": "2", "name": "NC"}]
+    tip = window._pad_tooltip("2", {"drill_mm": "derived", "pad_size": "estimated", "shape": "read"})
+    first, second = tip.split("\n")
+    assert first == "Pin 2: NC"
+    assert "foro" in second and "dimensione" in second and "forma" not in second
+
+
+def test_a_pad_read_from_the_drawing_or_without_provenance_has_no_estimate_line(window):
+    """Negative twin: read values, or a project saved before the provenance existed."""
+    window.pinout = [{"pin": "2", "name": "NC"}]
+    read = {"drill_mm": "read", "pad_size": "read", "shape": "read"}
+    assert window._pad_tooltip("2", read) == window._pad_tooltip("2") == "Pin 2: NC"
+    # An estimated LEAD alone is not a pad value: nothing to verify on the pad.
+    assert window._pad_tooltip("2", {"lead": "estimated"}) == "Pin 2: NC"

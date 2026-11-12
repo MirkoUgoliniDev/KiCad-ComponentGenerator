@@ -228,8 +228,9 @@ progetto…** (F2) rinomina insieme cartella e file.
 
 Sopra le schede una barra mostra le fasi del lavoro — **Documenti › Analisi
 AI › Revisione corpi › Modello STEP › KiCad** — con quelle concluse spuntate,
-quella corrente evidenziata e quelle che non si applicano attenuate (la
-revisione dei corpi per un componente singolo). Un clic su una fase porta
+quella corrente evidenziata. Una fase che non si applica non compare: un
+componente singolo non ha la revisione dei corpi e la sua barra ha quattro
+fasi numerate da 1 a 4. Un clic su una fase porta
 alla sua scheda. A destra, il selettore della lingua: italiano, inglese,
 francese, tedesco (i testi vengono dallo stesso catalogo SQLite; le voci
 mancanti ricadono sull'inglese).

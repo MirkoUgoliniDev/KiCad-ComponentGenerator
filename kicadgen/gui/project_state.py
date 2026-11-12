@@ -64,6 +64,41 @@ def _migrated_pad_shapes(value, notes: list | None):
     return dict(value, pins=migrated)
 
 
+#: Pad types that own a drilled hole; any other type cannot carry `drill_mm`.
+HOLED_PAD_TYPES = ("thru_hole", "np_thru_hole")
+
+
+def without_stray_holes(value, notes: list | None = None):
+    """@brief Copy of a saved package mapping without the holes its hole-less pads carried.
+
+    @param value Package mapping as saved, or anything else (returned as is).
+    @param notes Optional list that receives the numbers of the pads changed.
+    @return The mapping with `drill_mm` / `drill_length_mm` removed from every
+        pad whose `pad_type` has no hole (missing type = "smd", as in
+        `package_from_mapping`); the same object when nothing changed.
+    @note Load path only (review 2026-11-10, K1): versions up to 1.0.8 saved
+        such pads (the extractor copied a drill whatever the pad type) and
+        wrote them WITHOUT the hole, so dropping it here keeps exactly the
+        footprint those projects produced. New data is still refused by
+        `PinSpec.validate`: an analysis must say which pads are drilled.
+    """
+    pins = value.get("pins") if isinstance(value, dict) else None
+    if not isinstance(pins, list):
+        return value
+    changed, cleaned = [], []
+    for pin in pins:
+        if (isinstance(pin, dict) and pin.get("pad_type", "smd") not in HOLED_PAD_TYPES
+                and (pin.get("drill_mm") is not None or pin.get("drill_length_mm") is not None)):
+            changed.append(str(pin.get("number", "?")))
+            pin = {key: item for key, item in pin.items() if key not in ("drill_mm", "drill_length_mm")}
+        cleaned.append(pin)
+    if not changed:
+        return value
+    if notes is not None:
+        notes.extend(changed)
+    return dict(value, pins=cleaned)
+
+
 #: Stand-in name for a saved package whose own name is not a valid file name.
 #: Never shown or written: the window replaces the name with the project
 #: folder's right after loading (`_apply_project_state`).
@@ -91,13 +126,15 @@ def _without_untrusted_package_name(value):
     return {**value, "name": SAVED_PACKAGE_PLACEHOLDER_NAME}
 
 
-def saved_package_geometry(value, legacy_pads: list | None = None):
+def saved_package_geometry(value, legacy_pads: list | None = None, stray_holes: list | None = None):
     """@brief Restore explicit pads from a saved project, or None for legacy projects.
 
     @param value Package mapping, or None when the project has no explicit package.
     @param legacy_pads Optional list that receives the numbers of the pads
         whose legacy shape was mapped (`LEGACY_PAD_SHAPES`), so the caller can
         say so; the saved value itself is never modified.
+    @param stray_holes Optional list that receives the numbers of the pads
+        without a hole whose saved drill was dropped (`without_stray_holes`).
     @return Validated PackageGeometry, or None for an absent optional field.
     @throws ProjectConfigError For malformed geometry: the project remains
         protected from autosave instead of silently becoming a pin-header project.
@@ -106,6 +143,7 @@ def saved_package_geometry(value, legacy_pads: list | None = None):
         return None
     from ..core.package_geometry import package_from_mapping
     value = _migrated_pad_shapes(value, legacy_pads)
+    value = without_stray_holes(value, stray_holes)
     value = _without_untrusted_package_name(value)
     try:
         return package_from_mapping(value)

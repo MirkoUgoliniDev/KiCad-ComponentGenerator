@@ -3,14 +3,16 @@ from pathlib import Path
 import sqlite3
 
 from PyQt6.QtCore import Qt, QSize
-from PyQt6.QtGui import QIcon
+from PyQt6.QtGui import QFontDatabase, QIcon
 from PyQt6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
     QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox,
     QPushButton, QTabWidget, QTextEdit, QVBoxLayout, QWidget,
 )
 
+from ..services import prompt_catalog
 from ..services.analysis_profiles import FAMILIES, ProfileError
+from ..services.messages import tx
 
 ASSETS = Path(__file__).parent / 'assets'
 STAGES = (
@@ -75,20 +77,39 @@ def show_info(parent, title, text, *, text_key=None, **values):
     @param values Placeholder values formatted into the translated body.
     """
     i18n = _find_i18n(parent)
-    dialog = QDialog(parent)
-    dialog.setWindowTitle(
+    show_text(
+        parent,
         (i18n.text('Informazioni') + ' — ' + i18n.text(title))
-        if i18n is not None else 'Informazioni — ' + title
-    )
+        if i18n is not None else 'Informazioni — ' + title,
+        i18n.tr(text_key, default=text, **values)
+        if i18n is not None and text_key else text)
+
+
+def show_text(parent, window_title, text, *, monospace=False):
+    """@brief Show a modal read-only text dialog with a Close button, released after it closes.
+
+    @param parent Owner widget; its ancestry gives the i18n catalogue that
+        translates the Close button.
+    @param window_title Window title, already in the user's language.
+    @param text Body text, already in the user's language, shown as plain text.
+    @param monospace True to show the text in a fixed-width font (a diff).
+    @note The one modal helper of this file: `show_info` and the prompt diff
+        («Mostra differenze») both go through it, so both are released with
+        deleteLater after exec (a dialog kept alive can crash a later test
+        through the garbage collector).
+    """
+    i18n = _find_i18n(parent)
+    dialog = QDialog(parent)
+    dialog.setWindowTitle(window_title)
     dialog.setModal(True)
     dialog.resize(660, 380)
     layout = QVBoxLayout(dialog)
     editor = QTextEdit()
     editor.setReadOnly(True)
-    editor.setPlainText(
-        i18n.tr(text_key, default=text, **values)
-        if i18n is not None and text_key else text
-    )
+    editor.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+    if monospace:
+        editor.setFont(QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont))
+    editor.setPlainText(text)
     layout.addWidget(editor)
     buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
     buttons.button(QDialogButtonBox.StandardButton.Close).setText('Chiudi')
@@ -122,8 +143,15 @@ class ProfileEditor(QDialog):
         self.setModal(True)
         self.defaults = store.defaults()
         overrides = store.overrides(key) if key else {}
+        self._overrides = overrides
         row = store.get_type(key) if key else None
         self.fields, self.inherit = {}, {}
+        # Prompt status widgets, by field («instructions» for the built-in
+        # type's instructions): the label, «Mostra differenze» (show the
+        # differences) and «Ripristina predefinito» (restore the default),
+        # plus the registry entry each one is compared with.
+        self.status_labels, self.diff_buttons, self.restore_buttons = {}, {}, {}
+        self._entries = {}
         layout = QVBoxLayout(self)
         if self.is_type:
             form = QFormLayout()
@@ -172,6 +200,7 @@ class ProfileEditor(QDialog):
                     inner = QVBoxLayout(child)
                     sub.addTab(child, caption)
                     self._add_field(inner, field, overrides)
+                self._add_registry_fields(sub, None, prompt_catalog.STAGE_PHOTO, overrides)
             elif index == 0:
                 sub = QTabWidget()
                 column.addWidget(sub, 1)
@@ -182,14 +211,28 @@ class ProfileEditor(QDialog):
                     inner = QVBoxLayout(child)
                     sub.addTab(child, caption)
                     self._add_field(inner, field, overrides)
+                self._add_registry_fields(sub, None, prompt_catalog.STAGE_DATASHEET, overrides)
                 if self.is_type:
                     self.instructions = QTextEdit()
                     self.instructions.setAcceptRichText(False)
                     self.instructions.setPlainText(row['instructions'] if row else '')
-                    sub.addTab(self.instructions, 'Istruzioni tipologia')
+                    # A built-in type's instructions have a program default:
+                    # they get the same status row as the prompts. A custom
+                    # type's have none, so the editor stands alone.
+                    entry = (prompt_catalog.instruction_entry(key)
+                             if row and row['builtin'] else None)
+                    if entry is None:
+                        sub.addTab(self.instructions, 'Istruzioni tipologia')
+                    else:
+                        child = QWidget()
+                        inner = QVBoxLayout(child)
+                        inner.addWidget(self.instructions, 1)
+                        self._add_status_row(inner, 'instructions', self.instructions, entry)
+                        sub.addTab(child, 'Istruzioni tipologia')
             else:
                 column.addWidget(QLabel('Prompt base:'))
                 self._add_field(column, prompt, overrides)
+                self._add_registry_fields(None, column, prompt_catalog.STAGE_VERIFICATION, overrides)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
         buttons.button(QDialogButtonBox.StandardButton.Save).setText('Salva')
         buttons.button(QDialogButtonBox.StandardButton.Cancel).setText('Annulla')
@@ -219,14 +262,159 @@ class ProfileEditor(QDialog):
             # Read-only rather than disabled: inherited prompts remain scrollable/copyable.
             editor.setReadOnly(inherit.isChecked())
         layout.addWidget(editor, 1)
+        try:
+            entry = prompt_catalog.entry(key)
+        except KeyError:
+            entry = None
+        if entry is not None:
+            self._add_status_row(layout, key, editor, entry)
         if self.is_type:
             inherit.toggled.connect(lambda checked, field=editor, name=key:
                                     self._inherit_changed(name, checked, field))
+
+    def _add_registry_fields(self, tabs, column, stage, overrides):
+        """Editors of the registry prompts of `stage` that the hand-made layout does not place.
+
+        A prompt the analysis reads from the profile (prompt_catalog entry
+        with `in_profile` True) and that has no editor yet gets one, in a
+        sub-tab of `tabs` captioned with its registry title, or below
+        `column` when the stage has no sub-tabs. Entries sharing a `group`
+        (the six document roles, the three inventory prompts) go into ONE
+        sub-tab of that name holding a nested tab per entry, so a stage keeps
+        a readable row of sub-tabs (step P2, 2026-11-11). Entries with
+        `in_profile` False are never editable here: the texts the program
+        keeps in the code (prompt_catalog.CODE_ONLY_PROMPTS) are listed
+        read-only, with their reason, in a last sub-tab «Testi nel codice».
+        """
+        groups = {}
+        for entry in prompt_catalog.PROMPTS:
+            if entry.stage != stage or not entry.in_profile or entry.field in self.fields:
+                continue
+            if entry.field not in self.defaults:
+                continue
+            if tabs is not None:
+                target = tabs
+                if entry.group:
+                    target = groups.get(entry.group)
+                    if target is None:
+                        target = groups[entry.group] = QTabWidget()
+                        tabs.addTab(target, entry.group)
+                child = QWidget()
+                inner = QVBoxLayout(child)
+                target.addTab(child, entry.title)
+                self._add_field(inner, entry.field, overrides)
+            else:
+                column.addWidget(QLabel(entry.title))
+                self._add_field(column, entry.field, overrides)
+        code_only = [entry for entry in prompt_catalog.CODE_ONLY_PROMPTS if entry.stage == stage]
+        if code_only and tabs is not None:
+            tabs.addTab(self._code_only_page(code_only), 'Testi nel codice')
+
+    def _code_only_page(self, entries):
+        """Read-only page of the texts kept in the code: title, reason and the text itself.
+
+        Nothing here is saved: the texts are not profile fields
+        (prompt_catalog.CODE_ONLY_PROMPTS). They are shown so that no text
+        sent to a model is hidden from the user.
+        """
+        page = QWidget()
+        inner = QVBoxLayout(page)
+        for entry in entries:
+            title = QLabel(entry.title)
+            title.setStyleSheet('font-weight: bold;')
+            inner.addWidget(title)
+            reason = QLabel(entry.reason)
+            reason.setWordWrap(True)
+            inner.addWidget(reason)
+            text = QTextEdit()
+            text.setAcceptRichText(False)
+            text.setReadOnly(True)
+            text.setObjectName(entry.field)
+            # The prompt itself is model input, not interface text.
+            text.setProperty('i18n_skip', True)
+            text.setPlainText(entry.current_default())
+            inner.addWidget(text, 1)
+        return page
+
+    def _add_status_row(self, layout, key, editor, entry):
+        """Status label, «Mostra differenze» and «Ripristina predefinito» under one prompt editor.
+
+        The label is re-composed at every keystroke from the editor's text, so
+        it is translated here and marked `i18n_skip`: retranslate_widgets must
+        not take a status already shown as the source of the next lookup.
+        """
+        self._entries[key] = entry
+        row = QHBoxLayout()
+        label = QLabel()
+        label.setObjectName(f'{key}_status')
+        label.setProperty('i18n_skip', True)
+        label.setWordWrap(True)
+        row.addWidget(label, 1)
+        diff = QPushButton('Mostra differenze')
+        diff.setAutoDefault(False)
+        diff.clicked.connect(lambda checked=False, name=key: self._show_diff(name))
+        restore = QPushButton('Ripristina predefinito')
+        restore.setAutoDefault(False)
+        restore.clicked.connect(lambda checked=False, name=key: self._restore_default(name))
+        row.addWidget(diff)
+        row.addWidget(restore)
+        layout.addLayout(row)
+        self.status_labels[key] = label
+        self.diff_buttons[key] = diff
+        self.restore_buttons[key] = restore
+        editor.textChanged.connect(lambda name=key: self._refresh_status(name))
+        self._refresh_status(key)
+
+    def _status_editor(self, key):
+        """The editor whose text the status row of `key` describes."""
+        return self.instructions if key == 'instructions' else self.fields[key]
+
+    def _t(self, source):
+        """Catalog text of an Italian source, or the source without a catalogue."""
+        return self.i18n.text(source) if self.i18n is not None else source
+
+    def prompt_status(self, key):
+        """@brief Live status of the text in the editor of `key`.
+
+        @param key Prompt field, or "instructions" for a built-in type.
+        @return prompt_catalog CURRENT, CUSTOM or OUTDATED.
+        """
+        return prompt_catalog.entry_status(self._entries[key], self._status_editor(key).toPlainText())
+
+    def _refresh_status(self, key):
+        """Update the status label and the two buttons of `key` from the editor's current text."""
+        status = self.prompt_status(key)
+        label = self.status_labels[key]
+        label.setText(self._t(prompt_catalog.status_label(status)))
+        # An outdated text is the one that needs the user's eye.
+        label.setStyleSheet('font-weight: bold;' if status == prompt_catalog.OUTDATED else '')
+        editor = self._status_editor(key)
+        self.diff_buttons[key].setEnabled(status != prompt_catalog.CURRENT)
+        self.restore_buttons[key].setEnabled(
+            status != prompt_catalog.CURRENT and not editor.isReadOnly())
+
+    def _show_diff(self, key):
+        """Read-only dialog with the diff from the editor's text to the current default."""
+        entry = self._entries[key]
+        lines = prompt_catalog.entry_diff(entry, self._status_editor(key).toPlainText())
+        text = '\n'.join(lines) if lines else tx(
+            "Nessuna differenza dal predefinito di questa versione.")
+        title = self._t('Differenze dal predefinito') + ' — ' + self._t(entry.title)
+        show_text(self, title, text, monospace=True)
+
+    def _restore_default(self, key):
+        """Put the current default in the editor of `key`; saved on OK like any edit, dropped by Cancel."""
+        editor = self._status_editor(key)
+        if editor.isReadOnly():
+            return
+        editor.setPlainText(self._entries[key].current_default())
 
     def _inherit_changed(self, name, checked, editor):
         editor.setReadOnly(checked)
         if checked:
             editor.setPlainText(self.defaults[name])
+        if name in self.status_labels:
+            self._refresh_status(name)
 
     def _info(self, index):
         show_info(self, STAGES[index][0], HELP[index] + '\n\n'
@@ -240,12 +428,39 @@ class ProfileEditor(QDialog):
                   'mai nel database.',
                   text_key=f'help.profile.stage.{index}')
 
+    def _stored_text(self, key, text):
+        """Text to store for the editor of `key`: stripped, but byte-identical when unchanged.
+
+        Every text is stripped on save, as before. When the stripped text is
+        the one the field held, or the current program default, the exact
+        original is stored instead: a default whose surrounding blanks are
+        part of how the program joins it (an appended fragment, a trailing
+        newline) must not turn into a different text just because the user
+        pressed OK.
+        """
+        value = text.strip()
+        original = self._overrides.get(key, self.defaults.get(key))
+        if isinstance(original, str) and value == original.strip():
+            return original
+        try:
+            default = prompt_catalog.restore_default(key)
+        except KeyError:
+            return value
+        return default if value == default.strip() else value
+
     def _save(self):
         values = {}
         for key, editor in self.fields.items():
-            values[key] = (editor.text() if isinstance(editor, QLineEdit) else editor.toPlainText()).strip()
+            values[key] = self._stored_text(key, editor.text() if isinstance(editor, QLineEdit)
+                                            else editor.toPlainText())
             if self.is_type and self.inherit[key].isChecked():
                 values[key] = None
+        if self.is_type:
+            # save_type replaces EVERY override of the type: an override of a
+            # registered prompt this dialog does not show (in_profile False)
+            # is carried over unchanged instead of being dropped.
+            values.update({name: value for name, value in self._overrides.items()
+                           if name in prompt_catalog.fields() and name not in self.fields})
         try:
             if self.is_type:
                 self.key = self.store.save_type(self.key or None, label=self.name.text(),
