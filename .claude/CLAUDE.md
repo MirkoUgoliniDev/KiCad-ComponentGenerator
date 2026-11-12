@@ -231,7 +231,7 @@ checkbox, one review window in two stages with the detector's reading kept besid
 three-section «Parametri» modal, phantom sides excluded by the photo, pulsing running mark,
 unread row spacing ignored, pad width at the pitch downgraded, lands measured on the photo)
 is 13630 passed,
-13 skipped and 19 subtests (2026-11-12, branch `FOOTPRINT-ADVANCE`, halves 8298/9/19 and 5332/4 with one red test
+13 skipped and 19 subtests (2026-11-12, branch `FOOTPRINT-ADVANCE`, commit `d8990e8`, NOT merged into `main`, halves 8298/9/19 and 5332/4 with one red test
 — the «Strumenti» menu list without the new entry — fixed and re-run alone, not a second full run: body review step
 hidden for single components, collapsed groups shrink to their title, a click on a check row opens its full text and
 remedy, prompts named by a registry number kept in the untracked data/sent_prompts.sqlite3; see HANDOFF.md «STATO

@@ -4,7 +4,7 @@
 
 Suite completa a codice fermo: A 8298 passati 9 saltati 19 sottotest, B 5332 passati 4 saltati 1 fallito (elenco del
 menu «Strumenti» senza «Prompt inviati...», contratto aggiornato, file rilanciato da solo: verde) = 13630 passati,
-13 saltati, 19 sottotest. Base `36d7a02`. Hash del commit: vedi il commit «docs: handoff» successivo.
+13 saltati, 19 sottotest. Commit `d8990e8` (base `36d7a02`).
 CONTENUTO: (1) passo «Revisione corpi» nascosto per i componenti singoli; (2) gruppo richiudibile ridotto al titolo,
 colonna del footprint senza riquadri vuoti; (3) finestra dei dettagli dei controlli (footprint e KLC); (4) numero del
 prompt inviato (registro data/sent_prompts.sqlite3, non versionato) e «Strumenti > Prompt inviati...».
