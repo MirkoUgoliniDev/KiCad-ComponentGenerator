@@ -158,7 +158,8 @@ def test_an_unreadable_edge_is_asked_again_and_zero_excludes_the_side():
     changed, calls, logs = _run(data, [UNCERTAIN_TOP], reply=_reply(data, 0))
     assert changed and len(calls) == 1
     prompt = calls[0]["content_blocks"][-1]["text"]
-    assert "ingrandimento del bordo top" in prompt and "count 0" in prompt
+    # CONTRACT CHANGED 2026-11-12: prompts in English.
+    assert "enlargement of the top edge" in prompt and "count 0" in prompt
     assert [side["edge"] for side in data["castellated_sides"]] == ["left", "right"]
     [warning] = [line for line in logs if kind_of(line) == WARNING]
     assert "lato escluso" in warning and "ricontrollo AI" in warning

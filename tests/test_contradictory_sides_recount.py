@@ -44,7 +44,8 @@ def validate(data, call, messages=None):
 
 def test_count_against_names_and_against_the_edge_are_both_reported():
     problems = _side_contradictions([side("top", 28, 1, names=22)], 63.3, 25.4)
-    assert any("count=28 ma pin_names ha 22" in p for p in problems)
+    # CONTRACT CHANGED 2026-11-12: prompts in English (the log keeps its wording).
+    assert any("count=28 but pin_names has 22" in p for p in problems)
     assert any("68.58" in p and "63.3" in p for p in problems)
 
 
@@ -75,7 +76,11 @@ def test_a_contradictory_answer_is_recounted_once_and_the_recount_is_used():
     assert call.call_count == 1
     prompt = call.call_args.kwargs["content_blocks"][-1]["text"]
     # Il modello riceve i numeri esatti e il bordo, non un generico «riprova».
-    assert "count=28 ma pin_names ha 22" in prompt and "body_length_mm=63.3" in prompt
+    # CONTRACT CHANGED 2026-11-12: prompts in English (the log keeps its wording).
+    assert "count=28 but pin_names has 22" in prompt and "body_length_mm=63.3" in prompt
+    # The model never reads the log's (Italian) wording, the log never the model's.
+    assert "ma pin_names ha" not in prompt
+    assert any("count=28 ma pin_names ha 22" in m for m in messages)
     params = _params_from_tool_arguments(data)
     assert [s["count"] for s in params.castellated_sides] == [22, 22]
     assert [len(s["pin_names"]) for s in params.castellated_sides] == [22, 22]
@@ -247,7 +252,8 @@ def test_end_quotes_that_give_another_count_are_a_contradiction():
     problems = _side_contradictions(
         [side("top", 21, 1, names=21, first_contact_from_edge_mm=5.05,
               last_contact_from_edge_mm=4.91)], 63.3, 25.4)
-    assert len(problems) == 1 and "= 22 contatti" in problems[0] and "count=21" in problems[0]
+    # CONTRACT CHANGED 2026-11-12: prompts in English (the log keeps its wording).
+    assert len(problems) == 1 and "= 22 contacts" in problems[0] and "count=21" in problems[0]
 
 
 def test_end_quotes_consistent_with_the_count_are_silent():
@@ -270,7 +276,8 @@ def test_end_quotes_on_a_short_edge_use_the_width():
     problems = _side_contradictions(
         [side("left", 4, 1, names=4, first_contact_from_edge_mm=2.0,
               last_contact_from_edge_mm=2.0) | dict(pitch_mm=5.08)], 63.3, 25.4)
-    assert len(problems) == 1 and "= 5 contatti" in problems[0]
+    # CONTRACT CHANGED 2026-11-12: prompts in English (the log keeps its wording).
+    assert len(problems) == 1 and "= 5 contacts" in problems[0]
 
 
 def test_a_count_contradicted_by_the_quotes_is_recounted_and_the_recount_is_used():
@@ -292,7 +299,8 @@ def test_end_quotes_longer_than_the_edge_are_said_as_such():
     [problem] = _side_contradictions(
         [side("top", 3, 1, names=3, first_contact_from_edge_mm=40, last_contact_from_edge_mm=40)],
         63.3, 25.4)
-    assert "superano il bordo" in problem and "-" not in problem.split("superano")[0][-4:]
+    # CONTRACT CHANGED 2026-11-12: prompts in English (the log keeps its wording).
+    assert "exceed the edge" in problem and "-" not in problem.split("exceed")[0][-4:]
 
 
 def test_a_bottom_view_swaps_the_end_quotes_with_the_direction():

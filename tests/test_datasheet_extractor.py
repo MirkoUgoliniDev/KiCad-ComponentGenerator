@@ -413,11 +413,12 @@ def test_explicit_document_roles_override_ai_top_selection(monkeypatch, tmp_path
     assert photo.call_args.kwargs['top_photo_index'] == ([1] if with_top else [-1])
     assert photo.call_args.kwargs['top_photo_source'] == 'utente'
     blocks = call.call_args_list[0].kwargs['content_blocks']
-    assert 'Pinout / disposizione contatti' in blocks[0]['text']
+    # CONTRACT CHANGED 2026-11-12: prompts in English.
+    assert 'Pinout / contact arrangement' in blocks[0]['text']
     if with_top:
-        assert 'Immagine con quote' in blocks[2]['text']
+        assert 'Dimensioned image' in blocks[2]['text']
     else:
-        assert 'Viste non fornite: Immagine con quote' in blocks[-1]['text']
+        assert 'Views not provided: Dimensioned image' in blocks[-1]['text']
 
 
 def test_ambiguous_roles_fail_before_network(monkeypatch, tmp_path):

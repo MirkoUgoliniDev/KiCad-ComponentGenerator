@@ -109,17 +109,20 @@ KiCad scelti per somiglianza di misure.</p>
   <strong>DeepSeek (API diretta)</strong> (modelli <code>deepseek-api/...</code>;
   avviando dai sorgenti il predefinito è <code>deepseek-api/deepseek-flash</code>).
   Il modello si sceglie dall'interfaccia: <span class="ui">Configurazione</span> →
-  <span class="ui">Default generali AI...</span>, scheda <span class="ui">Modello</span>,
+  <span class="ui">Modello AI...</span>,
   oppure il riquadro <span class="ui">Modello AI</span> per la sessione.
   Si inserisce da <span class="ui">Configurazione</span> →
   <span class="ui">Account AI...</span>: la finestra elenca ogni provider con
   l'origine della chiave in uso (variabile d'ambiente, Gestore credenziali, file
   <code>.env</code> o nessuna) e il saldo corrente; scegli il provider, incolla
-  la chiave, premi <span class="ui">Verifica</span> (nessuna chiamata a un modello,
-  nessun costo) e poi <span class="ui">Salva</span>; resta nel Gestore
+  la chiave (l'occhio nel campo, o Alt+F8, la mostra) e premi
+  <span class="ui">Verifica e salva</span>: la chiave viene verificata (nessuna chiamata
+  a un modello, nessun costo) e solo se è valida resta nel Gestore
   credenziali di Windows (<code>KiCadGen/OpenRouter</code>,
-  <code>KiCadGen/DeepSeek</code>). <span class="ui">Rimuovi chiave</span> cancella
-  solo quella voce. Il file <code>.env</code> nella cartella
+  <code>KiCadGen/DeepSeek</code>). Se la chiave in uso è scritta in un file
+  <code>.env</code>, <span class="ui">Spostala in Windows</span> la verifica, la salva
+  nel Gestore credenziali e chiede se togliere dal file la sua sola riga.
+  <span class="ui">Rimuovi</span> cancella solo la voce del Gestore credenziali. Il file <code>.env</code> nella cartella
   <code>%LOCALAPPDATA%\KiCadGen</code> (righe <code>OPENROUTER_API_KEY=sk-or-...</code>
   e/o <code>DEEPSEEK_API_KEY=...</code>) resta valido; una chiave salvata con
   «Account AI...» ha la precedenza su quella del file. Se manca la chiave,
@@ -247,11 +250,20 @@ vedere o modificare le altre scelte:</p>
     viene caricato, quindi si verifica solo premendo
     <span class="ui">Verifica compatibilità</span>. Se il file manca o non è
     compatibile, l'analisi si ferma prima di spendere.</li>
-  <li><span class="ui">Modello AI</span>: il modello unico usato per documenti,
+  <li><span class="ui">Modello AI (questa sessione)</span>: il modello unico usato per documenti,
   foto e verifica. Il pulsante accanto sceglie un modello diverso (filtrabile per
   costo, sorgente OpenRouter o DeepSeek) <em>solo per questa sessione</em>;
   il predefinito e la sua sorgente si impostano da <span class="ui">Configurazione →
-  Default generali AI...</span>, i prompt per tipologia da <span class="ui">Configurazione →
+  Modello AI...</span>. La stessa finestra, nella sezione <span class="ui">Modelli diversi per singoli
+  passi</span> (chiusa all'apertura, il titolo conta i passi con un modello proprio), ha una
+  tabella con il modello di ogni
+  passo dell'analisi (lettura dei documenti, posizioni dei pad, quote del corpo,
+  inventario e ritagli della foto, sigle, terminali, tipi dei pin): ogni passo
+  segue il modello unico finché <span class="ui">Cambia…</span> non gliene
+  assegna uno proprio, <span class="ui">Usa l'unico</span> lo riporta al modello unico
+  e <span class="ui">Ripristina passi predefiniti</span> riporta solo la tabella alla scelta
+  iniziale, senza cambiare il modello unico;
+  il modello della sessione sostituisce solo il modello unico. Tutti i prompt (generali e per tipologia) si modificano da <span class="ui">Configurazione →
   Gestione tipologie e profili AI...</span>.</li>
 </ul>
 

@@ -164,7 +164,7 @@ class ModelPickerDialog(QDialog):
 
     def __init__(self, current_model: Optional[str] = None, parent=None,
                  title: str = "Scegli il modello LLM", capabilities=DATASHEET_CAPABILITIES,
-                 provider: Optional[str] = None):
+                 provider: Optional[str] = None, providers=None):
         """@brief Build the picker.
 
         @param current_model Model selected when the dialog opens.
@@ -175,12 +175,18 @@ class ModelPickerDialog(QDialog):
             LLM settings): only its models are listed and the source cannot be
             changed here. None lets the user choose, starting from the
             provider of `current_model`.
+        @param providers The sources the user may choose among (an iterable
+            of providers.PROVIDERS keys), or None for every source. The
+            «Modello AI» window passes the sources that have a key (user,
+            2026-11-12: a source without a key must not be offered); when
+            `current_model`'s source is not among them, the list starts from
+            the first allowed one.
         """
         super().__init__(parent)
         self.capabilities = tuple(capabilities)
         self.i18n = _find_i18n(parent)
         self.setWindowTitle(title)
-        self.resize(900, 620)
+        self.resize(980, 680)
 
         self._models: list[ModelInfo] = []
         #: What the table rows show (models, language); see `_apply_filters`.
@@ -190,12 +196,15 @@ class ModelPickerDialog(QDialog):
         self._closed = False
 
         layout = QVBoxLayout(self)
+        # More air between the blocks (user, 2026-11-12: «dai un po' di aria»).
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(12)
 
+        # Valid for every provider: the list shown is the chosen provider's.
         intro = QLabel(
-            "Modelli disponibili su OpenRouter. I prezzi sono in dollari per "
-            "milione di token (input / output): un'estrazione da datasheet "
-            "consuma soprattutto token di input, perche' manda il PDF o le "
-            "immagini del disegno meccanico."
+            "Scegli il modello AI. I prezzi sono in dollari per milione di token "
+            "(input / output): un'estrazione consuma soprattutto token di input, "
+            "perché manda il PDF o le immagini del disegno meccanico."
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
@@ -204,10 +213,13 @@ class ModelPickerDialog(QDialog):
         # API (key DEEPSEEK_API_KEY). It starts from the one of the model
         # already chosen.
         provider_row = QHBoxLayout()
+        provider_row.setSpacing(10)
         provider_row.addWidget(QLabel("Fornitore:"))
         fixed_provider = provider
+        allowed = [source for source in PROVIDERS
+                   if providers is None or source in set(providers) or source == fixed_provider]
         self.combo_provider = QComboBox()
-        for source in PROVIDERS:
+        for source in allowed or PROVIDERS:
             # Translated here: retranslate_widgets does not touch combo items (B7).
             self.combo_provider.addItem(tx(PROVIDER_LABELS[source]), source)
         self.combo_provider.setCurrentIndex(
@@ -216,19 +228,26 @@ class ModelPickerDialog(QDialog):
         # the list is only its own.
         self.combo_provider.setEnabled(fixed_provider is None)
         self.combo_provider.currentIndexChanged.connect(self._on_provider_changed)
+        self.combo_provider.setMinimumWidth(220)
         provider_row.addWidget(self.combo_provider)
+        provider_row.addStretch(1)
+        layout.addLayout(provider_row)
+        # The provider's caveat on a line of its own, muted, instead of being
+        # squeezed next to the combo.
         self.label_provider_note = QLabel()
         self.label_provider_note.setWordWrap(True)
-        provider_row.addWidget(self.label_provider_note, 1)
-        layout.addLayout(provider_row)
+        self.label_provider_note.setObjectName("providerNote")
+        self.label_provider_note.setStyleSheet("color: palette(placeholder-text);")
+        layout.addWidget(self.label_provider_note)
 
         filter_row = QHBoxLayout()
+        filter_row.setSpacing(10)
         filter_row.addWidget(QLabel("Cerca:"))
         self.field_search = QLineEdit()
         self.field_search.setPlaceholderText("es. claude, gemini, gpt...")
         self.field_search.textChanged.connect(self._apply_filters)
         filter_row.addWidget(self.field_search, 2)
-
+        filter_row.addSpacing(12)
         filter_row.addWidget(QLabel("Costo input max ($/Mtok):"))
         self.spin_max_cost = QDoubleSpinBox()
         self.spin_max_cost.setDecimals(2)
@@ -287,7 +306,8 @@ class ModelPickerDialog(QDialog):
         )
         self.table.itemSelectionChanged.connect(self._on_selection_changed)
         self.table.doubleClicked.connect(self.accept)
-        layout.addWidget(self.table)
+        self.table.verticalHeader().setDefaultSectionSize(30)
+        layout.addWidget(self.table, 1)
 
         self.label_selected = QLabel()
         self.label_selected.setWordWrap(True)
@@ -559,7 +579,8 @@ def _price_text(value: float, i18n=None) -> str:
 
 
 def pick_model(current_model: Optional[str], parent=None, title: str = "Scegli il modello LLM",
-               capabilities=DATASHEET_CAPABILITIES, provider: Optional[str] = None) -> Optional[str]:
+               capabilities=DATASHEET_CAPABILITIES, provider: Optional[str] = None,
+               providers=None) -> Optional[str]:
     """@brief Open the model picker and return the chosen model id, or None when cancelled.
 
     Opens the dialog and returns the chosen id, or None on cancel.
@@ -571,11 +592,13 @@ def pick_model(current_model: Optional[str], parent=None, title: str = "Scegli i
         meant for: see ModelInfo.usable_for. Asking for more than needed
         hides valid models.
     @param provider Source fixed by the caller, or None (see ModelPickerDialog).
+    @param providers Sources the user may choose among, or None for all (see ModelPickerDialog).
     @return The chosen model id, or None when the dialog is cancelled or
         nothing is selected.
     """
     dialog = ModelPickerDialog(current_model, parent, title=title, capabilities=capabilities,
-                               provider=provider)
+                               provider=provider,
+                               **({"providers": tuple(providers)} if providers is not None else {}))
     try:
         if dialog.exec() == QDialog.DialogCode.Accepted and dialog.selected_model():
             return dialog.selected_model()

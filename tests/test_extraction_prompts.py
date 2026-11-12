@@ -130,8 +130,9 @@ def test_the_checker_catches_the_former_prompt_fragments():
 def test_the_prompts_say_there_is_no_target_count():
     """The count anchor is replaced by an explicit statement, in both places."""
     components = ext._EXTRACTION_TOOL["input_schema"]["properties"]["components_3d"]
-    assert "Non esiste un numero atteso" in components["description"]
-    assert "Non esiste un numero atteso" in ext.DEFAULT_SYSTEM_PROMPT
+    # CONTRACT CHANGED 2026-11-12: prompts in English.
+    assert "There is no expected number" in components["description"]
+    assert "There is no expected number of components" in ext.DEFAULT_SYSTEM_PROMPT
 
 
 def test_the_former_defaults_migrate_and_the_current_ones_do_not():
@@ -310,18 +311,20 @@ def test_a_file_with_several_roles_is_described_for_each(monkeypatch, tmp_path):
     call, photo, _ = _run_extraction(monkeypatch, tmp_path, ["sheet.pdf", "photo.png"], roles)
     blocks = call.call_args.kwargs["content_blocks"]
     sheet = blocks[0]["text"]
-    assert "RUOLI DICHIARATI" in sheet
-    for name in ("Pinout / disposizione contatti", "Immagine con quote", "Piazzole consigliate"):
+    # CONTRACT CHANGED 2026-11-12: prompts in English.
+    assert "ROLES DECLARED BY THE USER" in sheet
+    for name in ("Pinout / contact arrangement", "Dimensioned image", "Recommended land pattern"):
         assert name in sheet
     # The same file IS the dimensioned top view: it must not be excluded from it.
-    assert "non usarlo per gli ingombri" not in sheet
+    assert "do not use it for the envelope of the body" not in sheet
     # CONTRACT CHANGED (adversarial review 2026-11-03): a sheet declared «Immagine
     # con quote» may print the profile views too, so the side view is to be
     # looked for in it, never declared absent (that sentence, with «se nessuna
     # vista mostra il corpo di profilo, ometti», dropped the T7N height).
-    assert "Viste non fornite: Vista laterale" not in _request_text(call)
-    assert "Viste da cercare nei disegni quotati forniti" in _request_text(call)
-    assert "Vista laterale / altezze" in _request_text(call)
+    # CONTRACT CHANGED 2026-11-12: prompts in English.
+    assert "Views not provided: Side view / heights" not in _request_text(call)
+    assert "Views to look for in the dimensioned drawings provided" in _request_text(call)
+    assert "Side view / heights" in _request_text(call)
     assert photo.call_args.kwargs["top_photo_index"] == [1]
 
 
@@ -331,15 +334,17 @@ def test_a_pinout_only_file_is_kept_out_of_the_body_envelope(monkeypatch, tmp_pa
     call, _, _ = _run_extraction(monkeypatch, tmp_path, ["pins.pdf", "drawing.png", "photo.png"],
                                  roles)
     blocks = call.call_args.kwargs["content_blocks"]
-    assert "non usarlo per gli ingombri" in blocks[0]["text"]
-    assert "non usarlo per gli ingombri" not in blocks[2]["text"]
+    # CONTRACT CHANGED 2026-11-12: prompts in English.
+    assert "do not use it for the envelope of the body" in blocks[0]["text"]
+    assert "do not use it for the envelope of the body" not in blocks[2]["text"]
 
 
 def test_land_pattern_and_side_view_are_explained(monkeypatch, tmp_path):
     roles = {"land.png": ["land_pattern"], "side.png": ["side_view"]}
     call, photo, _ = _run_extraction(monkeypatch, tmp_path, ["land.png", "side.png"], roles)
     blocks = call.call_args.kwargs["content_blocks"]
-    assert "piazzole" in blocks[0]["text"] and "body_*" in blocks[0]["text"]
+    # CONTRACT CHANGED 2026-11-12: prompts in English.
+    assert "lands" in blocks[0]["text"] and "body_*" in blocks[0]["text"]
     assert "body_height_mm" in blocks[2]["text"] and "pcb_thickness_mm" in blocks[2]["text"]
     # No photograph declared: nothing goes to the inventory in its place.
     assert photo.call_args.kwargs["top_photo_index"] == [-1]
@@ -407,12 +412,24 @@ def test_one_role_on_several_files_is_valid_in_the_new_form():
     assert roles == {"a.png": ("hires",), "b.png": ("hires",)}
 
 
-def test_the_role_names_are_the_labels_the_user_sees():
-    """Model and user read the same words for every role both modules know."""
+def test_every_role_has_an_english_model_name_and_a_ui_label():
+    """Every role has a fixed English name for the model and a label for the user.
+
+    CONTRACT CHANGED 2026-11-12: prompts in English. The model reads one fixed
+    English name per role id, whatever the interface language; the user reads
+    the label of document_roles.ROLES (Italian source, translated by the
+    catalog). Before, the two were the same Italian words.
+    """
     from kicadgen.services.document_roles import ROLES
     for key in DOCUMENT_ROLE_KEYS:
-        if key in ROLES:
-            assert ext._ROLE_PROMPTS[key][0] == ROLES[key], key
+        name = ext._ROLE_PROMPTS[key][0]
+        assert name.strip() and name.isascii(), key
+        assert ROLES.get(key, "").strip(), key
+        # The UI label is not what the model reads: no UI language leaks.
+        assert ext._role_label(key) == ROLES[key], key
+    # The model-facing description uses the English name, never the label.
+    text = ext._role_description(("side_view",))
+    assert ext._ROLE_PROMPTS["side_view"][0] in text and ROLES["side_view"] not in text
 
 
 # ── Height: one printed number, one definition (user, 2026-11-03) ───────────
@@ -422,14 +439,15 @@ def test_the_height_is_defined_once_as_a_printed_number_everywhere():
     schema = ext._EXTRACTION_TOOL["input_schema"]["properties"]["body_height_mm"]["description"]
     dedicated = ext._BODY_DIMENSIONS_TOOL["input_schema"]["properties"]["body_height"]["description"]
     for text in (schema, ext.DEFAULT_SINGLE_SYSTEM_PROMPT, ext.DEFAULT_BODY_DIMENSIONS_PROMPT, dedicated):
-        assert "UN SOLO numero STAMPATO" in text
-        assert "NON sommare ne' sottrarre" in text
+        # CONTRACT CHANGED 2026-11-12: prompts in English.
+        assert "ONE SINGLE PRINTED number" in text
+        assert "do NOT add or subtract other dimensions" in text
     assert ext._HEIGHT_RULE in ext.DEFAULT_SINGLE_SYSTEM_PROMPT
     assert ext._HEIGHT_RULE in schema
     assert "printed_vertical_quotes" in ext._HEIGHT_RULE
     assert "printed_vertical_quotes" in ext._single_component_tool()["function"]["parameters"]["properties"]
-    assert "schema elettrico" in ext.DEFAULT_SINGLE_SYSTEM_PROMPT
-    assert "SCHEMA ELETTRICO" in ext._EXTRACTION_TOOL["input_schema"]["properties"]["pinout"]["description"]
+    assert "electrical schematic" in ext.DEFAULT_SINGLE_SYSTEM_PROMPT
+    assert "ELECTRICAL SCHEMATIC" in ext._EXTRACTION_TOOL["input_schema"]["properties"]["pinout"]["description"]
 
 
 def test_the_former_single_prompt_migrates_and_the_current_one_does_not():
@@ -444,5 +462,6 @@ def test_a_side_view_declared_on_a_file_of_its_own_is_neither_missing_nor_search
     roles = {"sheet.pdf": ["pinout", "top"], "side.png": ["side_view"], "photo.png": ["hires"]}
     call, _, _ = _run_extraction(monkeypatch, tmp_path, ["sheet.pdf", "side.png", "photo.png"], roles)
     text = _request_text(call)
-    assert "non fornite: Vista laterale" not in text
-    assert "Viste da cercare nei disegni quotati forniti" not in text
+    # CONTRACT CHANGED 2026-11-12: prompts in English.
+    assert "not provided: Side view / heights" not in text
+    assert "Views to look for in the dimensioned drawings provided" not in text

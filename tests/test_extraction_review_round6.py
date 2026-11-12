@@ -648,10 +648,16 @@ def test_no_type_instruction_tells_the_model_to_estimate_a_hole():
         text = component_type.prompt
         assert "stima drill_mm" not in text and "0.2..0.3" not in text, component_type.key
         assert "diametro terminale +" not in text, component_type.key
+        # CONTRACT CHANGED 2026-11-12: prompts in English. The same estimate
+        # rule, in the language the instructions are now written in.
+        assert "estimate drill_mm" not in text, component_type.key
+        assert "terminal diameter +" not in text, component_type.key
     single = component_types.get("single_tht").prompt
     for field in ("hole_callout", "lead", "lead_diameter_mm", "value_sources", "drill_mm"):
         assert field in single
-    assert "non stimarlo" in single and "li ricava il programma" in single
+    # CONTRACT CHANGED 2026-11-12: prompts in English («non stimarlo» /
+    # «li ricava il programma» -> their English equivalents).
+    assert "do not estimate it" in single and "derived by the program" in single
 
 
 def test_the_old_instruction_is_what_the_test_says_it_is():
@@ -683,5 +689,7 @@ def test_a_project_block_generated_from_the_old_text_is_replaced_by_the_new_one(
         component_types.ComponentType("single_tht", "x", OLD_SINGLE_THT))
     notes = old_block + "\n\nNota dell'utente: rele' a 5 pin."
     refreshed = component_types.apply_block(notes, component_types.get("single_tht"))
-    assert "stima drill_mm" not in refreshed and "non stimarlo" in refreshed
+    # CONTRACT CHANGED 2026-11-12: prompts in English («non stimarlo» ->
+    # «do not estimate it» in the refreshed block).
+    assert "stima drill_mm" not in refreshed and "do not estimate it" in refreshed
     assert refreshed.endswith("Nota dell'utente: rele' a 5 pin.")

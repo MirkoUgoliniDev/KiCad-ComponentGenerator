@@ -20,8 +20,54 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional, Sequence
 
-BLOCK_START = "--- Tipologia componente (generato, modificabile) ---"
-BLOCK_END = "--- fine tipologia componente ---"
+#: Markers written around the generated block. The block is sent to the model
+#: with the notes, so since 2026-11-12 (all prompts in English, user decision)
+#: the markers are English too.
+BLOCK_START = "--- Component type (generated, editable) ---"
+BLOCK_END = "--- end of component type ---"
+
+#: Marker pairs written by earlier versions, still recognised in saved notes
+#: and projects (project_config.json `field_component_prompt`): a block
+#: between them is found, stripped and replaced exactly like a current one,
+#: and every rewrite uses the current markers. The Italian pair was written
+#: until 2026-11-12.
+LEGACY_BLOCK_MARKERS: tuple[tuple[str, str], ...] = (
+    ("--- Tipologia componente (generato, modificabile) ---", "--- fine tipologia componente ---"),
+)
+
+#: Every (start, end) marker pair a block may carry, the current one first.
+#: Code that looks for a block on its own (a regular expression, an `in`
+#: test) must try them all, or use :func:`has_block`.
+BLOCK_MARKERS: tuple[tuple[str, str], ...] = ((BLOCK_START, BLOCK_END),) + LEGACY_BLOCK_MARKERS
+
+
+def _locate_block(text: str) -> Optional[tuple[str, str, str]]:
+    """Split `text` at the first block start marker of any known pair.
+
+    @return (before, rest, end_marker): the text before the start marker,
+        the text after it, and the end marker paired with the start marker
+        found; None when no start marker occurs. The earliest occurrence
+        wins, so a note holding both an old and a new block is handled one
+        block at a time, as before with a single pair.
+    """
+    best = None
+    for start, end in BLOCK_MARKERS:
+        index = text.find(start)
+        if index >= 0 and (best is None or index < best[0]):
+            best = (index, start, end)
+    if best is None:
+        return None
+    index, start, end = best
+    return text[:index], text[index + len(start):], end
+
+
+def has_block(text: Optional[str]) -> bool:
+    """@brief Tell whether the notes hold the start marker of a generated block, current or legacy.
+
+    @param text Notes text (None is treated as empty).
+    @return True when any marker pair of BLOCK_MARKERS opens a block.
+    """
+    return _locate_block(text or "") is not None
 
 
 @dataclass(frozen=True)
@@ -42,33 +88,34 @@ _SINGLE_THT = ComponentType(
     key="single_tht",
     label="Componente singolo a fori passanti (THT)",
     prompt=(
-        "TIPOLOGIA: componente SINGOLO a FORI PASSANTI (THT). E' un singolo "
-        "componente discreto o connettore, con terminali che attraversano il PCB "
-        "e vanno in fori metallizzati.\n"
-        "- Terminali su una griglia regolare: layout \"matrix\" con rows, cols e "
-        "pad_diameter_mm; pitch_mm solo con piu' di una colonna, row_spacing_mm "
-        "solo con piu' di una riga. Se i terminali non stanno su una griglia "
-        "regolare, descrivi ogni pad in package_geometry (pad_type "
+        "TYPE: SINGLE THROUGH-HOLE (THT) component. It is a single discrete "
+        "component or connector, with terminals that pass through the PCB "
+        "into plated holes.\n"
+        "- Terminals on a regular grid: \"matrix\" layout with rows, cols and "
+        "pad_diameter_mm; pitch_mm only with more than one column, row_spacing_mm "
+        "only with more than one row. If the terminals do not lie on a regular "
+        "grid, describe each pad in package_geometry (pad_type "
         "\"thru_hole\").\n"
-        "- FORI: trascrivi solo cio' che e' STAMPATO. Se la tabella o il disegno "
-        "\"Recommended PCB layout\", \"PCB hole dimensions\" o simili stampa il "
-        "foro, riportalo in drill_mm (maggiore di zero e minore della piazzola) "
-        "e dichiaralo \"read\" in value_sources; per un pad di package_geometry "
-        "ricopia anche il richiamo stampato in hole_callout. Se il foro NON e' "
-        "stampato non stimarlo: ometti drill_mm e da' il terminale che entra nel "
-        "foro, com'e' quotato -- in lead per ogni pad di package_geometry, in "
-        "lead_diameter_mm per la griglia -- dichiarandone la provenienza in "
-        "value_sources. Foro e piazzola non stampati li ricava il programma dal "
-        "terminale.\n"
-        "- PIAZZOLE: se il disegno stampa la piazzola trascrivila e dichiarala "
-        "\"read\"; altrimenti la dimensione che scrivi e' una tua stima, da "
-        "dichiarare \"estimated\" in value_sources.\n"
-        "- pitch_mm e row_spacing_mm sono quote distinte e si leggono dalla vista "
-        "dall'alto o dal basso del disegno meccanico quotato, non dalla vista "
-        "laterale: dichiara in contacts_view quale vista hai letto (la "
-        "specchiatura la fa il programma) e in drawing_unit l'unita' delle quote.\n"
-        "- Le quote del corpo (body_*) sono l'ingombro del componente reale, "
-        "non quello dei pad."
+        "- HOLES: transcribe only what is PRINTED. If the table or the drawing "
+        "\"Recommended PCB layout\", \"PCB hole dimensions\" or similar prints the "
+        "hole, report it in drill_mm (greater than zero and smaller than the pad) "
+        "and declare it \"read\" in value_sources; for a pad of package_geometry "
+        "also copy the printed callout into hole_callout. If the hole is NOT "
+        "printed do not estimate it: omit drill_mm and give the terminal that goes "
+        "into the hole, as dimensioned -- in lead for each pad of package_geometry, "
+        "in lead_diameter_mm for the grid -- declaring its provenance in "
+        "value_sources. A hole and a pad that are not printed are derived by the "
+        "program from the terminal.\n"
+        "- PADS: if the drawing prints the pad, transcribe it and declare it "
+        "\"read\"; otherwise the size you write is your own estimate, to be "
+        "declared \"estimated\" in value_sources.\n"
+        "- pitch_mm and row_spacing_mm are distinct dimensions and are read from "
+        "the top or bottom view of the dimensioned mechanical drawing, not from the "
+        "side view: declare in contacts_view which view you read (the "
+        "mirroring is done by the program) and in drawing_unit the unit of the "
+        "dimensions.\n"
+        "- The body dimensions (body_*) are the outline of the real component, "
+        "not that of the pads."
     ),
 )
 
@@ -76,25 +123,25 @@ _SINGLE_SMD = ComponentType(
     key="single_smd",
     label="Componente singolo SMD",
     prompt=(
-        "TIPOLOGIA: componente SINGOLO SMD (montaggio superficiale). I terminali "
-        "appoggiano sulla superficie del PCB: nessun pad ha un foro.\n"
-        "- Descrivi i pad in package_geometry, che per un componente SMD e' la "
-        "fonte del footprint: un elemento per pin con number, centro (x_mm, "
-        "y_mm), dimensioni del pad (pad_length_mm, pad_width_mm), pad_type "
-        "\"smd\" e, se il pad e' ruotato, rotation_deg; family secondo il "
-        "package, oppure \"custom\". Un pad esposto o termico e' un pin a se', "
-        "con il numero che gli da' il datasheet.\n"
-        "- Le dimensioni dei pad vengono dalla tabella \"Recommended Land "
-        "Pattern\" / \"Recommended Solder Pad Layout\" / \"Footprint\", NON dalle "
-        "quote del corpo o dei terminali: il land pattern e' di norma piu' grande "
-        "dei terminali.\n"
-        "- Indica in source_view di package_geometry la vista da cui leggi le "
-        "coordinate (la specchiatura della vista dal basso la fa il programma) e "
-        "in drawing_unit l'unita' delle quote.\n"
-        "- Non compilare drill_mm: un pad SMD non ha foro. rows, cols, pitch_mm "
-        "e row_spacing_mm sono facoltativi e solo informativi.\n"
-        "- confidence al massimo \"medium\" se il datasheet non riporta un land "
-        "pattern raccomandato."
+        "TYPE: SINGLE SMD component (surface mount). The terminals "
+        "rest on the surface of the PCB: no pad has a hole.\n"
+        "- Describe the pads in package_geometry, which for an SMD component is "
+        "the source of the footprint: one element per pin with number, centre "
+        "(x_mm, y_mm), pad size (pad_length_mm, pad_width_mm), pad_type "
+        "\"smd\" and, if the pad is rotated, rotation_deg; family according to "
+        "the package, or \"custom\". An exposed or thermal pad is a pin of its "
+        "own, with the number the datasheet gives it.\n"
+        "- The pad sizes come from the \"Recommended Land "
+        "Pattern\" / \"Recommended Solder Pad Layout\" / \"Footprint\" table, NOT "
+        "from the dimensions of the body or of the terminals: the land pattern is "
+        "normally larger than the terminals.\n"
+        "- State in source_view of package_geometry the view from which you read "
+        "the coordinates (the mirroring of the bottom view is done by the program) "
+        "and in drawing_unit the unit of the dimensions.\n"
+        "- Do not fill in drill_mm: an SMD pad has no hole. rows, cols, pitch_mm "
+        "and row_spacing_mm are optional and informative only.\n"
+        "- confidence at most \"medium\" if the datasheet does not give a "
+        "recommended land pattern."
     ),
 )
 
@@ -102,26 +149,26 @@ _AGGREGATE_THT = ComponentType(
     key="aggregate_tht",
     label="Scheda con componenti · connettori passanti",
     prompt=(
-        "TIPOLOGIA: SCHEDA CON COMPONENTI a FORI PASSANTI -- un modulo o una "
-        "schedina assemblata che si monta come un unico componente tramite pin "
-        "passanti.\n"
-        "- Il corpo e' l'ingombro dell'intero modulo (case o PCB del modulo), non "
-        "quello di un singolo componente montato sopra.\n"
-        "- Pin su griglia regolare: layout \"matrix\". Se la numerazione non segue "
-        "l'ordine colonna per colonna (per esempio a U: 1..N lungo una fila, poi "
-        "a ritroso sull'altra), compila pin_map con le posizioni come appaiono "
-        "nel disegno.\n"
-        "- Dichiara in contacts_view da che lato e' visto il disegno dei pin (i "
-        "pinout dei moduli sono spesso in BOTTOM VIEW): la specchiatura la fa il "
-        "programma, anche quando la numerazione segue l'ordine delle colonne e "
-        "pin_map e' omessa. body_offset_x_mm e body_offset_y_mm si leggono sullo "
-        "stesso disegno.\n"
-        "- row_spacing_mm (distanza tra file adiacenti) e pitch_mm (passo lungo la "
-        "fila) sono quote distinte: leggile separatamente. Con una sola fila "
-        "row_spacing_mm si omette.\n"
-        "- Se la matrice non e' completamente popolata, elenca in populated_pins "
-        "solo le posizioni con un pin fisico.\n"
-        "- Dichiara in drawing_unit l'unita' delle quote del disegno."
+        "TYPE: BOARD WITH THROUGH-HOLE COMPONENTS -- a module or a small "
+        "assembled board that is mounted as one single component through "
+        "through-hole pins.\n"
+        "- The body is the outline of the whole module (case or PCB of the module), "
+        "not that of a single component mounted on it.\n"
+        "- Pins on a regular grid: \"matrix\" layout. If the numbering does not "
+        "follow the column-by-column order (for example U-shaped: 1..N along one "
+        "row, then backwards along the other), fill in pin_map with the positions "
+        "as they appear in the drawing.\n"
+        "- Declare in contacts_view from which side the pin drawing is seen "
+        "(module pinouts are often in BOTTOM VIEW): the mirroring is done by the "
+        "program, even when the numbering follows the column order and "
+        "pin_map is omitted. body_offset_x_mm and body_offset_y_mm are read on the "
+        "same drawing.\n"
+        "- row_spacing_mm (distance between adjacent rows) and pitch_mm (pitch along "
+        "the row) are distinct dimensions: read them separately. With a single row "
+        "row_spacing_mm is omitted.\n"
+        "- If the matrix is not fully populated, list in populated_pins "
+        "only the positions with a physical pin.\n"
+        "- Declare in drawing_unit the unit of the drawing's dimensions."
     ),
 )
 
@@ -129,30 +176,31 @@ _AGGREGATE_CASTELLATED = ComponentType(
     key="aggregate_castellated",
     label="Scheda con componenti · connettori castellated (mezzo foro)",
     prompt=(
-        "TIPOLOGIA: SCHEDA CON COMPONENTI con PIAZZOLE A MEZZO FORO (castellated "
-        "holes) -- modulo su PCB i cui contatti sono metallizzazioni sul bordo "
-        "della schedina, saldate come SMD sulla scheda madre.\n"
-        "- layout \"castellated\": descrivi i contatti in castellated_sides, un "
-        "elemento per ogni lato che li porta (fino a quattro), ciascuno con il "
-        "suo count, il suo pitch_mm e, se il gruppo non e' centrato, offset_mm; "
-        "lati diversi possono avere numero di contatti e passo diversi.\n"
-        "- La numerazione fisica dei pad (first_pin, reverse) e' unica su tutti "
-        "i lati; le sigle serigrafate vanno in pin_names, non nei numeri.\n"
-        "- Per ogni lato leggi dalla foto del bordo contact_style; se il bordo non "
-        "si vede o il tipo non si distingue ometti contact_style: lo sceglie "
-        "l'utente, non va dedotto. Se quotati o visibili riporta anche "
-        "half_hole_diameter_mm (diametro del semi-foro sul bordo) e "
-        "through_hole_drill_mm (diametro del foro intero), e dalla tabella "
-        "\"Recommended PCB land pattern\" pad_length_mm e pad_width_mm della "
-        "piazzola sulla scheda madre. Nel value_sources del lato dichiara per "
-        "ciascuno se e' letto, ricavato o stimato dalla foto.\n"
-        "- Dichiara in contacts_view da che lato e' visto il disegno o la foto da "
-        "cui leggi i lati: la specchiatura la fa il programma.\n"
-        "- Contatti che non stanno sul bordo (per esempio un pad termico o una "
-        "fila interna) non entrano in castellated_sides: segnalali in notes.\n"
-        "- Il corpo e' l'intero modulo: body_height_mm include l'eventuale "
-        "schermatura metallica, pcb_thickness_mm e' lo spessore della sola PCB.\n"
-        "- Dichiara in drawing_unit l'unita' delle quote del disegno."
+        "TYPE: BOARD WITH COMPONENTS with HALF-HOLE PADS (castellated "
+        "holes) -- a module on a PCB whose contacts are platings on the edge "
+        "of the small board, soldered like SMD onto the motherboard.\n"
+        "- \"castellated\" layout: describe the contacts in castellated_sides, one "
+        "element for each side that carries them (up to four), each with its "
+        "own count, its own pitch_mm and, if the group is not centred, offset_mm; "
+        "different sides can have different numbers of contacts and pitches.\n"
+        "- The physical numbering of the pads (first_pin, reverse) is one single "
+        "numbering across all sides; the silkscreen labels go in pin_names, not in "
+        "the numbers.\n"
+        "- For each side read contact_style from the photo of the edge; if the edge "
+        "is not visible or the type cannot be told apart, omit contact_style: the "
+        "user chooses it, it must not be deduced. If dimensioned or visible, also "
+        "report half_hole_diameter_mm (diameter of the half-hole on the edge) and "
+        "through_hole_drill_mm (diameter of the full hole), and from the "
+        "\"Recommended PCB land pattern\" table pad_length_mm and pad_width_mm of "
+        "the pad on the motherboard. In the side's value_sources declare for "
+        "each one whether it is read, derived or estimated from the photo.\n"
+        "- Declare in contacts_view from which side the drawing or the photo you "
+        "read the sides from is seen: the mirroring is done by the program.\n"
+        "- Contacts that are not on the edge (for example a thermal pad or an "
+        "inner row) do not go in castellated_sides: report them in notes.\n"
+        "- The body is the whole module: body_height_mm includes any metal "
+        "shield, pcb_thickness_mm is the thickness of the PCB alone.\n"
+        "- Declare in drawing_unit the unit of the drawing's dimensions."
     ),
 )
 
@@ -194,22 +242,30 @@ SUPERSEDED_LABELS: dict[str, tuple[str, ...]] = {
 #: derives a hole that is not printed (datasheet_extractor
 #: DEFAULT_SINGLE_SYSTEM_PROMPT, `_resolve_pad_terminals`); the instruction
 #: is sent with every analysis and contradicted the system prompt.
+#: The Italian texts of all four types (the last digest of each set:
+#: 2c530c27..., 44ab2ff7..., b1feb1a3..., f12d82a1...) were replaced on
+#: 2026-11-12 by their faithful English translation: every prompt sent to a
+#: model is in English (user decision), the rules themselves are unchanged.
 SUPERSEDED_INSTRUCTION_DIGESTS: dict[str, frozenset[str]] = {
     "single_tht": frozenset({
         "b4ac3268f0ad952b7e6547d640017fba687cec112b7473c04464eaff04ef15a0",
         "a22b90207ad9a7c73c6cb09623cd0f7b9a1b948eda120ea1985dbc4780328555",
         "dfcb4dd38185961f7d5e72fef151657f8b22090d065917434e3ff1cd66de5155",
         "0941635ab39bec9b9fdf01f3f2286984ce34d7b6623dd476894ae2ea8b2c2518",
+        "2c530c27fd10541e97f9d6ff0754d4451f5f7a54567491b0e17bc3e5c4e24c28",
     }),
     "single_smd": frozenset({
         "8c8b7b749de39798ae1b1cf71b263b94dc34b3c82f338a828e7bcf6b8c7326b2",
+        "44ab2ff72c479a4ee66bf6f24c42e537fa29b14ba5d3e1c1c676010c35afa5ac",
     }),
     "aggregate_tht": frozenset({
         "dab44a80479988f9b9121cc0315ca88dd671f2ba7cf2b196ad6694a3604304df",
+        "b1feb1a399e1631eef001b5e43176ab6a654dd6b3ad93c650a8de46b08810591",
     }),
     "aggregate_castellated": frozenset({
         "46414d2eeb091695755cc41eaa9c1d387f7bfe03cf76932c138093596c4749c9",
         "2a307c67e5df3ff3b3150c69de731dc7828b4781949d47391f9b6fe903263de6",
+        "f12d82a1b9f68517a7e0ab67be3d14bed2e948fbd335a0273ade6b1edce173fb",
     }),
 }
 
@@ -252,12 +308,15 @@ def strip_block(text: str) -> str:
     @return The notes without the block, stripped of surrounding blank lines.
     @note A block whose closing marker was deleted by the user loses the rest
         of the block, never the text before it, which is certainly the user's.
+    @note A block between legacy markers (LEGACY_BLOCK_MARKERS) is removed
+        the same way: its start marker is closed by its own end marker.
     """
-    if BLOCK_START not in text:
+    located = _locate_block(text)
+    if located is None:
         return text.strip()
 
-    before, _, rest = text.partition(BLOCK_START)
-    _, end_found, after = rest.partition(BLOCK_END)
+    before, rest, end_marker = located
+    _, end_found, after = rest.partition(end_marker)
     # Block without a closing marker (the user may have deleted it): the
     # rest of the block is thrown away, not the preceding text, which is
     # certainly the user's.
@@ -291,14 +350,18 @@ def block_text(text: str) -> Optional[str]:
     """@brief Return the instruction text inside the generated block of the notes, or None without a block.
 
     @param text Notes text (None is treated as empty).
-    @return What lies between BLOCK_START and BLOCK_END, without the line
-        breaks `build_block` puts around it; None when the notes hold no
-        block or the block has lost its closing marker (it cannot be told
-        apart from the user's text after it).
+    @return What lies between BLOCK_START and BLOCK_END (or a legacy pair of
+        LEGACY_BLOCK_MARKERS), without the line breaks `build_block` puts
+        around it; None when the notes hold no block or the block has lost
+        its closing marker (it cannot be told apart from the user's text
+        after it).
     """
-    before, start, rest = (text or "").partition(BLOCK_START)
-    inner, end, _after = rest.partition(BLOCK_END)
-    if not start or not end:
+    located = _locate_block(text or "")
+    if located is None:
+        return None
+    _before, rest, end_marker = located
+    inner, end, _after = rest.partition(end_marker)
+    if not end:
         return None
     return inner.strip("\r\n")
 

@@ -753,41 +753,51 @@ def test_worker_forwards_separate_photo_and_datasheet_models(monkeypatch):
 
 
 def test_settings_preserve_legacy_defaults_but_runtime_uses_one_model(window, monkeypatch):
+    """@brief CONTRACT CHANGED 2026-11-12: the window receives the single model and the step table
+    only; it saves the model(s) and the CHANGED steps, never a prompt.
+
+    @note Negative: the steps the user did not change stay unsaved (a pad step that
+        follows the old «Posizioni pad» default keeps following it).
+    """
     window.profile_store.save_defaults({'vision_model': 'vendor/old-photo'})
     window._session_model = "vendor/session-datasheet"
     saved = []
+    shown = window.profile_store.step_models()
+
     class SettingsStub:
-        def __init__(self, prompt, model, parent, *, current_vision_model,
-                     current_grounding_prompt, current_verification_prompt, current_verification_model,
-                     current_single_prompt=None, current_numbering_prompt=None, current_family=None,
-                     current_pad_model=None):
-            assert current_vision_model == "vendor/old-photo"
+        def __init__(self, *, current_model, parent, current_step_models, **kwargs):
+            assert current_model == window.profile_store.defaults()["model"]
+            assert current_step_models == shown
             assert parent is window
         def exec(self): return QDialog.DialogCode.Accepted
         # Every modal is released after exec() (`MainWindow._run_modal`,
         # review 2026-10-27 A7): the stub stands in for a QDialog, so it
         # offers the same release call.
         def deleteLater(self): pass
-        def prompt(self): return "prompt"
-        def single_prompt(self): return "single"
-        def numbering_prompt(self): return "numbering"
         def pad_model(self): return "vendor/pad-reader"
         def model(self): return "vendor/new-datasheet"
         def vision_model(self): return "vendor/new-photo"
         def verification_model(self): return "vendor/new-verify"
-        def grounding_prompt(self): return "localize"
-        def verification_prompt(self): return "verify"
+        def step_models(self):
+            return dict(shown, pad_positions_prompt="vendor/pad-reader", crop_prompt="vendor/crops")
     monkeypatch.setattr(gui, "LlmSettingsDialog", SettingsStub)
     monkeypatch.setattr(gui, "save_config", lambda config: saved.append(deepcopy(config)))
+    before = window.profile_store.defaults()
     window._edit_llm_settings()
     assert saved == []  # No AI profile writes to legacy JSON.
     defaults = window.profile_store.defaults()
     assert defaults["vision_model"] == "vendor/new-photo"
     assert defaults["verification_model"] == "vendor/new-verify"
-    assert defaults["grounding_prompt"] == "localize"
-    assert defaults["verification_prompt"] == "verify"
+    # The model window writes no prompt (they are edited in the profile manager only).
+    for field in ("grounding_prompt", "verification_prompt", "system_prompt",
+                  "system_prompt_single", "numbering_prompt"):
+        assert defaults[field] == before[field], field
     assert defaults["model"] == "vendor/new-datasheet"
-    assert defaults["pad_model"] == "vendor/pad-reader"
+    # CONTRACT CHANGED 2026-11-12 (review finding B): only the changed steps are
+    # saved and the old 'pad_model' field is never written from this window.
+    assert defaults["pad_model"] == before["pad_model"]
+    assert window.profile_store.step_models_stored() == {
+        "pad_positions_prompt": "vendor/pad-reader", "crop_prompt": "vendor/crops"}
     assert window._effective_model() == "vendor/session-datasheet"
     assert window._vision_model() == "vendor/session-datasheet"
     assert window._verification_model() == "vendor/session-datasheet"

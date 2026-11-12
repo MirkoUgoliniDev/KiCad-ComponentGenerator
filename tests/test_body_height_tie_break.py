@@ -96,7 +96,9 @@ def test_the_tiles_are_four_enlarged_quarters_within_the_limits(tmp_path):
     images = [b for b in blocks if b.get("type") == "image_url"]
     captions = [b["text"] for b in blocks if b.get("type") == "text"]
     assert len(images) == 5 and len(captions) == 5
-    assert "pagina intera" in captions[0] and all(f"riquadro {i} di 4" in captions[i] for i in range(1, 5))
+    # CONTRACT CHANGED 2026-11-12: prompts in English, fixed and never in the
+    # interface language (the captions were tx() texts before).
+    assert "whole page" in captions[0] and all(f"tile {i} of 4" in captions[i] for i in range(1, 5))
     limits = model_image_limits("vendor/reader")
     tile_w, tile_h = int(977 * ext.TILE_SIDE_FRACTION), int(767 * ext.TILE_SIDE_FRACTION)
     for block in images[1:]:

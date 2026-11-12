@@ -1241,14 +1241,16 @@ def _inventory_context(text):
     text before/after them and unknown edits rather than guessing their extent.
     """
     from .photo_grounding import VERIFICATION_PROMPT
-    from .component_types import BLOCK_START, BLOCK_END
+    from .component_types import BLOCK_MARKERS
     legacy = VERIFICATION_PROMPT.replace(
         'Do NOT invent exact electrical function, part numbers, markings or values.',
         'Do NOT identify electrical type, part number, markings, values or circuit function.')
     for template in (VERIFICATION_PROMPT, legacy):
         pattern = r'\s+'.join(re.escape(word) for word in template.split())
         text = re.sub(pattern, '', text)
-    text = re.sub(re.escape(BLOCK_START) + r'.*?' + re.escape(BLOCK_END), '', text, flags=re.DOTALL)
+    # Every marker pair: notes saved before 2026-11-12 carry the Italian ones.
+    for start, end in BLOCK_MARKERS:
+        text = re.sub(re.escape(start) + r'.*?' + re.escape(end), '', text, flags=re.DOTALL)
     return text.strip()
 
 
@@ -1586,13 +1588,22 @@ def _call_once(call, kwargs) -> dict:
 def review_global_inventory(photo, components, length, width, model, call, log, cache_dir=None,
                             *, verification_prompt=None, extra_instructions=None,
                             detector_ran=False, prompt=None, enumerate_prompt=None,
-                            enumerate_empty_prompt=None):
+                            enumerate_empty_prompt=None, step_models=None):
     """@brief Make one global semantic request, or replay a validated versioned cache.
     @param photo Calibrated BGR top photograph.
     @param components All YOLO candidates with unique integer IDs and global boxes.
     @param length Board X dimension in mm.
     @param width Board Y dimension in mm.
-    @param model Caller-selected model, unchanged.
+    @param model Caller-selected model: the request's model when `step_models`
+        gives the step 'inventory_prompt' no usable model of its own.
+    @param step_models The model of every analysis step
+        (prompt_models.step_models), or None (exactly the behaviour before
+        2026-11-12: `model` is sent). Resolved HERE, before the images are
+        sized (model_image_limits) and before the cache key: the three
+        inventory prompts are one step, 'inventory_prompt'
+        (prompt_models.STEP_OF_FIELD). A caller that already resolved the
+        model passes it as `model` and leaves this None, so an unusable step
+        model is reported once.
     @param call Application API callable, invoked without local retries: once,
         plus at most ONE more paid call in the whole run -- either for an
         unreadable answer (tool arguments not JSON) or for an answer omitting a
@@ -1654,6 +1665,11 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
         raise ValueError('Global inventory requires a nonempty photograph')
     if not all(_number(v, 0, 1e6) and v > 0 for v in (length, width)):
         raise ValueError('Global inventory requires positive finite board dimensions')
+    # The step's own model, chosen before anything is sized or keyed for it:
+    # a model swapped after the cache key would replay one model's answer
+    # under another's name (prompt_models module note).
+    from .prompt_models import usable_model
+    model = usable_model('inventory_prompt', step_models, model, log)
     # Proposals below the operating threshold that nobody kept do not go to
     # the paid model: they are visible in the review, but they enter only if
     # the user keeps them (photo_yolo.awaiting_user_keep). Removed HERE, before

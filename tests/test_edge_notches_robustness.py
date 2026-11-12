@@ -384,3 +384,14 @@ def test_a_side_declared_with_full_holes_never_asks_for_a_recount(tmp_path):
     half = [dict(edge="right", count=7, pitch_mm=2.54, contact_style="half_hole")]
     assert count_disagreements(profiles, shape, 40, 16, through) == []
     assert [item.found for item in count_disagreements(profiles, shape, 40, 16, half)] == [4]
+
+
+def test_an_uncountable_edge_carries_an_english_reason_for_the_model():
+    """@brief Prompts in English only (2026-11-12): the reason a model request reads is English,
+    the log keeps the interface-language text; positive and negative on the same edge."""
+    from kicadgen.services import edge_notches
+    counted = edge_notches.count_notches([0.0, 0.0], 0.0)
+    assert counted.found is None
+    assert counted.model_reason == "photo not calibrated"
+    assert counted.reason == "foto non calibrata", "the log text stays the Italian source"
+    assert counted.reason != counted.model_reason

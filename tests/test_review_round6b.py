@@ -447,4 +447,9 @@ def test_a_main_answer_cannot_set_the_program_s_conclusions(monkeypatch, tmp_pat
     # reading does); none of the model's words may stand as one.
     for text in (params.pin_map_conflict, params.body_conflict, params.notes):
         assert "il modello dice" not in (text or "")
-    assert not [key for key in params.raw_main or {} if key.startswith("_")]
+    # The only «_» key of the stored answer is the program's own record of the
+    # model that gave it (RAW_MAIN_MODEL_KEY, review finding 1 of 2026-11-12),
+    # never one of the injected conclusions.
+    raw = params.raw_main or {}
+    assert [key for key in raw if key.startswith("_")] == [ext.RAW_MAIN_MODEL_KEY]
+    assert raw[ext.RAW_MAIN_MODEL_KEY] == ext.DEFAULT_MODEL

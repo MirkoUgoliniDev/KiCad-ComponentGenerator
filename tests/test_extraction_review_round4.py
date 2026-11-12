@@ -552,12 +552,13 @@ def test_a_grid_without_hole_and_without_lead_is_unread_never_invented():
 
 def test_the_single_prompt_no_longer_asks_and_forbids_the_hole():
     prompt = ext.DEFAULT_SINGLE_SYSTEM_PROMPT
+    # CONTRACT CHANGED 2026-11-12: prompts in English.
     # The contradiction of 2026-11-10: «thru_hole con drill_mm» and, later, «ometti drill_mm».
-    assert "thru_hole con drill_mm" not in prompt and "ometti drill_mm" in prompt
+    assert "thru_hole with drill_mm" not in prompt and "omit drill_mm" in prompt
     # The land is said once: always given, printed or an estimate the program replaces.
-    assert prompt.count("PIAZZOLA:") == 1 and "piazzola consigliata" not in prompt
+    assert prompt.count("LAND:") == 1 and "recommended land" not in prompt.lower()
     # The slot has axes, and the grid follows the pads' rule.
-    assert "asola orizzontale" in prompt and "grid.drill_mm solo se" in prompt
+    assert "horizontal slot" in prompt and "grid.drill_mm only if" in prompt
     assert ("a8ec8c4c0e846a73fa8f74f93eb2ac111d0eebb093c5d5d91484013d19a9f5ef"
             in ext.SUPERSEDED_SINGLE_PROMPT_DIGESTS)
     assert component_types.text_digest(prompt) not in ext.SUPERSEDED_SINGLE_PROMPT_DIGESTS
@@ -570,7 +571,8 @@ def test_the_changed_tools_still_convert_to_strict_mode():
 
 def test_the_slot_axes_are_stated_in_the_shared_pad_schema():
     text = ext._PAD_TERMINAL_PROPERTIES["drill_length_mm"]["description"]
-    assert "lungo Y" in text and "lungo X" in text
+    # CONTRACT CHANGED 2026-11-12: prompts in English.
+    assert "along Y" in text and "along X" in text
 
 
 # ---------------------------------------------------------------------------

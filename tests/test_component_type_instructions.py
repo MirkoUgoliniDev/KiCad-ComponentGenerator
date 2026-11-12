@@ -50,7 +50,45 @@ FORBIDDEN = {
     "pin_map_view": "replaced by contacts_view, which covers every contact geometry",
     "ESP32": "a type is a structural class: no product examples",
     "nRF": "a type is a structural class: no product examples",
+    # CONTRACT CHANGED 2026-11-12: prompts in English. The Italian fragments
+    # above still catch the former texts (negative cases below); these are
+    # the same contradictions as an English instruction would state them
+    # («due file» as «on two rows», narrower than a bare «two rows», which an
+    # English system prompt may legitimately use for a two-row header).
+    "describes THT pads": "the schema also describes explicit SMD pads (package_geometry)",
+    "only a matrix": "castellated_sides and package_geometry describe non-matrix contacts",
+    "on two rows": "the matrix has any number of rows and castellated modules up to four sides",
 }
+
+#: The «single SMD» instruction as it was from 2026-09-26 to 2026-11-12, in
+#: Italian, verbatim. Replaced by its English translation (every prompt in
+#: English, user decision): a database still holding it is migrated.
+ITALIAN_SMD_INSTRUCTION = (
+    "TIPOLOGIA: componente SINGOLO SMD (montaggio superficiale). I terminali "
+    "appoggiano sulla superficie del PCB: nessun pad ha un foro.\n"
+    "- Descrivi i pad in package_geometry, che per un componente SMD e' la "
+    "fonte del footprint: un elemento per pin con number, centro (x_mm, "
+    "y_mm), dimensioni del pad (pad_length_mm, pad_width_mm), pad_type "
+    "\"smd\" e, se il pad e' ruotato, rotation_deg; family secondo il "
+    "package, oppure \"custom\". Un pad esposto o termico e' un pin a se', "
+    "con il numero che gli da' il datasheet.\n"
+    "- Le dimensioni dei pad vengono dalla tabella \"Recommended Land "
+    "Pattern\" / \"Recommended Solder Pad Layout\" / \"Footprint\", NON dalle "
+    "quote del corpo o dei terminali: il land pattern e' di norma piu' grande "
+    "dei terminali.\n"
+    "- Indica in source_view di package_geometry la vista da cui leggi le "
+    "coordinate (la specchiatura della vista dal basso la fa il programma) e "
+    "in drawing_unit l'unita' delle quote.\n"
+    "- Non compilare drill_mm: un pad SMD non ha foro. rows, cols, pitch_mm "
+    "e row_spacing_mm sono facoltativi e solo informativi.\n"
+    "- confidence al massimo \"medium\" se il datasheet non riporta un land "
+    "pattern raccomandato."
+)
+
+#: The block markers written until 2026-11-12, verbatim, as they sit in
+#: saved notes and project files.
+ITALIAN_START = "--- Tipologia componente (generato, modificabile) ---"
+ITALIAN_END = "--- fine tipologia componente ---"
 
 #: snake_case words that are not schema identifiers (plain words of the text).
 _NOT_FIELDS = {"body_"}
@@ -102,6 +140,29 @@ def test_the_checker_rejects_the_old_smd_instruction():
     assert "drill_mm = 0" in problems and "descrive pad THT" in problems
 
 
+def test_the_checker_rejects_the_same_contradictions_in_english():
+    """CONTRACT CHANGED 2026-11-12: prompts in English; the checker must catch an English contradiction too."""
+    english = ("The schema of this tool describes THT pads: set drill_mm = 0. "
+               "It describes only a matrix of pins on two rows.")
+    problems = "\n".join(_violations(english))
+    for fragment in ("drill_mm = 0", "describes THT pads", "only a matrix", "on two rows"):
+        assert fragment in problems
+    # Negative: the current English instructions state none of them.
+    for component_type in COMPONENT_TYPES:
+        assert not any(f in component_type.prompt for f in FORBIDDEN), component_type.key
+
+
+def test_the_type_instructions_are_written_in_english():
+    """CONTRACT CHANGED 2026-11-12: prompts in English. No Italian marker word is left in a type instruction."""
+    for component_type in COMPONENT_TYPES:
+        text = component_type.prompt
+        assert text.startswith("TYPE: "), component_type.key
+        for italian in ("TIPOLOGIA", " e' ", " della ", " delle ", " non ", "Dichiara"):
+            assert italian not in text, (component_type.key, italian)
+    # Negative: the Italian text these replaced is caught by the same check.
+    assert ITALIAN_SMD_INSTRUCTION.startswith("TIPOLOGIA") and " e' " in ITALIAN_SMD_INSTRUCTION
+
+
 def test_the_checker_rejects_a_field_the_schema_does_not_have():
     assert any("hole_size_mm" in p for p in _violations("compila hole_size_mm"))
 
@@ -136,6 +197,69 @@ def test_the_schema_has_unit_view_and_hole_fields():
 
 def test_the_old_instruction_is_a_known_superseded_default():
     assert text_digest(OLD_SMD_INSTRUCTION) in SUPERSEDED_INSTRUCTION_DIGESTS["single_smd"]
+    assert text_digest(ITALIAN_SMD_INSTRUCTION) in SUPERSEDED_INSTRUCTION_DIGESTS["single_smd"]
+
+
+def test_a_stored_italian_instruction_becomes_the_english_one_and_an_edited_copy_is_kept(tmp_path):
+    """Positive: the Italian default in a user's database is migrated. Negative: one added line keeps it."""
+    _store_with(tmp_path / "it.sqlite3", "single_smd", ITALIAN_SMD_INSTRUCTION)
+    assert (ProfileStore(tmp_path / "it.sqlite3").get_type("single_smd")["instructions"]
+            == component_types.get("single_smd").prompt)
+    edited = ITALIAN_SMD_INSTRUCTION + "\n- Pad in pollici."
+    _store_with(tmp_path / "edited.sqlite3", "single_smd", edited)
+    assert ProfileStore(tmp_path / "edited.sqlite3").get_type("single_smd")["instructions"] == edited
+
+
+# ── block markers: the Italian pair written until 2026-11-12 ─────────────────
+
+def _italian_block(instruction, user_text="Nota mia: case metallico."):
+    """Notes as an earlier version saved them: Italian markers, then the user's text."""
+    return f"{ITALIAN_START}\n{instruction}\n{ITALIAN_END}\n\n{user_text}"
+
+
+def test_the_markers_are_english_and_the_italian_pair_is_still_known():
+    assert component_types.BLOCK_START == "--- Component type (generated, editable) ---"
+    assert component_types.BLOCK_END == "--- end of component type ---"
+    assert (ITALIAN_START, ITALIAN_END) in component_types.LEGACY_BLOCK_MARKERS
+    assert component_types.BLOCK_MARKERS[0] == (component_types.BLOCK_START, component_types.BLOCK_END)
+
+
+def test_a_block_with_italian_markers_is_found_stripped_and_rewritten_with_english_ones():
+    """Positive: the old block is recognised, its text read, and every rewrite uses the new markers."""
+    notes = _italian_block(ITALIAN_SMD_INSTRUCTION)
+    assert component_types.has_block(notes)
+    assert component_types.block_text(notes) == ITALIAN_SMD_INSTRUCTION
+    assert component_types.strip_block(notes) == "Nota mia: case metallico."
+    smd = component_types.get("single_smd")
+    applied = component_types.apply_block(notes, smd)
+    assert applied == component_types.build_block(smd) + "\n\nNota mia: case metallico."
+    assert ITALIAN_START not in applied and ITALIAN_END not in applied
+    # A project saved before the digest was stored: the Italian default is
+    # the program's own text, so the block is brought up to date.
+    refreshed, outcome = component_types.refresh_block(notes, smd)
+    assert outcome == component_types.BLOCK_REFRESHED
+    assert refreshed == applied
+    # The same with the digest the program stored when it wrote the block.
+    written = component_types.block_digest(notes)
+    assert written == text_digest(ITALIAN_SMD_INSTRUCTION)
+    assert component_types.refresh_block(notes, smd, written_digest=written) == (
+        applied, component_types.BLOCK_REFRESHED)
+
+
+def test_an_edited_block_with_italian_markers_and_text_without_markers_are_left_alone():
+    """Negative: a user-edited old block is kept as it is; words alone are not a block."""
+    edited = _italian_block(ITALIAN_SMD_INSTRUCTION + "\n- Pad in pollici.")
+    smd = component_types.get("single_smd")
+    assert component_types.refresh_block(edited, smd) == (edited, component_types.BLOCK_EDITED)
+    plain = "Tipologia componente scelta a mano; fine tipologia componente."
+    assert not component_types.has_block(plain)
+    assert component_types.block_text(plain) is None
+    assert component_types.strip_block(plain) == plain
+    # An Italian start closed only by the English end is not a complete
+    # block: each start marker is closed by its own end marker.
+    mixed = f"{ITALIAN_START}\ntesto\n{component_types.BLOCK_END}\nNota."
+    assert component_types.has_block(mixed)
+    assert component_types.block_text(mixed) is None
 
 
 def test_current_texts_are_not_listed_as_superseded():

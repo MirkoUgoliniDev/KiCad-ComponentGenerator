@@ -167,18 +167,20 @@ sorgenti** è `deepseek-api/deepseek-flash` (salvato nel database dei profili
 `data/analysis_profiles.sqlite3`), quindi serve una chiave DeepSeek.
 **Installato dall'MSI** è `anthropic/claude-opus-5` via OpenRouter
 (l'installatore ricostruisce il database dal codice). Il modello si sceglie
-sempre dall'interfaccia: quello predefinito in «Configurazione» → «Default
-generali AI...», scheda «Modello», e quello della sessione nel riquadro
-«Modello AI»; mai modificando a mano il database.
+sempre dall'interfaccia: quello predefinito in «Configurazione» → «Modello
+AI...», e quello della sessione nel riquadro «Modello AI»; mai modificando
+a mano il database.
 
 **Configurazione → Account AI…** elenca ogni provider con l'origine della
 chiave in uso (variabile d'ambiente, Gestore credenziali di Windows, file
 `.env` o nessuna) e il saldo corrente, letto con gli endpoint gratuiti di
-stato. Incolla una chiave, premi **Verifica** (nessuna chiamata a un modello,
-nessun costo), poi **Salva**: la chiave resta nel Gestore credenziali di
-Windows del tuo account (`KiCadGen/OpenRouter`, `KiCadGen/DeepSeek`), mai in
-un file né nel database dei profili. **Rimuovi chiave** cancella solo quella
-voce.
+stato. Incolla una chiave (l'occhio nel campo, o Alt+F8, la mostra) e premi
+**Verifica e salva**: la chiave viene verificata (nessuna chiamata a un modello,
+nessun costo) e, solo se valida, resta nel Gestore credenziali di Windows del
+tuo account (`KiCadGen/OpenRouter`, `KiCadGen/DeepSeek`), mai in un file né nel
+database dei profili. Una chiave scritta in un file `.env` si sposta lì con
+**Spostala in Windows**, che poi chiede se togliere la sua riga dal file.
+**Rimuovi** cancella solo la voce del Gestore credenziali.
 
 La chiave viene cercata in quest'ordine: variabile d'ambiente
 (`OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`), Gestore credenziali, file `.env`
@@ -213,9 +215,11 @@ progetto…** (F2) rinomina insieme cartella e file.
 - **File**: nuovo, apri, rinomina, progetti recenti, esci.
 - **Configurazione**: «Gestione tipologie e profili AI…» (tipologie di
   componente e loro prompt, nel catalogo SQLite
-  `data/analysis_profiles.sqlite3`), «Default generali AI…» (il modello AI
-  unico con la sua sorgente, OpenRouter o DeepSeek, e i prompt base nelle
-  schede Modello, Datasheet, Localizzazione foto, Verifica foto), «Account
+  `data/analysis_profiles.sqlite3`), «Modello AI…» (il modello AI unico con
+  la sua sorgente, OpenRouter o DeepSeek, e una tabella con il modello di
+  ogni passo dell'analisi: ogni passo segue il modello unico finché
+  «Cambia…» non gliene assegna uno proprio; i prompt si modificano in
+  «Gestione tipologie e profili AI…»), «Account
   AI…», «Opzioni di generazione…» (pin NC, sigle incise, pausa dopo
   l'inventario AI), «Archivio abbinamenti accettati…».
 - **Strumenti**: apri cartella componente, i tre comandi KiCad (anche nella

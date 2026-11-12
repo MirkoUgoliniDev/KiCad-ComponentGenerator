@@ -141,6 +141,15 @@ MIN_UNDECLARED_ROW = 3
 WIDTH_TOLERANCE = 0.25
 
 
+
+def _why(source: str, english: str, **values) -> dict:
+    """The keyword arguments of an EdgeCount reason: the interface-language text and its English twin.
+
+    `source` is the Italian catalogue source shown in the log (through tx);
+    `english` is what a model request reads, with the same placeholders.
+    """
+    return {"reason": tx(source, **values), "model_reason": english.format(**values)}
+
 @dataclass
 class EdgeCount:
     """@brief What the photo says about the contacts of one edge.
@@ -160,6 +169,9 @@ class EdgeCount:
     declared: Optional[int] = None
     centres_mm: list = field(default_factory=list)
     reason: str = ""
+    #: The same reason in English, for a model request (prompts are English
+    #: only, 2026-11-12); `reason` stays the interface-language text for the log.
+    model_reason: str = ""
     #: True when the outline shows no notch at all (a straight edge, on a
     #: photo able to show one), as opposed to notches that cannot be counted.
     no_notch: bool = False
@@ -425,7 +437,7 @@ def count_notches(profile: Sequence, px_per_mm: float, pitch_mm: Optional[float]
     across = positive_number(across_px_per_mm) or scale
     raw = list(profile) if profile is not None else []
     if scale is None or len(raw) < 3:
-        return EdgeCount("", None, reason=tx("foto non calibrata"))
+        return EdgeCount("", None, **_why("foto non calibrata", "photo not calibrated"))
     values = np.array([np.nan if finite_number(v) is None else float(v) for v in raw])
     known = ~np.isnan(values)
     n = len(values)
@@ -433,13 +445,15 @@ def count_notches(profile: Sequence, px_per_mm: float, pitch_mm: Optional[float]
     pitch = positive_number(pitch_mm)
     diameter = positive_number(hole_diameter_mm)
     if known.sum() < n / 2:
-        return EdgeCount("", None, reason=tx("contorno della scheda non visibile su questo bordo"),
+        return EdgeCount("", None, **_why("contorno della scheda non visibile su questo bordo",
+                                          "board outline not visible on this edge"),
                          tolerance_mm=tolerance_mm)
     filled = np.where(known, values, np.nanmedian(values))
     window = 2 * pitch * scale if pitch is not None else n / 4
     fitted = _outline_baseline(filled, known, window)
     if fitted is None:
-        return EdgeCount("", None, reason=tx("contorno della scheda non visibile su questo bordo"),
+        return EdgeCount("", None, **_why("contorno della scheda non visibile su questo bordo",
+                                          "board outline not visible on this edge"),
                          tolerance_mm=tolerance_mm)
     baseline, _outline, sigma = fitted
     residual = np.where(known, filled - baseline, 0.0)
@@ -482,19 +496,23 @@ def count_notches(profile: Sequence, px_per_mm: float, pitch_mm: Optional[float]
             continue
         (notches if peak >= required else ambiguous).append((start, stop))
     if ambiguous:
-        return EdgeCount("", None, tolerance_mm=tolerance_mm, reason=tx(
-            "tacche poco distinte dal rumore del contorno"))
+        return EdgeCount("", None, tolerance_mm=tolerance_mm, **_why(
+            "tacche poco distinte dal rumore del contorno",
+            "notches hardly distinct from the noise of the outline"))
     if too_wide:
-        return EdgeCount("", None, tolerance_mm=tolerance_mm, reason=tx(
-            "tacche piu' larghe del semiforo dichiarato nei documenti"))
+        return EdgeCount("", None, tolerance_mm=tolerance_mm, **_why(
+            "tacche piu' larghe del semiforo dichiarato nei documenti",
+            "notches wider than the half hole declared in the documents"))
     if not notches:
         smallest = MIN_HALF_HOLE_DIAMETER_MM / 2 * across
         if smallest < NOTCH_SEPARATION * band:
             # A half-hole this small would not stand out from the noise: the
             # straight edge does not prove that the notches are absent.
-            return EdgeCount("", None, tolerance_mm=tolerance_mm, reason=tx(
-                "foto troppo poco definita o contorno troppo irregolare per vedere i semi-fori"))
-        return EdgeCount("", None, reason=tx("nessuna tacca visibile sul bordo"), no_notch=True,
+            return EdgeCount("", None, tolerance_mm=tolerance_mm, **_why(
+                "foto troppo poco definita o contorno troppo irregolare per vedere i semi-fori",
+                "photo not sharp enough or outline too irregular to see the half holes"))
+        return EdgeCount("", None, **_why("nessuna tacca visibile sul bordo", "no notch visible on the edge"),
+                         no_notch=True,
                          tolerance_mm=tolerance_mm)
     centres_px = [(start + stop) / 2 for start, stop in notches]
     centres = [round(c / scale, 3) for c in centres_px]
@@ -503,8 +521,8 @@ def count_notches(profile: Sequence, px_per_mm: float, pitch_mm: Optional[float]
         # or a mounting hole look the same. It counts only if the side
         # declares exactly one contact (point 139, R-M2).
         return EdgeCount("", None, centres_mm=centres, tolerance_mm=tolerance_mm,
-                         reason=tx("una sola tacca: non basta per riconoscere una fila di "
-                                   "contatti"))
+                         **_why("una sola tacca: non basta per riconoscere una fila di contatti",
+                                "a single notch: not enough to recognise a row of contacts"))
     gaps = [b - a for a, b in zip(centres, centres[1:])]
     unit = pitch if pitch is not None else (min(gaps) if gaps else None)
     missing = False
@@ -514,7 +532,8 @@ def count_notches(profile: Sequence, px_per_mm: float, pitch_mm: Optional[float]
             multiple = round(gap / unit)
             if multiple < 1 or abs(gap - multiple * unit) > PITCH_TOLERANCE * unit:
                 return EdgeCount("", None, centres_mm=centres, tolerance_mm=tolerance_mm,
-                                 reason=tx("tacche a distanze non compatibili con il passo"))
+                                 **_why("tacche a distanze non compatibili con il passo",
+                                        "notches at distances not compatible with the pitch"))
             if gap >= MISSING_NOTCH_PITCHES * unit:
                 missing = True
             multiples.append(multiple)
@@ -527,26 +546,32 @@ def count_notches(profile: Sequence, px_per_mm: float, pitch_mm: Optional[float]
         spread = max(2 * EDGE_UNCERTAINTY_PX, WIDTH_TOLERANCE * middle)
         if len(centres) < MIN_UNDECLARED_ROW:
             return EdgeCount("", None, centres_mm=centres, tolerance_mm=tolerance_mm,
-                             reason=tx("troppo poche tacche per una fila di contatti"))
+                             **_why("troppo poche tacche per una fila di contatti",
+                                    "too few notches for a row of contacts"))
         if any(abs(width - middle) > spread for width in widths):
             return EdgeCount("", None, centres_mm=centres, tolerance_mm=tolerance_mm,
-                             reason=tx("tacche di larghezze diverse"))
+                             **_why("tacche di larghezze diverse", "notches of different widths"))
     if missing:
         # A gap in the row is a notch that is missing or not visible (a
         # dimension arrow, dust, a shadow): the number is only a minimum and
         # can neither contradict nor correct the declared count.
         return EdgeCount("", None, centres_mm=centres, at_least=len(centres),
-                         tolerance_mm=tolerance_mm, reason=tx(
+                         tolerance_mm=tolerance_mm, **_why(
                              "manca una tacca nella fila, forse nascosta: sulla foto se ne "
-                             "contano almeno {found}", found=len(centres)))
+                             "contano almeno {found}",
+                             "a notch of the row is missing, perhaps hidden: the photo shows at "
+                             "least {found}", found=len(centres)))
     if unit is not None and _row_may_continue(notches, centres_px, multiples, unit * scale,
                                               known & ~flags):
         # The same holds at the head and tail of the row (point 139, R-G1/R-M3).
         return EdgeCount("", None, centres_mm=centres, at_least=len(centres),
-                         tolerance_mm=tolerance_mm, reason=tx(
+                         tolerance_mm=tolerance_mm, **_why(
                              "la fila puo' continuare in un tratto del bordo non misurabile "
                              "(un angolo, il contorno non visto): sulla foto se ne contano "
-                             "almeno {found}", found=len(centres)))
+                             "almeno {found}",
+                             "the row may continue in a stretch of the edge that cannot be measured "
+                             "(a corner, an unseen outline): the photo shows at least {found}",
+                             found=len(centres)))
     depths = [round(float(residual[start:stop].max()) / across, 3) for start, stop in notches]
     return EdgeCount("", len(centres), centres_mm=centres, tolerance_mm=tolerance_mm,
                      depths_mm=depths, depth_tolerance_mm=round(EDGE_UNCERTAINTY_PX / across, 3))
@@ -844,7 +869,7 @@ def count_disagreements(profiles, crop_shape, length_mm: float, width_mm: float,
         counted = _count_side(profiles[edge], scales[edge], side, lengths[edge], bound)
         if counted.no_notch:
             result.append(EdgeCount(edge, 0, side["count"], [], reason=counted.reason,
-                                    no_notch=True, tolerance_mm=counted.tolerance_mm,
+                                    model_reason=counted.model_reason, no_notch=True, tolerance_mm=counted.tolerance_mm,
                                     shift_bound_mm=bound))
         elif counted.found is None:
             # Only an edge of which the photo read NOTHING (no measured
@@ -853,6 +878,7 @@ def count_disagreements(profiles, crop_shape, length_mm: float, width_mm: float,
             # remains), does not ask for a paid call.
             if counted.at_least is None and not counted.centres_mm:
                 result.append(EdgeCount(edge, None, side["count"], [], reason=counted.reason,
+                                        model_reason=counted.model_reason,
                                         tolerance_mm=counted.tolerance_mm, shift_bound_mm=bound))
         elif counted.found != side["count"]:
             result.append(EdgeCount(edge, counted.found, side["count"], counted.centres_mm,

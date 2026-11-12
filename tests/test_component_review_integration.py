@@ -42,7 +42,7 @@ def test_verification_refuses_concurrent_generation(window, monkeypatch):
 def test_ai_account_binding_only_during_analysis(window, monkeypatch, tmp_path):
     window.symbol_tab.set_data('Demo', [{'pin': '1', 'name': 'GND'}])
     monkeypatch.setattr(window, '_selected_documents', lambda: ([tmp_path/'sheet.pdf'], {'sheet.pdf': ['datasheet']}))
-    monkeypatch.setattr(window, '_ensure_api_key', lambda: True)
+    monkeypatch.setattr(window, '_ensure_api_key', lambda *args, **kwargs: True)
     events = []
     monkeypatch.setattr(window.ai_account, 'bind_run_project', lambda p: events.append('bind'))
     monkeypatch.setattr(window.ai_account, 'release_run_project', lambda: events.append('release'))

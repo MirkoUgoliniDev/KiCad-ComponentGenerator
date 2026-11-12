@@ -140,9 +140,10 @@ def test_the_prompt_formula_and_the_safeguard_give_the_same_offset():
     niente numeri del campione nei prompt), solo la formula.
     """
     text = _EXTRACTION_TOOL["input_schema"]["properties"]["body_offset_y_mm"]["description"]
-    assert "-(body_width_mm - distanza fra prima e ultima riga)/2" in text
-    assert "PRIMA riga" in text
-    assert "tipicamente meta' della larghezza" not in text
+    # CONTRACT CHANGED 2026-11-12: prompts in English.
+    assert "-(body_width_mm - distance between first and last row)/2" in text
+    assert "FIRST row" in text
+    assert "typically half the width" not in text
     assert not any(number in text for number in ("-1.27", "22.86", "25.4", "12.7"))
     params = _params()
     width, span = params.body_width_mm, params.row_spacing_mm * (params.rows - 1)
@@ -166,8 +167,9 @@ def test_the_fillet_edge_convention_points_corners_to_vertical_edges():
     for name in vertical:
         assert name in text
     # Convenzione 2 (utente, 2026-09-25): i nomi del cubo 3D.
-    assert "front = lato in BASSO" in text
-    assert "NON usarli per gli angoli visti dall'alto" in " ".join(text.split())
+    # CONTRACT CHANGED 2026-11-12: prompts in English.
+    assert "front = BOTTOM side" in text
+    assert "do NOT use them for the corners seen from above" in " ".join(text.split())
 
 
 # ── Pin presenti, non matrice dichiarata; asse X; vista dal basso (audit 2026-09-25) ──

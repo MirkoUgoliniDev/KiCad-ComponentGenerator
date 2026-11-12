@@ -167,7 +167,7 @@ def _arm_terminal_pass(window, monkeypatch):  # noqa: F811
     calls = []
     window._photo_png = b"png"
     monkeypatch.setattr(window, "_photo_components_from_table", lambda: [{"id": "U1"}])
-    monkeypatch.setattr(window, "_ensure_api_key", lambda: True)
+    monkeypatch.setattr(window, "_ensure_api_key", lambda *args, **kwargs: True)
     monkeypatch.setattr(QMessageBox, "question",
                         lambda *args: QMessageBox.StandardButton.Yes)
     monkeypatch.setattr(window.profile_store, "snapshot",

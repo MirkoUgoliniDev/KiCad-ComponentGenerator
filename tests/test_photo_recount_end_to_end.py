@@ -82,7 +82,8 @@ def run(monkeypatch, tmp_path):
             text = request["content_blocks"][-1].get("text", "")
             if len(requests) == 1:
                 return _payload(3)
-            if text.startswith("Confronto con la fotografia"):
+            # CONTRACT CHANGED 2026-11-12: prompts in English.
+            if text.startswith("Comparison with the photograph"):
                 if recount_error is not None:
                     raise recount_error
                 return _payload(recount_count)
@@ -100,7 +101,8 @@ def run(monkeypatch, tmp_path):
 
 def _recount_requests(requests):
     return [r for r in requests
-            if r["content_blocks"][-1].get("text", "").startswith("Confronto con la fotografia")]
+            # CONTRACT CHANGED 2026-11-12: prompts in English.
+            if r["content_blocks"][-1].get("text", "").startswith("Comparison with the photograph")]
 
 
 def test_the_comparison_after_the_recount_reads_the_updated_side(run):

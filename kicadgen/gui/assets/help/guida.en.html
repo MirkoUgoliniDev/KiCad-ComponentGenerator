@@ -109,17 +109,20 @@ library chosen because their dimensions are similar.</p>
   <strong>DeepSeek (direct API)</strong> (models <code>deepseek-api/...</code>;
   when running from source the default is <code>deepseek-api/deepseek-flash</code>).
   The model is chosen from the interface: <span class="ui">Configuration</span> →
-  <span class="ui">General AI defaults...</span>, <span class="ui">Model</span> tab,
+  <span class="ui">AI model...</span>,
   or the <span class="ui">AI model</span> panel for the session.
   The key is entered from <span class="ui">Configuration</span> →
   <span class="ui">AI account...</span>: the window lists every provider with
   the source of the key in use (environment variable, Credential Manager,
   <code>.env</code> file or none) and the current balance; choose the provider, paste
-  the key, press <span class="ui">Verify</span> (no call to a model,
-  no cost) and then <span class="ui">Save</span>; it is kept in the Windows
+  the key (the eye in the field, or Alt+F8, shows it) and press
+  <span class="ui">Verify and save</span>: the key is verified (no call to a model,
+  no cost) and only if it is valid is it kept in the Windows
   Credential Manager (<code>KiCadGen/OpenRouter</code>,
-  <code>KiCadGen/DeepSeek</code>). <span class="ui">Remove key</span> deletes
-  only that entry. The <code>.env</code> file in the folder
+  <code>KiCadGen/DeepSeek</code>). If the key in use is written in a
+  <code>.env</code> file, <span class="ui">Move it to Windows</span> verifies it, saves it
+  in the Credential Manager and asks whether to remove its line, and only that, from the file.
+  <span class="ui">Remove</span> deletes only the Credential Manager entry. The <code>.env</code> file in the folder
   <code>%LOCALAPPDATA%\KiCadGen</code> (lines <code>OPENROUTER_API_KEY=sk-or-...</code>
   and/or <code>DEEPSEEK_API_KEY=...</code>) remains valid; a key saved with
   «AI account...» takes precedence over the one in the file. If the key is missing,
@@ -247,11 +250,20 @@ see or change the other choices:</p>
     it is loaded, so it is checked only when you press
     <span class="ui">Check compatibility</span>. If the file is missing or not
     compatible, the analysis stops before spending anything.</li>
-  <li><span class="ui">AI model</span>: the single model used for documents,
+  <li><span class="ui">AI model (this session)</span>: the single model used for documents,
   photos and verification. The button next to it chooses a different model (filterable by
   cost, OpenRouter or DeepSeek source) <em>for this session only</em>;
   the default and its source are set from <span class="ui">Configuration →
-  General AI defaults...</span>, the prompts per type from <span class="ui">Configuration →
+  AI model...</span>. The same window, in the <span class="ui">Different models for single steps</span>
+  section (closed when it opens, its title counts the steps with a model of their own), has
+  a table with the model of each
+  analysis step (document reading, pad positions, body dimensions, photo
+  inventory and crops, markings, terminals, pin types): every step follows the
+  single model until <span class="ui">Change…</span> gives it one of its own,
+  <span class="ui">Use single</span> returns it to the single model and
+  <span class="ui">Restore default steps</span> returns only the table to the initial
+  choice, without changing the single model; the session
+  model replaces only the single model. Every prompt (general and per type) is edited from <span class="ui">Configuration →
   Manage AI types and profiles...</span>.</li>
 </ul>
 

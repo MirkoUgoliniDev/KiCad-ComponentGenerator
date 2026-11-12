@@ -40,11 +40,14 @@ impliciti.
 
 ## Configurazione dei modelli e dei prompt
 
-- **Configurazione → Default generali AI…**: il modello AI **unico** usato
-  per documenti, localizzazione, verifica e lettura dei ritagli, con la sua
-  sorgente (OpenRouter o DeepSeek API diretta) nella scheda **Modello**, e i
-  prompt base nelle schede **Datasheet**, **Localizzazione foto**, **Verifica
-  foto**. Predefinito: `deepseek-api/deepseek-flash` dai sorgenti (database
+- **Configurazione → Modello AI…**: il modello AI **unico** con la sua
+  sorgente (OpenRouter o DeepSeek API diretta) e una tabella con il modello
+  di ogni passo dell'analisi (lettura dei documenti, posizioni dei pad,
+  quote del corpo, inventario, localizzazione, verifica, ritagli, sigle,
+  terminali, piedini, tipi dei pin): ogni passo segue il modello unico
+  finché **Cambia…** non gliene assegna uno proprio, **Unico** lo riporta
+  al modello unico. La scelta è globale, non per tipologia. I prompt non
+  sono qui: si modificano in **Gestione tipologie e profili AI…**. Predefinito: `deepseek-api/deepseek-flash` dai sorgenti (database
   dei profili), `anthropic/claude-opus-5` via OpenRouter nel programma
   installato dall'MSI. Il modello si sceglie solo da qui o dal riquadro
   «Modello AI», mai modificando a mano il database.
@@ -56,7 +59,8 @@ impliciti.
   istruzioni foto si aggiungono ai prompt fotografici, verifica compresa, ma
   non alla lettura dei ritagli, che descrive un corpo solo.
 - Il pulsante accanto a **Modello AI** nel riquadro Strumenti AI cambia il
-  modello per la sola sessione (filtro per costo); il default non cambia.
+  modello unico per la sola sessione (filtro per costo); il default e i
+  modelli scelti per i singoli passi non cambiano.
 - Gli schemi JSON restano nel codice. Una modifica al prompt invalida la cache
   delle relative chiamate e può comportare nuove inferenze a pagamento.
 

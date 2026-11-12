@@ -68,7 +68,8 @@ def test_only_a_castellated_module_sends_the_strips(tmp_path):
     path = _photo_file(tmp_path)
     blocks = extractor._edge_strip_blocks([path], {path.name: ("hires",)})
     assert sum(1 for b in blocks if b.get("type") == "image_url") == 4
-    assert all("conta qui i fori" in b["text"] for b in blocks if b.get("type") == "text")
+    # CONTRACT CHANGED 2026-11-12: prompts in English.
+    assert all("count here the plated holes" in b["text"] for b in blocks if b.get("type") == "text")
 
 
 def test_a_file_not_declared_a_photograph_sends_no_strip(tmp_path):
@@ -105,5 +106,6 @@ def test_the_first_call_carries_the_strips_for_castellated_modules_only(
 def test_the_tool_tells_the_model_to_count_holes_not_labels():
     side = extractor._openai_tool()["function"]["parameters"]["properties"][
         "castellated_sides"]["items"]["properties"]
-    assert "NON sono contatti" in side["count"]["description"]
-    assert "un nome per contatto" in side["pin_names"]["description"]
+    # CONTRACT CHANGED 2026-11-12: prompts in English.
+    assert "are NOT contacts" in side["count"]["description"]
+    assert "one name per contact" in side["pin_names"]["description"]

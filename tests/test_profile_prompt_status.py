@@ -6,6 +6,7 @@ dialog shows it with a diff and a restore button, and nothing ever changes a
 custom text by itself.
 """
 import hashlib
+import re
 import os
 from pathlib import Path
 import shutil
@@ -127,12 +128,11 @@ def test_a_schema8_row_already_there_is_never_replaced_by_the_migration(tmp_path
 def test_the_committed_database_copy_reports_its_custom_prompts(tmp_path):
     """The tracked database, opened as a COPY (the original is never written).
 
-    State on 2026-11-11: its `system_prompt_single` (dc7044b8...) and
-    `system_prompt` (a1538d55...) are neither the current default nor a known
-    former default, so they are CUSTOM: the program keeps them and now SAYS
-    so. Every schema-8 prompt arrives with the current default. If the user
-    decides to list those digests as former defaults, this test changes with
-    that decision.
+    CONTRACT CHANGED 2026-11-12 (user: «non ci devono essere versioni
+    italiane»): the two Italian CUSTOM texts of 2026-11-11 (`system_prompt_single`
+    dc7044b8..., `system_prompt` a1538d55...) were reset to the English
+    defaults in the tracked database; the only custom prompt left is the
+    English `verification_prompt`. No stored prompt is Italian.
     """
     if not REPOSITORY_DB.is_file():
         pytest.skip('no repository profile database in this checkout')
@@ -143,9 +143,14 @@ def test_the_committed_database_copy_reports_its_custom_prompts(tmp_path):
         stored = dict(db.execute('SELECT name,value FROM ai_defaults'))
     store = ProfileStore(copy)
     rows = _statuses(store)
-    assert text_digest(stored['system_prompt_single']).startswith('dc7044b8')
-    assert rows['system_prompt_single']['status'] == pc.CUSTOM
-    assert rows['system_prompt']['status'] == pc.CUSTOM
+    assert not text_digest(stored['system_prompt_single']).startswith('dc7044b8')
+    assert rows['system_prompt_single']['status'] == pc.CURRENT
+    assert rows['system_prompt']['status'] == pc.CURRENT
+    assert {field for field, row in rows.items() if row['status'] == pc.CUSTOM} == {'verification_prompt'}
+    italian = re.compile(r"\b(?:il|che|della|sono|questo|quota|foro|lato|non e')\b", re.IGNORECASE)
+    for field, value in stored.items():
+        if field in rows and isinstance(value, str):
+            assert len(italian.findall(value)) < 3, f"{field} is still Italian"
     for field in SCHEMA8_PROMPT_FIELDS:
         assert rows[field]['status'] == pc.CURRENT
     # Opening replaced only OUTDATED global texts: none is left, and every
@@ -224,16 +229,19 @@ def test_restore_then_cancel_keeps_the_stored_custom_text(app, gui, store):
         editor.close()
 
 
-def test_an_inherited_prompt_cannot_be_restored_until_unticked(app, gui, store):
+def test_restoring_an_inherited_prompt_makes_the_default_the_type_own_text(app, gui, store):
+    # CONTRACT CHANGED 2026-11-12: an inherited prompt is editable, so its
+    # «Ripristina predefinito» is enabled; using it is an edit of the type:
+    # the prompt detaches (inherit unticked) and the general text stays.
     key = store.save_type(None, label='own', family='single_smd', overrides={})
     store.save_defaults({'lead_prompt': 'global leads'})
     editor = gui.ProfileEditor(store, key)
     try:
         assert editor.status_labels['lead_prompt'].text() == pc.status_label(pc.CUSTOM)
-        assert not editor.restore_buttons['lead_prompt'].isEnabled()    # read-only, inherited
-        editor.inherit['lead_prompt'].setChecked(False)
+        assert editor.inherit['lead_prompt'].isChecked()
         assert editor.restore_buttons['lead_prompt'].isEnabled()
         editor.restore_buttons['lead_prompt'].click()
+        assert not editor.inherit['lead_prompt'].isChecked()
         editor._save()
         assert store.overrides(key) == {'lead_prompt': pc.restore_default('lead_prompt')}
         assert store.defaults()['lead_prompt'] == 'global leads'
@@ -295,6 +303,8 @@ def test_a_type_save_keeps_an_override_of_a_prompt_the_dialog_does_not_show(app,
     editor = gui.ProfileEditor(store, key)
     try:
         assert 'marking_prompt' not in editor.fields
+        # Ticking inherit over the type's own text asks first (2026-11-12).
+        monkeypatch.setattr(gui.QMessageBox, 'question', lambda *args: gui.QMessageBox.StandardButton.Yes)
         editor.inherit['lead_prompt'].setChecked(True)
         editor._save()
         assert store.overrides(key) == {'marking_prompt': 'type marking'}
@@ -316,7 +326,8 @@ def test_a_wired_registry_prompt_appears_in_its_stage_without_changing_the_dialo
         [sub] = editor.tabs.widget(1).findChildren(
             QTabWidget, '', Qt.FindChildOption.FindDirectChildrenOnly)
         captions = [sub.tabText(i) for i in range(sub.count())]
-        index = captions.index('Foto: lettura delle marcature')
+        # CONTRACT CHANGED 2026-11-12 (finding 5): the step's title, as in «Modello AI».
+        index = captions.index('Lettura delle sigle')
         assert sub.widget(index).isAncestorOf(field)
         assert captions[-1] == 'Testi nel codice'
     finally:

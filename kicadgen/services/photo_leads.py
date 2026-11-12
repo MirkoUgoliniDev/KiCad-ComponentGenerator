@@ -63,7 +63,8 @@ def _frame_box(box, source, destination):
             (sx+r*(sr-sx)-dx)/(dr-dx), (sy+b*(sb-sy)-dy)/(db-dy)]
 
 
-def refine_leads(photo_png, components, model, call, log, cache_dir=None, system_prompt=None):
+def refine_leads(photo_png, components, model, call, log, cache_dir=None, system_prompt=None,
+                 step_models=None):
     """@brief Only attach optional lead_detail; preserve every existing field on failure.
 
     @param photo_png Encoded PNG bytes of the calibrated board photo.
@@ -74,6 +75,10 @@ def refine_leads(photo_png, components, model, call, log, cache_dir=None, system
     @param log Callable receiving one progress line at a time.
     @param cache_dir Directory of the response cache, or None for no cache.
     @param system_prompt Optional system prompt replacing the module PROMPT.
+    @param step_models The model of every analysis step (prompt_models.step_models),
+        or None (`model`, the behaviour before 2026-11-12). The step 'lead_prompt'
+        uses its own model when one is chosen and usable, resolved before any
+        crop is sent, so it keys the cache (photo_grounding.cached_call).
     @return A deep copy of ``components`` in which each resolved terminal gained
         a ``lead_detail`` dict (bbox, confidence, source); bodies, envelopes
         and every other field are unchanged.
@@ -86,6 +91,9 @@ def refine_leads(photo_png, components, model, call, log, cache_dir=None, system
     import numpy as np
     from .photo_grounding import cached_call
     from .photo_inventory import image_block
+    from .prompt_models import usable_model
+    # The step's own model, before the cache key and the first request.
+    model = usable_model('lead_prompt', step_models, model, log)
     photo = cv2.imdecode(np.frombuffer(photo_png,np.uint8),cv2.IMREAD_COLOR)
     if photo is None:
         raise ValueError(tx("foto reofori non leggibile"))

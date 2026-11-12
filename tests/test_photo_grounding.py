@@ -964,7 +964,9 @@ def test_mechanical_schema_asks_occupancy_and_the_body_outline_only(photo):
     item = tool["parameters"]["properties"]["components"]["items"]
     assert set(item["required"]) == {"id", "present", "confidence", "package"}
     assert set(item["properties"]) == set(item["required"]) | {"mating", "bbox_basis", "package_evidence", "kind"}
-    assert "forma fisica, non una funzione" in item["properties"]["package"]["description"]
+    # CONTRACT CHANGED 2026-11-12: prompts in English («forma fisica, non
+    # una funzione» -> «physical shape, not an electrical function»).
+    assert "physical shape, not an electrical" in item["properties"]["package"]["description"]
     assert "Do NOT invent exact electrical function" in calls[0]["system_prompt"]
     assert calls[0]["max_tokens"] == grounding.MECHANICAL_MAX_TOKENS
 

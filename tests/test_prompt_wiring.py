@@ -36,15 +36,21 @@ SERVICES = Path(__file__).resolve().parents[1] / 'kicadgen' / 'services'
 #: SHA-256 of the texts that were built inside a function at commit 1266fb7,
 #: computed from `git show 1266fb7:<file>` when they were lifted: the module
 #: constants must be the same bytes (no prompt changed by the lift).
+#: CONTRACT CHANGED 2026-11-12: prompts in English. Two texts were changed on
+#: purpose after the lift and are pinned at their new bytes, so that any
+#: further change is still a visible decision: LEGACY_STRIP_PROMPT translated
+#: from Italian (lifted digest 7a9ac490...), PIN_TYPE_PROMPT asking for
+#: reasons in English instead of Italian (lifted digest d896ef4b..., a
+#: superseded default of 'pin_type_prompt').
 LIFTED_DIGESTS = {
     (ext, 'CONTACT_STYLE_PROMPT'):
         'ea0e1707ab43a1b89b6bcb5082e17cba38713f4b94dec19d67d5ec8d2482ffdd',
     (photo_grounding, 'SEMANTIC_VERIFICATION_PROMPT'):
         'c9c3266b0d6b598b560f2ffa506eeba8ef1228930e81d27eedfe3b12b20a9b8c',
     (photo_inventory, 'LEGACY_STRIP_PROMPT'):
-        '7a9ac490b72a13febcf6e3b35f0f6793eac221a3e0c133835ce41a864fb59031',
+        'ca745c00bd29f5109e8c38694ecdae849a1cc890e560901294134dcdcb4633c5',
     (pin_type_ai, 'PIN_TYPE_PROMPT'):
-        'd896ef4b07b6c8c11c1733d4f275c09f3b9bf3bb4b761c1f4205fa7a9634edfb',
+        '64cce1f386941e9a583a1d5d76d0afe91369c6ada27400304ea631a52628da07',
 }
 
 

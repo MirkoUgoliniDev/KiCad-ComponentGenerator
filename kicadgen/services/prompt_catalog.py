@@ -150,21 +150,33 @@ class PromptEntry:
 #: WHEN A DEFAULT CHANGES: add the digest of the OLD text to its field's set
 #: (tests/test_review_round7.py pins the digest of every current default,
 #: the built-in type instructions included, and fails naming the digest to add).
-#: Empty sets: no default of these fields has changed in a released version.
+#: Empty sets: no default of these fields has changed in a released version
+#: (system, single and numbering prompts keep theirs in datasheet_extractor).
+#: 2026-11-12 (user: every prompt in ONE language, English): the Italian
+#: defaults of the fields translated that day are listed here.
 SUPERSEDED_DIGESTS: dict[str, frozenset] = {
     "system_prompt": frozenset(),
     "system_prompt_single": frozenset(),
     "numbering_prompt": frozenset(),
-    "pad_positions_prompt": frozenset(),
-    "body_dimensions_prompt": frozenset(),
+    # 2026-11-12: the Italian default, replaced by its English translation.
+    "pad_positions_prompt": frozenset({"66d8c5031f37678716871cce7dabd2ec9b7c35268ba3bcd2493feb805fd42f43"}),
+    # 2026-11-12: the Italian default, replaced by its English translation.
+    "body_dimensions_prompt": frozenset({"48186de1fadf1d61a85eb397a6eeb0a18f16f6755564f89db025cd8668d62abe"}),
     "contact_style_prompt": frozenset(),
-    "role_prompt_pinout": frozenset(),
-    "role_prompt_top": frozenset(),
-    "role_prompt_hires": frozenset(),
-    "role_prompt_land_pattern": frozenset(),
-    "role_prompt_side_view": frozenset(),
-    "role_prompt_datasheet": frozenset(),
-    "pin_type_prompt": frozenset(),
+    # 2026-11-12: the Italian default, replaced by its English translation.
+    "role_prompt_pinout": frozenset({"2a1aef67340f53bc0918b47df13187af9e2ed0ab1f4cab7df10cd410bb49e620"}),
+    # 2026-11-12: the Italian default, replaced by its English translation.
+    "role_prompt_top": frozenset({"32bb5dfd41bad33182947e263180ee54848810e56e394746352f39d9851e89ed"}),
+    # 2026-11-12: the Italian default, replaced by its English translation.
+    "role_prompt_hires": frozenset({"449089d29e64d3f3d4d38770fef09922fe14940fc032c397ddd48d6b17a4b342"}),
+    # 2026-11-12: the Italian default, replaced by its English translation.
+    "role_prompt_land_pattern": frozenset({"f242b42508b07d82d369087a0e22abe6bfd4a1bcbee00c6f561a0dbccb794649"}),
+    # 2026-11-12: the Italian default, replaced by its English translation.
+    "role_prompt_side_view": frozenset({"775c78a07eaf45299036b8ae20345bece4690fa565d3513f939246e2d1dcea88"}),
+    # 2026-11-12: the Italian default, replaced by its English translation.
+    "role_prompt_datasheet": frozenset({"cb0f333eb10c3e5ad24a51caad148e1e49b3aa75d1f14fcbdcf6f13112f678bc"}),
+    # 2026-11-12: the Italian default, replaced by its English translation.
+    "pin_type_prompt": frozenset({"d896ef4b07b6c8c11c1733d4f275c09f3b9bf3bb4b761c1f4205fa7a9634edfb"}),
     "grounding_prompt": frozenset(),
     "mechanical_evidence_prompt": frozenset(),
     "image_instructions": frozenset(),
@@ -176,6 +188,14 @@ SUPERSEDED_DIGESTS: dict[str, frozenset] = {
     "inventory_enumerate_empty_prompt": frozenset(),
     "marking_prompt": frozenset(),
     "verification_prompt": frozenset(),
+}
+
+#: Intermediate English defaults of 2026-11-12, before «ref:» stops were worded
+#: «a reference point or line (datum)»: a database may already store it
+#: (system_prompt_single's lives in its module set, datasheet_extractor).
+SUPERSEDED_DIGESTS.setdefault("pad_positions_prompt", set())
+SUPERSEDED_DIGESTS["pad_positions_prompt"] = frozenset(SUPERSEDED_DIGESTS["pad_positions_prompt"]) | {
+    "aaa67ff191c60975e8bb59522c0f545c04db69a52909a87817b2bf02c3cc541e",
 }
 
 
@@ -222,7 +242,8 @@ GROUP_INVENTORY = "Inventario fotografico"
 #: Document roles whose model-facing instruction is a prompt of its own. The
 #: keys are datasheet_extractor.DOCUMENT_ROLE_KEYS (a test checks it); only
 #: the INSTRUCTION (second item of _ROLE_PROMPTS) is a prompt: the role NAME is
-#: the label the user reads in the documents card and stays in the code.
+#: a fixed English name the model reads and stays in the code (the user reads
+#: the label of document_roles.ROLES, 2026-11-12).
 #: One field per role, not one field for all: each role's instruction is sent
 #: alone with the files of that role, so each has its own status and diff, and
 #: no format (separators, keys) has to be parsed out of a single free text.

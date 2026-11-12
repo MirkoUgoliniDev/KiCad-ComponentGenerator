@@ -151,6 +151,11 @@ def no_real_api_key_sources(monkeypatch, tmp_path):
     monkeypatch.setattr(credentials, "_advapi32", FakeAdvapi32())
     monkeypatch.setattr(openrouter, "env_files", lambda: [tmp_path / "dotenv" / ".env"])
     monkeypatch.setattr(providers, "env_files", lambda: [tmp_path / "dotenv" / ".env"])
+    # dotenv_keys.other_files_setting (the «Spostala in Windows» move, 2026-11-12)
+    # reads its own env_files name: same tmp folder, never the real files. Not
+    # app_paths.env_files itself, which tests/test_app_paths.py checks.
+    from kicadgen.services import dotenv_keys
+    monkeypatch.setattr(dotenv_keys, "env_files", lambda: [tmp_path / "dotenv" / ".env"])
     openrouter.invalidate_credit_cache()
     yield
     openrouter.invalidate_credit_cache()

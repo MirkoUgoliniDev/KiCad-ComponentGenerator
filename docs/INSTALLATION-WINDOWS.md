@@ -48,20 +48,23 @@ model of the installed program, `anthropic/claude-opus-5`, goes through it) or
 **DeepSeek's direct API** (models `deepseek-api/...`; running from the sources
 the default model is `deepseek-api/deepseek-flash`, from the profile
 database). Choose the model from the interface, in «Configuration» →
-«General AI defaults...», tab «Model». Set the key from the program:
+«AI model...» (the single model, and optionally a model for single
+analysis steps). Set the key from the program:
 
 1. Open **Configuration → AI account...**. The window lists every provider
    with where its key in use comes from (environment variable, Windows
    Credential Manager, `.env` file or none) and its current balance, read
    with the providers' free status endpoints.
-2. Select the provider, paste the key and press **Verify**: the check reads
-   your balance and spends nothing. A key the provider refuses cannot be
-   saved; when the provider cannot be reached, saving is still possible after
-   an explicit confirmation.
-3. Press **Save**. The key is stored in the Windows Credential Manager of
-   your user account (generic credentials `KiCadGen/OpenRouter` and
-   `KiCadGen/DeepSeek`), not in a file. **Remove key** deletes that
-   entry only; keys in the environment or in a `.env` file are never touched.
+2. Select the provider, paste the key (the eye in the field, or Alt+F8,
+   shows it) and press **Verify and save**: the check reads your balance and
+   spends nothing. A key the provider refuses is not saved; when the provider
+   cannot be reached, saving is still possible after an explicit confirmation.
+3. A valid key is stored in the Windows Credential Manager of your user
+   account (generic credentials `KiCadGen/OpenRouter` and
+   `KiCadGen/DeepSeek`), not in a file. **Remove** deletes that entry only.
+   A key written in a `.env` file is moved there with **Move it to Windows**:
+   it is verified, saved, and then you are asked whether to remove its line
+   (only that line) from the file; keys in the environment are never touched.
 
 The «AI credit» line in the Project tab shows the balance of the provider of
 the chosen model, and the analysis window shows the cost of the current
@@ -127,4 +130,4 @@ and the projects (`<dir>\generated`).
 - **Uninstall**: Settings > Apps > KiCadGen > Uninstall. Your projects and
   `%LOCALAPPDATA%\KiCadGen` are **not** removed; delete them yourself if you
   no longer need them. Keys saved with «AI account...» also stay: remove them
-  first with «Remove key», or later from the Windows Credential Manager.
+  first with «Remove», or later from the Windows Credential Manager.
