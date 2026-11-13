@@ -78,6 +78,8 @@ def test_the_footprint_properties_group_shrinks_when_closed(window, qapp):  # no
     panel = group.parentWidget()
     panel.setFixedHeight(900)
     panel.show()
+    # The groups start collapsed (user, 2026-11-13): opened here on purpose.
+    group.setExpanded(True)
     _settle(qapp, panel)
     assert group.height() > 200, "precondition: open, it takes the free height"
     group.setExpanded(False)
@@ -100,6 +102,11 @@ def test_with_every_other_group_closed_the_checks_box_stays_tight(window, qapp):
     panel.show()
     checks = window.fp_checks_list.parentWidget().parentWidget()
     drawing = next(child for child in panel.findChildren(type(group)) if child.baseTitle() == "Disegno")
+    layers = next(child for child in panel.findChildren(type(group)) if child.baseTitle() == "Layer")
+    # The groups start collapsed (user, 2026-11-13): the screenshot's state
+    # is rebuilt on purpose, every group open first.
+    for opened in (layers, drawing, group, checks):
+        opened.setExpanded(True)
     _settle(qapp, panel)
     natural = checks.sizeHint().height()
     drawing.setExpanded(False)
@@ -109,7 +116,6 @@ def test_with_every_other_group_closed_the_checks_box_stays_tight(window, qapp):
     # The list sits right under the box title, not centred in a tall box.
     assert window.fp_checks_list.geometry().top() < 40
     # Every group above closed too (second screenshot of 2026-11-12).
-    layers = next(child for child in panel.findChildren(type(group)) if child.baseTitle() == "Layer")
     layers.setExpanded(False)
     _settle(qapp, panel)
     assert checks.height() <= natural + 1, (checks.height(), natural)

@@ -259,8 +259,10 @@ def test_output_actions_require_current_footprint(window, tmp_path, monkeypatch)
     monkeypatch.setattr(window, "_draw_preview_3d", lambda: None)
     window._on_generated(str(footprint))
     assert all(control.isEnabled() for control in footprint_controls)
-    assert all(not control.isEnabled() for control in complete_controls)
-    assert tab_open()  # verifica disponibile; installazione ancora disabilitata
+    # CONTRACT CHANGED 2026-11-12 (user decision A: delivery without STEP): the footprint alone enables the
+    # KiCad commands too; the STEP only adds the 3D model.
+    assert all(control.isEnabled() for control in complete_controls)
+    assert tab_open()
     step = window._project_dir() / f"{name}.3dshapes" / f"{name}.step"
     step.parent.mkdir()
     step.write_bytes(b"STEP")

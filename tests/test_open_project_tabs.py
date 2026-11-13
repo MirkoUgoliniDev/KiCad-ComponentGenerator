@@ -171,13 +171,15 @@ def test_files_deleted_outside_say_so_and_close_the_kicad_tab(window, tmp_path, 
     _open(window, "FINITO")
     kicad = window.KICAD_TAB_INDEX
     window.tabs.setCurrentIndex(kicad)
-    (folder / "FINITO.3dshapes" / "FINITO.step").unlink()
+    # CONTRACT CHANGED 2026-11-12 (user decision A: delivery without STEP): a missing STEP is no longer «files missing»;
+    # the footprint, still required, is the file deleted outside here.
+    (folder / "FINITO.pretty" / "FINITO.kicad_mod").unlink()
     warnings = []
     monkeypatch.setattr(QMessageBox, "warning", lambda *a: warnings.append(a))
     window._test_in_kicad()
     assert warnings, "il comando deve dire che cosa manca"
-    assert window.tabs.isTabEnabled(kicad)
-    assert not window.btn_test_kicad.isEnabledTo(window.tabs.widget(kicad))
+    assert not window.tabs.isTabEnabled(kicad)
+    assert window.tabs.currentIndex() != kicad
 
 
 def test_coming_back_to_the_window_rechecks_the_files(window, tmp_path, monkeypatch):  # noqa: F811
@@ -186,11 +188,18 @@ def test_coming_back_to_the_window_rechecks_the_files(window, tmp_path, monkeypa
     folder = _generated(tmp_path, "FINITO")
     _open(window, "FINITO")
     assert window.tabs.isTabEnabled(window.KICAD_TAB_INDEX)
+    # CONTRACT CHANGED 2026-11-12 (user decision A: delivery without STEP): the STEP deleted outside leaves the
+    # commands on and the status names the missing model; the footprint deleted
+    # outside switches them off.
     (folder / "FINITO.3dshapes" / "FINITO.step").unlink()
     monkeypatch.setattr(window, "isActiveWindow", lambda: True)
     window.changeEvent(QEvent(QEvent.Type.ActivationChange))
     assert window.tabs.isTabEnabled(window.KICAD_TAB_INDEX)
-    assert not window.btn_test_kicad.isEnabledTo(window.tabs.widget(window.KICAD_TAB_INDEX))
+    assert window.btn_test_kicad.isEnabledTo(window.tabs.widget(window.KICAD_TAB_INDEX))
+    assert "senza modello STEP" in window.label_kicad_status.text()
+    (folder / "FINITO.pretty" / "FINITO.kicad_mod").unlink()
+    window.changeEvent(QEvent(QEvent.Type.ActivationChange))
+    assert not window.tabs.isTabEnabled(window.KICAD_TAB_INDEX)
 
 
 @pytest.mark.parametrize("step_is_older", [True, False])

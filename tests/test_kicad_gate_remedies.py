@@ -256,7 +256,25 @@ def test_a_step_that_cannot_be_rebuilt_names_enabled_ways_out(window, monkeypatc
     assert window._step_source_pads is None and window._step_source_body is None
     window._refresh_output_actions()
     assert window._kicad_files_alignment_reason() == ""
-    assert "Genera prima" in window.btn_export.toolTip()
+    # CONTRACT CHANGED 2026-11-12 (user decision A: delivery without STEP): with the obsolete STEP removed the footprint alone can be
+    # delivered (without a 3D model); before, the commands said «Genera prima…».
+    assert "Genera prima" not in window.btn_test_kicad.toolTip()
+    assert window.btn_test_kicad.isEnabled()
+
+
+def test_without_freecad_a_stale_step_names_the_removal_way_out(window, monkeypatch, tmp_path, dialogs):  # noqa: F811
+    """@brief Positive: no FreeCAD -> the stale-STEP reason also names «Rimuovi il modello STEP obsoleto»;
+    negative: with FreeCAD the reason only asks to regenerate."""
+    folder = _ready(window, monkeypatch, tmp_path)
+    window._step_source_pads = [{"number": "999", "x": 99.0, "y": 99.0}]
+    window._freecad_available = True
+    window._refresh_output_actions()
+    with_freecad = window._kicad_command_block_reason()
+    window._freecad_available = False
+    window._refresh_output_actions()
+    without = window._kicad_command_block_reason()
+    assert "Rigenera il modello STEP" in with_freecad and "Senza FreeCAD" not in with_freecad
+    assert "Senza FreeCAD" in without and "Rimuovi il modello STEP obsoleto" in without
 
 
 def test_the_3d_group_off_after_a_step_is_also_unbuildable(window, monkeypatch, tmp_path, dialogs):  # noqa: F811

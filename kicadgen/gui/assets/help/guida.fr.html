@@ -126,7 +126,12 @@ KiCad choisis par similitude de dimensions.</p>
   <code>%LOCALAPPDATA%\KiCadGen</code> (lignes <code>OPENROUTER_API_KEY=sk-or-...</code>
   et/ou <code>DEEPSEEK_API_KEY=...</code>) reste valable ; une clé enregistrée avec
   « Compte IA... » a priorité sur celle du fichier. Si la clé manque,
-  le programme le signale avant de lancer une analyse et propose d’ouvrir la fenêtre.
+  le programme le signale dès le démarrage, avec KiCad et FreeCAD s’ils manquent, puis
+  avant de lancer une analyse ; les deux fois il propose d’ouvrir la fenêtre. Si vous
+  travaillez sans IA, cochez <span class="ui">Ne plus avertir pour la clé IA</span> : l’avis
+  de démarrage ne cite plus la clé, la question avant une analyse reste. Il se réactive avec
+  <span class="ui">Avertir au démarrage s’il manque une clé IA</span> dans la fenêtre
+  <span class="ui">Compte IA...</span>.
   Quand la clé fonctionne, la ligne <span class="ui">Crédit IA</span> de
   l’onglet <span class="ui">Projet</span> affiche le solde du fournisseur du modèle
   choisi.</li>
@@ -607,6 +612,10 @@ en cinq pages : installer, placer l’empreinte, exporter et enregistrer le
 symbole, les relier, mettre à jour le PCB), <span class="ui">Vérifier le composant pour
 KiCad</span> (voir ci-dessous) et <span class="ui">Tester dans KiCad…</span>. Dans
 <span class="ui">Installation dans la bibliothèque</span>, les deux installations.</p>
+<p>Sans modèle STEP (par exemple sur un ordinateur sans FreeCAD), les trois commandes
+fonctionnent quand même : après une confirmation, l’empreinte arrive dans KiCad sans vue 3D et
+<code>KiCadGen.3dshapes</code> n’est pas créé. Pour ajouter le modèle, installez FreeCAD,
+régénérez le modèle STEP et répétez la commande.</p>
 <table>
   <tr><th>Commande</th><th>Ce qu’elle fait</th></tr>
   <tr><td class="ui">Tester dans KiCad…</td>

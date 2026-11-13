@@ -106,6 +106,16 @@ class ComponentArtifacts:
         mm and in KiCad's 3D axes (Y up). It is (0, 0, 0) unless the footprint
         anchor was moved; then it comes from `model_offset_for_anchor`, so the
         STEP model, built in the generator's coordinates, stays on the pads.
+    @note ``step_path`` is always the EXPECTED model path
+        (``<name>.3dshapes/<name>.step``), so a caller can name it even when
+        the model was never generated; `has_step` says whether it exists.
+        USER DECISION 2026-11-12: a user without FreeCAD has a footprint but
+        no STEP, and the preview, the project and the global installation
+        must still deliver the footprint. Without a STEP every delivery
+        writes the footprint with NO ``(model ...)`` node and copies no
+        STEP/WRL (the WRL is the mesh twin FreeCAD writes next to the STEP,
+        never referenced alone); a STEP that exists but is truncated is
+        still refused by `discover_component_artifacts` (``step_incomplete``).
     """
 
     name: str
@@ -114,6 +124,17 @@ class ComponentArtifacts:
     step_path: Path
     wrl_path: Path | None = None
     model_offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
+
+    @property
+    def has_step(self) -> bool:
+        """@brief Whether the STEP model exists, so a delivery ships a 3D model.
+
+        @return True only when `step_path` is an existing file. Read from the
+            file system at each call; the preview and `plan_component_install`
+            read it once (`InstallPlan.with_model`) so board, plan and
+            install agree.
+        """
+        return self.step_path.is_file()
 
 
 @dataclass(frozen=True)
@@ -140,11 +161,16 @@ class LibraryInstallResult:
         files as they were before, is marked disposable and is swept by a
         later install once older than `STALE_SCRATCH_AGE_S`
         (`_sweep_stale_rollback_dirs`); the GUI may mention it.
+    @note ``step_path`` and ``wrl_path`` name the model files installed and
+        are None when none was installed (CONTRACT CHANGED 2026-11-12, USER
+        DECISION: a footprint without a STEP is installed without a model;
+        ``step_path`` was always a path before). A STEP of an earlier
+        install deleted for that reason is in ``removed``.
     """
 
     identifier: str
     footprint_path: Path
-    step_path: Path
+    step_path: Path | None
     wrl_path: Path | None
     table_path: Path
     replaced: tuple[Path, ...] = ()
@@ -222,6 +248,13 @@ class InstallPlan:
     @note ``shadowing`` is not computed, and stays None, when the destination
         table already maps the nickname to the same place: a re-install
         (`_destination_row_already_there`, review 2026-11-03, D7).
+    @note ``with_model`` (USER DECISION 2026-11-12) is True when the install
+        ships the STEP model (`ComponentArtifacts.has_step`, read once here so
+        plan and install agree). When False the installed footprint carries
+        no model node, no STEP/WRL is copied, and a ``<name>.step``/``.wrl``
+        left in the library by an earlier install WITH a model is listed in
+        ``removed``: it no longer matches the footprint, so it is deleted
+        under the same confirmation, backup and rollback as any other target.
     """
 
     targets: tuple[Path, ...]
@@ -238,6 +271,7 @@ class InstallPlan:
     kicad_too_old: bool = False
     detected_kicad_version: str | None = None
     detected_kicad_too_old: bool = False
+    with_model: bool = True
 
     @property
     def kicad_open(self) -> bool:
@@ -312,11 +346,15 @@ def discover_component_artifacts(
     @param component_dir Working directory of one generated component.
     @param name Expected component name; defaults to the directory name.
     @param require_3d Require a STEP model in addition to the footprint.
+        False lets a footprint without a model reach KiCad (USER DECISION
+        2026-11-12: a user without FreeCAD); `ComponentArtifacts.has_step`
+        then says the model is absent and ``wrl_path`` is None.
     @param model_offset Model offset, mm, KiCad 3D axes (Y up), carried into
         the artifacts for every delivery; `model_offset_for_anchor` gives it
         from the footprint anchor the .kicad_mod was written with.
     @return Validated artifact paths.
-    @throws KiCadLibraryError If required files are missing or ambiguous, or
+    @throws KiCadLibraryError If required files are missing or ambiguous
+        (``footprint_missing``; ``step_missing`` only with `require_3d`), or
         if the STEP file lacks the ISO 10303-21 trailer (code
         ``step_incomplete``), even when ``require_3d`` is False.
     @throws ValueError When `model_offset` is not three finite numbers.
@@ -352,9 +390,12 @@ def discover_component_artifacts(
             f"export was probably interrupted): {step}",
             code="step_incomplete", path=step,
         )
+    # A WRL is the mesh twin of the STEP: without the STEP it is never
+    # referenced, so it is not reported as an artifact (USER DECISION
+    # 2026-11-12, see ComponentArtifacts).
     return ComponentArtifacts(
         component_name, root, footprint, step,
-        wrl if wrl.is_file() else None, offset,
+        wrl if wrl.is_file() and step.is_file() else None, offset,
     )
 
 
@@ -572,10 +613,35 @@ def attach_3d_model(footprint_text: str, model_reference: str,
     return _append_root_child(without_models, model)
 
 
-def _board_footprint(footprint_text: str, model_reference: str,
+def detach_3d_model(footprint_text: str) -> str:
+    """@brief Remove every root ``(model ...)`` node of a footprint.
+
+    @param footprint_text Text of a .kicad_mod footprint.
+    @return The footprint text without any root model node.
+    @throws KiCadLibraryError ``malformed_file`` for an unbalanced file.
+    @note Used when no STEP is delivered (USER DECISION 2026-11-12): a
+        model node would point KiCad at a file that is not there, or at a
+        model of an earlier installation that no longer matches the pads.
+        The generators write no model node, so this only removes references
+        a hand-edited footprint may carry.
+    """
+    return _remove_direct_children(footprint_text, "model")
+
+
+def _board_footprint(footprint_text: str, model_reference: str | None,
                      offset: tuple[float, float, float] = (0.0, 0.0, 0.0)) -> str:
-    """@brief Convert a library footprint into a positioned board footprint."""
-    result = attach_3d_model(footprint_text, model_reference, offset)
+    """@brief Convert a library footprint into a positioned board footprint.
+
+    @param model_reference Model path of the board's model node; None writes
+        no model node at all (no STEP delivered, USER DECISION 2026-11-12).
+    """
+    if model_reference is None:
+        # The offset is still validated: a bad value is a caller error with
+        # or without a model.
+        _checked_offset(offset)
+        result = detach_3d_model(footprint_text)
+    else:
+        result = attach_3d_model(footprint_text, model_reference, offset)
     result = _remove_direct_children(result, "at")
     return _append_root_child(
         result, f"\t(at {_mm(_PREVIEW_ORIGIN[0])} {_mm(_PREVIEW_ORIGIN[1])})")
@@ -720,6 +786,8 @@ def create_preview_project(
 
     @details The generated board embeds the footprint and references a local copy
     of the STEP model through ``${KIPRJMOD}``. No KiCad library table is changed.
+    Without a STEP (`ComponentArtifacts.has_step` False) the board footprint
+    has no model node and no model is copied.
     The board outline is at least 70 x 50 mm and grows to keep the footprint
     courtyard plus a margin inside (see preview_board_outline).
     The footprint is parsed before anything is written, the board and model
@@ -744,6 +812,11 @@ def create_preview_project(
         from read-only sources. Files of any other folder chosen by the caller
         are not unlocked; a refusal there, or a file held open, is reported as
         ``preview_write_refused``.
+    @note USER DECISION 2026-11-12: the preview works without a STEP model
+        (no FreeCAD). The board then carries no ``(model ...)`` node, and in
+        the program's own ``.kicad-preview`` folder the ``<name>.step`` and
+        ``<name>.wrl`` copied by an earlier preview are removed, so KiCad
+        does not show a stale model. A caller-chosen folder is never cleaned.
     @note A lock file left behind by a crashed KiCad also blocks the preview:
         the error names the lock file so the user can delete it once KiCad is
         closed. Stale locks are not removed automatically because a running
@@ -755,8 +828,13 @@ def create_preview_project(
     # Parse and convert the footprint first: a malformed file must not leave a
     # half-refreshed preview directory behind.
     footprint_text = _read_utf8(artifacts.footprint_path)
+    # Read once: the board text and the copies below must agree.
+    with_model = artifacts.has_step
+    # The WRL travels only with its STEP (see ComponentArtifacts).
+    shipped_wrl = artifacts.wrl_path if with_model else None
     footprint = _board_footprint(
-        footprint_text, f"${{KIPRJMOD}}/{artifacts.name}.step",
+        footprint_text,
+        f"${{KIPRJMOD}}/{artifacts.name}.step" if with_model else None,
         artifacts.model_offset,
     )
     x0, y0, x1, y1 = preview_board_outline(footprint_text)
@@ -803,14 +881,22 @@ def create_preview_project(
                         board_path, project_path):
                 if own.is_file():
                     _clear_readonly(own)
-        _atomic_copy(artifacts.step_path, preview_dir / f"{artifacts.name}.step")
+        preview_step = preview_dir / f"{artifacts.name}.step"
+        if with_model:
+            _atomic_copy(artifacts.step_path, preview_step)
+        elif preview_dir.name == PREVIEW_DIR_NAME and preview_step.is_file():
+            # No STEP now (USER DECISION 2026-11-12): the copy of an earlier
+            # preview no longer matches the footprint and must not linger.
+            # Only in the program's own preview folder, as for the WRL below.
+            _remove_clearing_readonly(preview_step)
         preview_wrl = preview_dir / f"{artifacts.name}.wrl"
-        if artifacts.wrl_path is not None:
-            _atomic_copy(artifacts.wrl_path, preview_wrl)
+        if shipped_wrl is not None:
+            _atomic_copy(shipped_wrl, preview_wrl)
         elif preview_dir.name == PREVIEW_DIR_NAME and preview_wrl.is_file():
-            # The component lost its WRL: the copy of an earlier preview no
-            # longer matches it and must not linger (review 2026-11-03). Only
-            # in the program's own preview folder, where nothing is user content.
+            # The component lost its WRL (or its whole model): the copy of an
+            # earlier preview no longer matches it and must not linger (review
+            # 2026-11-03). Only in the program's own preview folder, where
+            # nothing is user content.
             _remove_clearing_readonly(preview_wrl)
         _atomic_write_text(board_path, board)
         if not project_path.exists():
@@ -1346,7 +1432,9 @@ def _library_entry(library_name: str, uri: str) -> str:
     return (
         f"(lib (name {quote(library_name)})(type {quote('KiCad')})"
         f"(uri {quote(uri)})(options {quote('')})"
-        f"(descr {quote('Generated by KiCadGen-Tool')}))"
+        # «KiCadGen», the program's name (was «KiCadGen-Tool», user 2026-11-12).
+        # Only new rows: an existing row is kept verbatim on reinstallation.
+        f"(descr {quote('Generated by KiCadGen')}))"
     )
 
 
@@ -2179,6 +2267,21 @@ def _sweep_stale_rollback_dirs(root: Path, now: float | None = None) -> list[Pat
     return removed
 
 
+def _is_directory_link(path: Path) -> bool:
+    """Whether the folder `path` is a symbolic link or a Windows junction (rmdir would remove the link)."""
+    try:
+        if os.path.islink(path):
+            return True
+        is_junction = getattr(os.path, "isjunction", None)     # Python 3.12+
+        if is_junction is not None and is_junction(path):
+            return True
+        # Older Pythons: a junction resolves elsewhere than its own path. A
+        # false positive (a linked parent folder) only keeps the folder.
+        return path.resolve() != Path(os.path.abspath(path))
+    except OSError:
+        return True
+
+
 def _is_link(path: Path) -> bool:
     """Whether `path` is a symbolic link or a hard-linked file (for `InstallPlan.linked`)."""
     return _is_symlink(path) or _hard_linked(path)
@@ -2322,9 +2425,15 @@ def plan_component_install(
     # the place of the file: it counts as existing so the user is asked
     # before it is touched (review 2026-10-27, A1).
     existing = [path for path in targets if path.exists() or _is_symlink(path)]
-    # The WRL is removed, not replaced, when the source has none (A3).
-    removed = tuple(path for path in existing
-                    if path == target_wrl_path and artifacts.wrl_path is None)
+    with_model = artifacts.has_step
+    # The WRL is removed, not replaced, when the source has none (A3); the
+    # STEP too when no model is shipped (USER DECISION 2026-11-12): the
+    # installed footprint will not reference it, and a model of an earlier
+    # install would not match the new pads.
+    dropped = set() if with_model else {target_step}
+    if not with_model or artifacts.wrl_path is None:
+        dropped.add(target_wrl_path)
+    removed = tuple(path for path in existing if path in dropped)
     replaced = tuple(path for path in existing if path not in removed)
     destination_table = Path(table_path) if table_path else root / "fp-lib-table"
     linked = tuple(path for path in (*existing, destination_table) if _is_link(path))
@@ -2359,6 +2468,7 @@ def plan_component_install(
         detected_kicad_version=detected_kicad_version,
         detected_kicad_too_old=(detected_kicad_version is not None and
                                 kicad_version_supported(detected_kicad_version) is False),
+        with_model=with_model,
     )
 
 
@@ -2414,7 +2524,9 @@ def install_component_library(
     @param kicad_version KiCad settings version that receives the install
         (`GlobalTableLocation.version` for a global install); None when
         unknown, which skips the check.
-    @return Installed paths and the ``library:footprint`` identifier.
+    @return Installed paths and the ``library:footprint`` identifier;
+        ``step_path``/``wrl_path`` of the result are None when that file was
+        not installed.
     @throws KiCadLibraryError ``kicad_too_old`` (context ``version``,
         ``minimum``, ``path``) when `kicad_version` is older than
         `MINIMUM_KICAD_VERSION`; ``files_exist``, ``global_table_missing``,
@@ -2444,6 +2556,13 @@ def install_component_library(
         installed files, or the rollback copies, impossible to replace later.
     @note The installed copy is named ``<artifacts.name>`` inside, like its
         file (see name_footprint); the source footprint is not modified.
+    @note USER DECISION 2026-11-12: without a STEP (`InstallPlan.with_model`
+        False, e.g. no FreeCAD) the footprint is installed with NO model
+        node and no STEP/WRL is copied. A ``<name>.step``/``.wrl`` an earlier
+        install WITH a model left in ``<library>.3dshapes`` is deleted (it is
+        in ``removed``, so ``files_exist`` asks first, and the rollback puts
+        it back), never left referenced. A later install with a STEP adds the
+        model and its reference again.
     @note Linked targets (review 2026-10-27, A1): a target or table that is a
         symbolic link is written through the link (`_write_target`), a
         hard-linked one in place (`_publish_scratch`), so the other name of
@@ -2470,7 +2589,13 @@ def install_component_library(
     root = target_footprint.parents[1]
     pretty_dir = target_footprint.parent
     shapes_dir = target_step.parent
-    target_wrl = target_wrl_path if artifacts.wrl_path else None
+    with_model = plan.with_model
+    #: True once this install deleted the earlier STEP (it may then remove the emptied folder).
+    model_removed = False
+    # The model files really shipped: none without a STEP (USER DECISION
+    # 2026-11-12), the WRL only next to its STEP.
+    source_wrl = artifacts.wrl_path if with_model else None
+    target_wrl = target_wrl_path if source_wrl is not None else None
     existing = [*plan.replaced, *plan.removed]
     if existing and not overwrite:
         raise KiCadLibraryError(
@@ -2507,14 +2632,20 @@ def install_component_library(
         f"${{KIPRJMOD}}/{library_name}.3dshapes/{artifacts.name}.step"
         if project_library else target_step.as_posix()
     )
-    rendered = attach_3d_model(
-        name_footprint(_read_utf8(artifacts.footprint_path), artifacts.name),
-        model_reference, artifacts.model_offset)
+    named = name_footprint(_read_utf8(artifacts.footprint_path), artifacts.name)
+    if with_model:
+        rendered = attach_3d_model(named, model_reference, artifacts.model_offset)
+    else:
+        # Validated as with a model, so a bad offset is refused either way.
+        _checked_offset(artifacts.model_offset)
+        rendered = detach_3d_model(named)
 
     # Folders created here are removed again by a failed install when empty.
+    # Without a model the .3dshapes folder is neither needed nor created.
     created_dirs = [
         directory
-        for directory in (*reversed(root.parents), root, pretty_dir, shapes_dir)
+        for directory in (*reversed(root.parents), root, pretty_dir,
+                          *((shapes_dir,) if with_model else ()))
         if not directory.exists()
     ]
     # Scratch files are created (exclusively) inside the library folders, so
@@ -2528,13 +2659,15 @@ def install_component_library(
     aliases: dict[Path, Path] = {rollback_dir: root}
     try:
         pretty_dir.mkdir(parents=True, exist_ok=True)
-        shapes_dir.mkdir(parents=True, exist_ok=True)
+        if with_model:
+            shapes_dir.mkdir(parents=True, exist_ok=True)
         # Scratch files are siblings of the REAL files (same volume as the
         # final rename), so a linked target is never replaced by a plain file.
         staged_footprint = _temporary_sibling(real_footprint)
         staged.append((staged_footprint, real_footprint))
-        staged_step = _temporary_sibling(real_step)
-        staged.append((staged_step, real_step))
+        if with_model:
+            staged_step = _temporary_sibling(real_step)
+            staged.append((staged_step, real_step))
         if target_wrl is not None:
             staged_wrl = _temporary_sibling(real_wrl)
             staged.append((staged_wrl, real_wrl))
@@ -2544,10 +2677,11 @@ def install_component_library(
         # loss could otherwise leave an empty .kicad_mod/.step that the table
         # already references (review 2026-10-15, M5).
         _write_durably(staged_footprint, rendered.encode("utf-8"))
-        _copy_writable(artifacts.step_path, staged_step)
-        _fsync_file(staged_step)
-        if target_wrl is not None and artifacts.wrl_path is not None:
-            _copy_writable(artifacts.wrl_path, staged_wrl)
+        if with_model:
+            _copy_writable(artifacts.step_path, staged_step)
+            _fsync_file(staged_step)
+        if target_wrl is not None and source_wrl is not None:
+            _copy_writable(source_wrl, staged_wrl)
             _fsync_file(staged_wrl)
         rollback_dir.mkdir()
     except BaseException as exc:
@@ -2580,7 +2714,15 @@ def install_component_library(
             # just above (`_publish_scratch`).
             _publish_scratch(temporary, target)
             installed.append(target)
-        if artifacts.wrl_path is None and real_wrl.is_file():
+        if not with_model and real_step.is_file():
+            # No model shipped (USER DECISION 2026-11-12): the STEP of an
+            # earlier install no longer matches the footprint, which does
+            # not reference it any more. Backed up above, restored by the
+            # rollback, reported in LibraryInstallResult.removed.
+            real_step.unlink()
+            installed.append(real_step)
+            model_removed = True
+        if source_wrl is None and real_wrl.is_file():
             # Removal, not replacement: reported in LibraryInstallResult.removed
             # so the GUI can say so (review 2026-10-27, A3). Unlinking one
             # name of a hard-linked file leaves the other name untouched.
@@ -2615,10 +2757,22 @@ def install_component_library(
         raise
     for temporary, _target in staged:
         _unlink_quietly(temporary)
+    if model_removed and not _is_directory_link(shapes_dir):
+        # This reinstallation without STEP removed the earlier model: the
+        # library folder it left EMPTY is removed too (user, 2026-11-12).
+        # Only a real folder: a junction or symbolic link would itself be
+        # removed by rmdir whatever it points to, breaking the models of the
+        # other footprints reached through it (review 2026-11-12). A folder
+        # this install did not empty is left alone. Done after the commit,
+        # so the rollback never needs it; rmdir refuses a non-empty folder.
+        try:
+            shapes_dir.rmdir()
+        except OSError:
+            pass
     left = _dispose_rollback_dir(rollback_dir)
     return LibraryInstallResult(
-        f"{library_name}:{artifacts.name}", target_footprint, target_step,
-        target_wrl, destination_table,
+        f"{library_name}:{artifacts.name}", target_footprint,
+        target_step if with_model else None, target_wrl, destination_table,
         replaced=plan.replaced, removed=plan.removed, rollback_left=left,
     )
 

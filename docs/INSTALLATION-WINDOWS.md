@@ -68,8 +68,13 @@ analysis steps). Set the key from the program:
 
 The «AI credit» line in the Project tab shows the balance of the provider of
 the chosen model, and the analysis window shows the cost of the current
-analysis and of the project. If no key is set, KiCadGen says so before
-starting an analysis and offers to open «AI account...».
+analysis and of the project. If no key is set for the providers of the
+chosen models, KiCadGen says so at start-up (in the same notice that lists a
+missing KiCad or FreeCAD) and again before starting an analysis; both times
+it offers to open «AI account...». Ticking «Do not warn about the AI key
+again» in the start-up notice silences the key there; the question before a
+paid analysis stays. «Warn at start-up when an AI key is missing» in «AI
+account...» switches it back on.
 
 A text file still works as an alternative: create
 `%LOCALAPPDATA%\KiCadGen\.env` (paste the folder in the File Explorer address

@@ -501,15 +501,24 @@ def test_a_pad_whose_hole_was_not_read_is_named_for_its_hole(window, monkeypatch
     run_extraction(window, _dropped_for("hole"))
     assert window._unread_pads == ["5"] and window._unread_pad_holes == ["5"]
     block = window._unread_pads_block()
-    assert "i fori dei pad 5 non sono stati letti" in block
-    assert "le posizioni dei pad 5" not in block and "Per i fori" in block
+    # CONTRACT CHANGED 2026-11-13: pads 1-4 of this extraction DO carry a
+    # hole, so the block no longer says that none is printed; it names the
+    # pad for its hole and asks whether it exists (tests/test_pad_block_messages_gui.py
+    # holds the negative case, no hole on any pad, with the old wording).
+    assert "il foro dei pad 5 non è stato letto" in block
+    assert "le posizioni dei pad 5" not in block and "Verifica sul disegno se i pad 5" in block
     # Saved and restored with the project: a reopen says the same.
     state = window._project_state()
     assert state["unread_pad_holes"] == ["5"]
     window._switch_project("OTHER", window._general_project_state)
     assert window._unread_pad_holes is None
     window._switch_project("RLY", state)
-    assert window._unread_pads_block() == block
+    # CONTRACT CHANGED 2026-11-13: the session block now ends with the
+    # extractor's account («Dettaglio dell'analisi: …»), which is session text
+    # and is not restored; everything before it is the same after a reopen.
+    detail = " Dettaglio dell'analisi: "
+    assert detail in block
+    assert window._unread_pads_block() == block[:block.index(detail)]
 
 
 def test_a_pad_whose_position_was_not_read_keeps_the_position_message(window, monkeypatch, tmp_path):  # noqa: F811

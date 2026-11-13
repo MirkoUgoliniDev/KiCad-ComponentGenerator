@@ -212,11 +212,17 @@ def test_a_reading_with_unplaced_pads_is_never_a_replacement():
 
 
 def test_non_uniform_pad_attributes_block_with_their_names():
+    """CONTRACT CHANGED 2026-11-13 (fourth re-audit, H1/M1): a confirmed reading
+    whose pads match no grid position while the grid's holes differ is no
+    longer a block without a question naming raw field names: nothing is
+    replaced by itself, and the whole-layout question asks (the holes of
+    the read pads are then asked, with every printed hole offered)."""
     pins = [dict(p) for p in GRID]
     pins[0]["drill_mm"] = 1.0
     data = _data(pins, convention=True)
     ext.apply_dedicated_pads(data, _reading(T7N), check_layout=_witness(T7N))
-    assert unresolved(data) and "drill_mm" in unresolved(data)
+    assert unresolved(data) and "drill_mm" not in unresolved(data)
+    assert [q for q in data.get("_questions") or () if q["field"] == "pad_layout"]
     assert _numbers(data) == ["1", "2", "3", "4", "5"]
 
 

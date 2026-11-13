@@ -125,6 +125,18 @@ alone on paper) as the reading has pads. Otherwise the image cannot tell a
 wrong reading from a page whose circles are letters, and the answer is
 "unverifiable" with reason "too_few_circles", or "no_round_holes" when no
 circle at all is drawn like a hole (an SMD land pattern, a page of text).
+Since 2026-11-13 those circles must also be in the reading's own view: a
+"no_match" stands only when one similarity puts a strict majority of the
+pads on circles drawn like holes (:func:`_view_anchored`), or when one
+drawn rectangle encloses as many circles drawn like holes as the reading
+has pads (:func:`_outlined_view_holds`); otherwise the holes counted may
+all belong to other views (side-view pin stubs, a table) and the answer is
+"too_few_circles" as well.
+
+Centre-line crossings (2026-11-13): a pin drawn end-on as a dot or ring
+smaller than R_MIN_PX is invisible to the ring detector, but a crossing of
+two centre lines, one at least chain-dotted, with a small mark around it
+is taken as a hole centre drawn like a hole (:func:`_crossing_marks`).
 
 Slots and lands (2026-11-04, review H4/M11): a closed non-circular contour
 of hole size -- an obround (two semicircles joined by two parallel
@@ -175,7 +187,7 @@ deduction; :func:`measured_layout_outcome` names the refusal.
 from __future__ import annotations
 
 from collections import OrderedDict
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 import math
 from pathlib import Path
 import threading
@@ -383,6 +395,21 @@ MAX_SKEW_DEG = 45.0
 #: hole list of the drawing (vector source) would make it unnecessary.
 MIN_WITNESS_PADS = 2
 
+#: Fewest paper gaps along a line before it counts as interrupted (dashed,
+#: chain or dotted) for :func:`_crossing_marks`. Declared heuristic
+#: (2026-11-13): a centre line repeats its dash along its whole length, so
+#: it shows many gaps; a solid line is broken at most once or twice, by its
+#: own label or by a line drawn over it. Three gaps are two whole dashes
+#: between them, the fewest that make a repetition. Not set on a page: on
+#: the TEL page the vertical centre lines show 9-13 gaps on their core
+#: column, the solid lines none, and the horizontal centre lines, dotted
+#: finer than a pixel, show none either (hence ONE interrupted line of the
+#: two suffices, see :func:`_crossing_marks`). Gaps alone do not make a
+#: centre line: :func:`_is_chain` also asks for the long/short dash
+#: alternation that tells it from an evenly dashed hidden line. A vector drawing (line
+#: objects with a dash style) would make it unnecessary.
+CENTRELINE_MIN_GAPS = 3
+
 #: Body check, PROPORTIONAL term: a body outline drawn within this ratio of
 #: its quoted size (plus two per-hole tolerances for its two edges) agrees
 #: with the reading. Declared heuristic, replacing a fixed 0.5 mm that
@@ -462,6 +489,14 @@ MAX_ASSIGNMENTS = 50
 #: is "unverifiable" ("search_limit") instead of searched further: about one
 #: second of work on a laptop.
 MAX_RING_PROBES = 3000
+
+#: Budget of the view search (:func:`_view_anchored`), in projected
+#: pad-to-hole distances. When it runs out the image is "unverifiable"
+#: ("search_limit"), never contradicted on a search left unfinished. Set,
+#: like MAX_RING_PROBES, to about one second of work on a laptop; a
+#: reading that is right in most of its pads finds its view at the first
+#: baselines and never comes near it.
+MAX_VIEW_DISTANCES = 100_000_000
 
 #: Images whose analysis (photo gate, ink mask, circles) is kept in memory,
 #: least recently used dropped first. The extractor checks two to four
@@ -554,7 +589,8 @@ class LayoutCheck:
         when no fit was made; ``circles`` is the number of circles found in
         the deciding image (all of them, glyph-like ones and slot centres
         included; for "too_few_circles" it may exceed the pad count when
-        too few of them are drawn like holes).
+        too few of them are drawn like holes, or when those drawn like
+        holes are not in the reading's view, see :func:`_view_anchored`).
     @note ``scale_observable`` (2026-11-04) says whether the stretch and
         shear test of the fit could be run on this reading: at least
         AFFINE_MIN_PADS pads not nearly collinear (see
@@ -601,6 +637,27 @@ class LayoutCheck:
         verdict is another. Read-only evidence for the caller, which may
         compare it with HYPOTHESIS_TOL_SPAN, the stretch the search itself
         attributes to a page not to scale.
+    @note ``marks_used`` (2026-11-13) is, for a "confirmed" result, how
+        many of the confirming fit's targets are centre-line crossing marks
+        (a pin drawn too small for the ring detector, see
+        :func:`_crossing_marks`) rather than drawn rings or slots; None
+        (not computed, which is not "none") for every other result. A
+        mark may also be a datum on the body's symmetry axes, so a
+        confirmation resting on marks is weaker than one on rings: the
+        caller may say so.
+    @note ``unassigned_refuting`` (2026-11-13, re-audits D6 and (a)) is, for
+        a "confirmed" result, the number of circles drawn like holes (marks
+        excluded, :func:`_refutes`) inside the confirming fit's view -- the
+        bounding box of its pads in the reading's frame, grown along each
+        axis by the largest spacing between neighbouring rows or columns
+        and by the per-hole tolerance, see :func:`_unassigned_refuting` --
+        to which no pad was assigned; None (not computed) for every other
+        result, and for a confirmation whose pads form a single row or
+        column (nothing tells how far its view extends across it). A confirmation allows extra circles, so a reading that
+        LOSES positions is confirmed while those holes are drawn in its own
+        view: a value above 0 says the reading may be missing pads (or that
+        the view draws mounting holes). A lost group farther than the largest
+        spacing (two lost rows) is not counted.
     """
 
     status: str
@@ -614,6 +671,8 @@ class LayoutCheck:
     scale_verified: bool = False
     misplaced_pad: object | None = None
     stretch_ratio: float | None = None
+    marks_used: int | None = None
+    unassigned_refuting: int | None = None
 
 
 @dataclass(frozen=True)
@@ -637,6 +696,27 @@ class _Circle:
     half_length: float = 0.0
     ux: float = 1.0
     uy: float = 0.0
+    #: A centre-line crossing mark (:func:`_crossing_marks`), not a ring the
+    #: detector saw: it may CONFIRM a fit as a target, but never counts
+    #: towards what refutes or excuses a reading, nor receives a moved pad
+    #: (see :func:`_refutes`).
+    marked: bool = False
+
+
+def _refutes(circle: _Circle) -> bool:
+    """True when the circle may count against a reading: drawn like a hole and seen as a ring or slot.
+
+    A crossing mark is excluded (2026-11-13, generality audit S1): a small
+    mark on a crossing of two chain lines is the centre of a pin drawn too
+    small, OR a datum / centre mark on the body's symmetry axes, and
+    nothing local tells the two apart. As a target it can only help a fit
+    whose other pads also sit on their holes; counted towards the page's
+    holes (the page-wide count, the view rules, the anchors and radius of
+    the missed-hole excuse, the free hole of a move) a phantom centre mark
+    would let the page refute, excuse or move pads on a hole that may not
+    exist.
+    """
+    return circle.evidence and not circle.marked
 
 
 @dataclass(frozen=True)
@@ -690,6 +770,10 @@ class _Fit:
     body_check: str = BODY_NONE
     misplaced: int | None = None
     stretch: float | None = None
+    #: Of a confirmation: targets that are crossing marks, and circles that
+    #: may refute left without a pad inside the view (see _fit_assignment).
+    marks: int = 0
+    unassigned: int | None = 0
 
 
 @dataclass(frozen=True)
@@ -747,7 +831,8 @@ def check_pad_layout(images: Sequence[Path], pads_mm: Mapping[object, Sequence[f
         drawn hole of such a position does not count.
     @return A :class:`LayoutCheck`: "confirmed" if any image confirms; else
         "not_confirmed" if at least one line drawing had at least as many
-        circles drawn like holes as the reading has pads (reason
+        circles drawn like holes as the reading has pads, and, when nothing
+        fits, enough pads on them in one view (:func:`_view_anchored`) (reason
         "no_match", or "no_match_unobservable" when the reading cannot show
         the page's scale, see ``scale_observable``); else "unverifiable"
         with the most informative reason ("too_few_pads" below MIN_PADS
@@ -805,7 +890,8 @@ def check_pad_layout(images: Sequence[Path], pads_mm: Mapping[object, Sequence[f
         fit = confirmed.fit
         return LayoutCheck(CONFIRMED, "confirmed", confirmed.name, round(fit.max_error_mm, 4),
                            round(fit.tolerance_mm, 4), confirmed.circles, observable,
-                           fit.body_check, fit.body_check == BODY_AGREES)
+                           fit.body_check, fit.body_check == BODY_AGREES,
+                           marks_used=fit.marks, unassigned_refuting=fit.unassigned)
     return _summarise(results, observable, unchecked, list(pads_mm.keys()))
 
 
@@ -1523,6 +1609,220 @@ def _isolated(ink: np.ndarray, x: float, y: float, ux: float, uy: float, half_le
 
 
 # ---------------------------------------------------------------------------
+# Centre-line crossings: hole centres drawn too small for the ring detector
+# ---------------------------------------------------------------------------
+
+def _crossing_marks(mask: np.ndarray, circles: Sequence[_Circle]) -> list[_Circle]:
+    """Hole centres marked by two crossing centre lines and a small mark on the crossing.
+
+    Why (2026-11-13, TEL page): a pin drawn end-on is often a dot or a ring
+    of 2-3 px radius, below R_MIN_PX, so the ring detector cannot see it,
+    while drafting convention still marks its centre by a horizontal and a
+    vertical centre line. Such a crossing becomes a matching target (a
+    :class:`_Circle` of kind "ring", drawn like a hole: ``evidence`` True,
+    and ``marked`` True: it may confirm, never refute, see
+    :func:`_refutes`) when ALL of these hold; each is a drafting fact, not
+    a number fitted to one page:
+
+    1. both lines are straight, thin and long (:func:`_line_bands`, the
+       outline search's own line finder: thin ink, dash gaps bridged), and
+       each runs on for at least two isolation radii (``2 * rho_out``) on
+       one side of the crossing, as a centre line does
+       (:func:`_hole_evidence` asks two diameters of a detected circle);
+    2. at least one of the two shows the chain pattern of a centre line
+       (:func:`_is_chain`: interrupted, long dashes alternating with short
+       ones): dimension and extension lines are solid and hidden lines
+       evenly dashed, so neither their crossings count. ONE line suffices
+       because a line dotted finer than a pixel reads as solid (the TEL
+       horizontals);
+    3. ink lies on the crossing, and the ink that belongs to neither line
+       lies within ``rho_in`` of it in all four quadrants: a mark drawn
+       AROUND the crossing (dot or ring), not a bare cross, an arrowhead
+       (one side only) or a letter beside it;
+    4. along both lines, from ``rho_in`` to ``rho_out``, there is no such
+       ink (at most 2 % of the strip, JPEG specks, as :func:`_isolated`):
+       the mark ends where a circle too small for the detector ends. Two
+       arrowheads meeting on an extension line from both sides fill four
+       quadrants but run along the dimension line, and fail here.
+
+    ``rho_in`` = R_MIN_PX + one stroke width is the extent of a mark the
+    detector cannot see (a circle below its smallest radius, with its own
+    stroke); ``rho_out`` = 2 ``rho_in`` is one such diameter further, the
+    clearance :func:`_isolated` asks of a detected hole. A crossing within
+    one radius of a detected circle is that circle's and adds nothing.
+
+    @note Declared limits: a filled disc wider than ``rho_in`` on a
+        crossing is not taken (its ink fills the strips); a glyph sitting
+        exactly on a chain-line crossing with ink in all four quadrants and
+        nothing along the lines would be taken (none on the sample pages).
+        A dot on the crossing of the body's two chain symmetry axes (a
+        datum or centre mark) is taken like a pin: nothing local tells
+        them apart. It is ``marked``, so it never refutes, excuses or
+        receives a moved pad (:func:`_refutes`); what remains is that a
+        reading with an extra pad exactly on it is confirmed, as it would
+        be on a ring drawn there. A vector drawing (explicit circles and line styles) would make the
+        whole step unnecessary.
+    @return Targets in working-image pixels; empty when none.
+    """
+    height, width = mask.shape
+    sw = _stroke_width(mask)
+    rho_in = R_MIN_PX + sw
+    rho_out = 2 * rho_in
+    min_length = int(math.ceil(2 * rho_out))
+    _hs, h_lines, _hb = _line_bands(mask, True, min_length, sw)
+    _vs, v_lines, _vb = _line_bands(mask, False, min_length, sw)
+    crossing = ((h_lines > 0) & (v_lines > 0)).astype(np.uint8)
+    if not crossing.any():
+        return []
+    ink = mask > 0
+    off_line = ink & (h_lines == 0) & (v_lines == 0)
+    count, _labels, _stats, centroids = cv2.connectedComponentsWithStats(crossing, connectivity=8)
+    reach = int(math.ceil(rho_out)) + 1
+    found: list[_Circle] = []
+    for index in range(1, count):
+        cx, cy = (float(v) for v in centroids[index])
+        xi, yi = int(round(cx)), int(round(cy))
+        if any(math.hypot(cx - c.x, cy - c.y) <= max(c.r, rho_in) for c in list(circles) + found):
+            continue
+        # Ink on the crossing itself (bridged dash gaps are not ink).
+        if not ink[max(0, yi - 1):yi + 2, max(0, xi - 1):xi + 2].any():
+            continue
+        h_run = _run_through(h_lines[yi], xi)
+        v_run = _run_through(v_lines[:, xi], yi)
+        if h_run is None or v_run is None:
+            continue
+        if (max(h_run[1] - xi, xi - h_run[0]) < 2 * rho_out
+                or max(v_run[1] - yi, yi - v_run[0]) < 2 * rho_out):
+            continue
+        # The rows of the horizontal line and the columns of the vertical
+        # one, at the crossing.
+        h_band = _run_through(h_lines[:, xi], yi)
+        v_band = _run_through(v_lines[yi], xi)
+        # Gaps are counted on each line's CORE row (column): the most inked
+        # one of its band. Its faint neighbours come and go along a solid
+        # line drawn slightly off the pixel grid, and would show gaps a
+        # solid line does not have.
+        h_core = ink[h_band[0]:h_band[1] + 1, h_run[0]:h_run[1] + 1]
+        v_core = ink[v_run[0]:v_run[1] + 1, v_band[0]:v_band[1] + 1]
+        h_line = h_core[int(h_core.sum(axis=1).argmax())]
+        v_line = v_core[:, int(v_core.sum(axis=0).argmax())]
+        if not (_is_chain(h_line, sw) or _is_chain(v_line, sw)):
+            continue
+        x0, y0 = max(0, xi - reach), max(0, yi - reach)
+        x1, y1 = min(width, xi + reach + 1), min(height, yi + reach + 1)
+        gy, gx = np.mgrid[y0:y1, x0:x1]
+        dx, dy = gx - cx, gy - cy
+        # Ink on the lines' own rows and columns (their ends just past a
+        # corner pin, their anti-aliased edge) is never a mark.
+        own = ((gy >= h_band[0]) & (gy <= h_band[1])) | ((gx >= v_band[0]) & (gx <= v_band[1]))
+        local = off_line[y0:y1, x0:x1] & ~own
+        near = np.hypot(dx, dy) <= rho_in
+        mark = local & near
+        quadrants = [(dx <= -0.5) & (dy <= -0.5), (dx >= 0.5) & (dy <= -0.5),
+                     (dx <= -0.5) & (dy >= 0.5), (dx >= 0.5) & (dy >= 0.5)]
+        if not all((mark & q).any() for q in quadrants):
+            continue
+        strips = ~near & (((np.abs(dy) <= rho_in) & (np.abs(dx) <= rho_out))
+                          | ((np.abs(dx) <= rho_in) & (np.abs(dy) <= rho_out)))
+        if not strips.any() or float(local[strips].mean()) > 0.02:
+            continue
+        distances = np.hypot(dx[mark], dy[mark])
+        radius = max(sw / 2, float(np.percentile(distances, 90)))
+        found.append(_Circle(cx, cy, radius, 1.0, True, "ring", marked=True))
+    return found
+
+
+def _run_through(line: np.ndarray, at: int) -> tuple[int, int] | None:
+    """First and last index of the run of non-zero samples of ``line`` holding index ``at``, or None."""
+    if at < 0 or at >= len(line) or not line[at]:
+        return None
+    on = np.asarray(line) > 0
+    start = at
+    while start > 0 and on[start - 1]:
+        start -= 1
+    end = at
+    while end < len(on) - 1 and on[end + 1]:
+        end += 1
+    return start, end
+
+
+def _paper_gaps(run: np.ndarray) -> int:
+    """Number of paper stretches between two inked samples of ``run``."""
+    inked = np.nonzero(np.asarray(run))[0]
+    return int((np.diff(inked) > 1).sum()) if inked.size > 1 else 0
+
+
+def _ink_segments(run: np.ndarray) -> list[int]:
+    """Lengths of the inked stretches of ``run``, in order."""
+    return [length for _start, length in _ink_stretches(run)]
+
+
+def _ink_stretches(run: np.ndarray) -> list[tuple[int, int]]:
+    """(start, length) of the inked stretches of ``run``, in order."""
+    edges = np.flatnonzero(np.diff(np.r_[0, np.asarray(run).astype(np.int8), 0]))
+    return [(int(a), int(b - a)) for a, b in zip(edges[::2], edges[1::2])]
+
+
+def _is_chain(run: np.ndarray, stroke: float = 1.0) -> bool:
+    """True when a line shows the chain pattern of a centre line: long dashes alternating with short ones, repeatedly.
+
+    ISO 128-20 draws a centre line as a chain: long dashes separated by a
+    short dash or a dot; a hidden line is DASHED, all dashes of one length;
+    dimension and extension lines are solid. The test (generality audits
+    S1 and D5, 2026-11-13):
+
+    1. the line is interrupted: at least CENTRELINE_MIN_GAPS paper gaps;
+    2. stretches of ink no longer than one stroke width rounded up plus
+       one pixel (anti-aliasing widens a crossing line by about a pixel;
+       re-audit (b): a 3 px crossing at a 2.0 stroke) are dropped: they
+       are a perpendicular line crossing the run, or a speck, and a hidden
+       line crossed in a gap must not gain a "short dash";
+    3. the long-dash length is the median of the longer half of the
+       remaining stretches; a stretch at most half of it is short, any
+       other long;
+    4. the alternation REPEATS: long, short, long, short, long, in a row.
+       One alternation is what a single crossing or a dotted line with
+       jitter produces; two consecutive ones, with one long dash between
+       the two short ones, are the period of a chain. Each of the two
+       short dashes must also sit CENTRED in its gap (the paper before and
+       after it equal within the speck size): a chain draws its short dash
+       in the middle of the gap, a line crossing a hidden line in its gaps
+       lands anywhere in them.
+
+    Declared heuristic, the factor one half: ISO's long dash is 12-24 line
+    widths and its short dash at most 3 (a ratio of 4 or more); the TEL
+    page draws 24 px dashes and 8 px short dashes (3). Declared limit: a
+    chain whose dots are no longer than the stroke width (dash-dot drawn
+    with true dots) is not recognised -- its dots are dropped with the
+    specks -- and its crossings are then taken only when the OTHER line is
+    a resolvable chain. Measured on the TEL page: the columns of pins 7-8
+    and 10-9 repeat the alternation (stretches 24, 8, 24, ... 62, 8, 15, 8,
+    24), the column of pins 1 and 16 shows it once (7, 8, 24, 8, 24, 24,
+    121, 33, 8: the other dashes are merged with crossing lines).
+    """
+    if _paper_gaps(run) < CENTRELINE_MIN_GAPS:
+        return False
+    speck = math.ceil(stroke) + 1
+    stretches = [(start, length) for start, length in _ink_stretches(run) if length > speck]
+    if len(stretches) < 5:
+        return False
+    segments = [length for _start, length in stretches]
+    upper = sorted(segments)[len(segments) // 2:]
+    long_dash = float(np.median(upper))
+    short = [2 * length <= long_dash for length in segments]
+
+    def centred(k: int) -> bool:
+        """The short stretch k sits in the middle of the gap between its two long neighbours."""
+        before = stretches[k][0] - (stretches[k - 1][0] + stretches[k - 1][1])
+        after = stretches[k + 1][0] - (stretches[k][0] + stretches[k][1])
+        return abs(before - after) <= speck
+
+    return any(short[k] and short[k + 2] and not (short[k - 1] or short[k + 1] or short[k + 3])
+               and centred(k) and centred(k + 2)
+               for k in range(1, len(segments) - 3))
+
+
+# ---------------------------------------------------------------------------
 # Closed non-circular contours: slots and outlined lands
 # ---------------------------------------------------------------------------
 
@@ -2133,6 +2433,248 @@ def _hypothesis_assignments(points: np.ndarray, circles: Sequence[_Circle],
     return sorted(found.values(), key=lambda row: int((row < 0).sum()))
 
 
+def _view_anchored(points: np.ndarray, circles: Sequence[_Circle],
+                   kinds: Sequence[str | None] | None = None,
+                   budget: _Budget | None = None) -> bool:
+    """True when the page shows the view a reading is drawn in: enough of its pads land on drawn holes at once.
+
+    A failed fit ("no_match") says that no similarity puts EVERY pad on a
+    circle. It contradicts the reading only where the page draws the pads
+    at all: a page whose pins are drawn too small to be found in the view
+    the reading was taken from, while other views (side-view pin stubs,
+    a pin table, a tolerance sketch) hold circles drawn like holes, has
+    nothing to set against the reading (2026-11-13, TEL page). The view is
+    found by the reading itself: one similarity (the hypotheses of
+    :func:`_hypothesis_assignments`: a pad pair on a pair of circles, no
+    mirror, rotation up to MAX_SKEW_DEG as the skewed-page search, because
+    a turned page still draws its view) that puts a STRICT MAJORITY of the
+    pads on distinct circles drawn like holes (``evidence``), each within
+    the fit's own error budget: the per-hole tolerance
+    (:func:`_tolerance_mm`) plus the page stretch the fit accepts
+    (PAGE_STRETCH_RATIO) over the pad's distance from the nearer baseline
+    pad. The pads it leaves out then land, in that same view, where no
+    hole is drawn: that is a contradiction. Without such a similarity the
+    circles drawn like holes may all be elsewhere on the page, and
+    "no_match" would compare the reading with another view.
+
+    Why a strict majority, a bound that is not new: it is the one
+    :func:`_missed_hole_explains` puts on the other side of the same
+    question (a reading is excused by missed holes only when a strict
+    majority of its pads sit on drawn holes), so one rule says which view
+    a reading belongs to, whether to excuse it or to contradict it. What
+    it keeps refusing on views drawn without an outline: a mirrored
+    reading, two pads exchanged, one pad moved (3 of 5 pads anchored on
+    the sample pages: margin ONE pad). What it stops refusing: readings
+    compared with circles of other views (2 of 6 pads anchored on the TEL
+    page with its pins hidden, 3 of 6 on the synthetic page of
+    tests/test_drawing_holes_witness_view.py: margin ONE pad). Both
+    margins are thin: this test is a declared heuristic. Random readings
+    against random circles drawn like holes (2026-11-13, 40 trials each,
+    620 x 480 px page) were anchored by chance 13/40 times for five pads
+    on 8 circles and 40/40 on 20 (a majority of five is a single witness),
+    never for six pads on 8-20 circles: on a crowded page a reading of
+    five pads or fewer keeps the pre-2026-11-13 behaviour ("no_match"
+    against circles of any view). What it would give up -- a reading wrong
+    in most of its pads, as the main answers the extractor must discard
+    (tests/test_extraction_body_axes.py, tests/test_geometry_witnesses.py)
+    -- is kept by the page-side test :func:`_outlined_view_holds` when the
+    view is outlined; on a view drawn without an outline such a reading
+    is "too_few_circles" instead of "no_match" ("distorted" and
+    "body_scale" are not affected). A three-pad reading's majority is two
+    pads, which any pair of circles gives: for it nothing changes. A view
+    found without the reading (views segmented on the page) would make
+    the rule unnecessary.
+
+    @note Every pad pair is a baseline (not only the longest ones): any
+        two well-read pads may fix the view, whichever pads are misread.
+        Cost O(n^2 * C^2 * n * C) in the worst case over the C circles
+        drawn like holes; it stops at the first anchoring found, and
+        raises _BudgetExceeded when ``budget`` (counted in projected
+        distances, see MAX_VIEW_DISTANCES) runs out.
+    """
+    budget = budget or _Budget(MAX_VIEW_DISTANCES)
+    needed = len(points) // 2 + 1
+    holes = [k for k, c in enumerate(circles) if _refutes(c)]
+    if len(holes) < needed:
+        return False
+    n = len(points)
+    q = points[:, 0] + 1j * points[:, 1]
+    centres = np.array([circles[k].x + 1j * circles[k].y for k in holes])
+    circle_kinds = np.array([circles[k].kind for k in holes])
+    allowed = np.ones((n, len(holes)), bool)
+    for p, kind in enumerate(kinds or ()):
+        if kind is not None:
+            allowed[p] = circle_kinds == kind
+    pair_i, pair_j = np.triu_indices(n, 1)
+    lengths = np.abs(q[pair_j] - q[pair_i])
+    min_spacing = float(lengths.min())
+    a_idx, b_idx = np.nonzero(~np.eye(len(holes), dtype=bool))
+    for k in np.argsort(-lengths, kind="stable"):
+        i, j = int(pair_i[k]), int(pair_j[k])
+        z = (centres[b_idx] - centres[a_idx]) / (q[j] - q[i])
+        keep = np.abs(np.degrees(np.angle(z))) <= MAX_SKEW_DEG
+        keep &= np.abs(z) * min_spacing >= 2 * TOLERANCE_PX
+        keep &= allowed[i][a_idx] & allowed[j][b_idx]
+        za, origin = z[keep], centres[a_idx[keep]]
+        if za.size == 0:
+            continue
+        anchor = np.minimum(np.abs(q - q[i]), np.abs(q - q[j]))
+        # Hypotheses in blocks, so the distance matrix stays a few MB.
+        block = max(1, 1_000_000 // len(holes))
+        for start in range(0, za.size, block):
+            zb, ob = za[start:start + block], origin[start:start + block]
+            budget.spend(zb.size * n * len(holes))
+            hit = np.full((zb.size, n), -1, int)
+            rows = np.arange(zb.size)
+            for p in range(n):
+                projected = ob + zb * (q[p] - q[i])
+                distance = np.abs(projected[:, None] - centres[None, :])
+                distance = np.where(allowed[p][None, :], distance, np.inf)
+                nearest = distance.argmin(axis=1)
+                # The fit's own error budget, not the wider hypothesis gate:
+                # the per-hole tolerance plus the page stretch the fit
+                # accepts (PAGE_STRETCH_RATIO) over the distance from the
+                # baseline. A 6 % gate let four random pads of forty land
+                # on sixty random circles.
+                scale = np.abs(zb)
+                gate = (np.maximum(TOLERANCE_PX, MIN_TOLERANCE_MM * scale)
+                        + PAGE_STRETCH_RATIO * scale * anchor[p])
+                hit[:, p] = np.where(distance[rows, nearest] <= gate, nearest, -1)
+            # Distinct holes hit per hypothesis: two pads on one hole count once.
+            ordered = np.sort(hit, axis=1)
+            fresh = np.concatenate([np.ones((zb.size, 1), bool), ordered[:, 1:] != ordered[:, :-1]],
+                                   axis=1)
+            if int(((ordered >= 0) & fresh).sum(axis=1).max()) >= needed:
+                return True
+    return False
+
+
+def _outlined_view_holds(mask: np.ndarray, circles: Sequence[_Circle], count: int,
+                         memo: dict | None = None) -> bool:
+    """True when one drawn rectangle encloses at least ``count`` circles drawn like holes.
+
+    The second way a page shows the view of a reading, found without the
+    reading (2026-11-13): a pin view is drawn inside its body outline, so a
+    closed rectangle (:func:`_outline_rects`: solid, dashed or dotted
+    sides) holding at least as many circles drawn like holes as the reading
+    has pads is a view that could show every pad. It is the page-wide rule
+    of :func:`_check_image` ("at least as many circles drawn like holes as
+    pads") restricted to one outlined view, so a reading wrong in most of
+    its pads is still refused there, while circles scattered over other
+    views (pin stubs of a side view, a sketch, a table) are not added up.
+    The rectangles enclosing each such circle are enumerated, smallest
+    first, until one holds ``count``.
+
+    @note Declared limits: any closed rectangle counts (a table cell
+        holding enough rings would too); a view drawn without an outline
+        is found only through the reading (:func:`_view_anchored`).
+        Cost: one rectangle enumeration per circle drawn like a hole (0.2-0.7 s
+        on the sample pages), paid once per page and pad count: ``memo``
+        (the analysis's ``outlined``) keeps the answer.
+    """
+    if memo is not None and count in memo:
+        return memo[count]
+    holes = [c for c in circles if _refutes(c)]
+    # What may make an inner rectangle a view of its own: any centre drawn
+    # like a hole, crossing marks included (they need not refute to show
+    # that a rectangle is not empty).
+    drawn = [c for c in circles if c.evidence]
+    found = False
+    if len(holes) >= count:
+        lines = memo.get("_lines") if memo is not None else None
+        if lines is None:
+            lines = _closed_rect_lines(mask)
+            if memo is not None:
+                memo["_lines"] = lines
+        for circle in holes:
+            for rect in _outline_rects(mask, [circle]):
+                left, top, right, bottom = rect
+                if (sum(left < h.x < right and top < h.y < bottom for h in holes) >= count
+                        and not _encloses_empty_rect(lines, rect, drawn)):
+                    found = True
+                    break
+            if found:
+                break
+    if memo is not None:
+        memo[count] = found
+    return found
+
+
+def _closed_rect_lines(mask: np.ndarray) -> tuple:
+    """Row and column bands of straight lines, with cumulative coverage along them, for :func:`_encloses_empty_rect`.
+
+    The same lines as :func:`_outline_rects` (its minimum length, solid
+    ink or thin ink with dash gaps bridged), as (rows, cols, h_ok, v_ok):
+    ``h_ok[r, x]`` counts along row r the pixels within 1 px of a line up
+    to column x, ``v_ok`` likewise along columns.
+    """
+    height, width = mask.shape
+    min_length = max(8, int(0.04 * min(height, width)))
+    stroke = _stroke_width(mask)
+    h_solid, h_dashed, rows = _line_bands(mask, True, min_length, stroke)
+    v_solid, v_dashed, cols = _line_bands(mask, False, min_length, stroke)
+    grow = np.ones((3, 3), np.uint8)
+    h_ok = np.cumsum(np.pad(cv2.dilate(h_solid | h_dashed, grow) > 0, ((0, 0), (1, 0))), axis=1)
+    v_ok = np.cumsum(np.pad(cv2.dilate(v_solid | v_dashed, grow) > 0, ((1, 0), (0, 0))), axis=0)
+    return rows, cols, h_ok, v_ok
+
+
+def _encloses_empty_rect(lines: tuple, rect: tuple[float, float, float, float],
+                         holes: Sequence[_Circle]) -> bool:
+    """True when another closed rectangle lies inside ``rect`` with no centre drawn like a hole in it or on its sides.
+
+    Why (generality audit C1, 2026-11-13): :func:`_outline_rects` closes
+    ANY rectangle, and a drawing border or title-block frame around the
+    whole page encloses every view at once, which brought back the
+    page-wide count :func:`_outlined_view_holds` exists to restrict. A
+    view's own outline encloses its holes and what belongs to them; a
+    frame also encloses the outline of another view whose pins are not
+    seen (a closed rectangle without a hole of its own). Such a rectangle
+    is not one view and holds nothing for the reading.
+
+    @note Lenient on purpose: a side counts when its line (solid, or dashed
+        with its gaps bridged) covers OUTLINE_COVER_MIN of it, without the
+        clutter test of :func:`_outline_rects`. A rectangle wrongly
+        rejected only leaves the reading to :func:`_view_anchored` (no
+        refusal from the outline), the safe direction for a false refusal.
+        Declared limit: a body outline enclosing an empty inner rectangle
+        (a marking window, a label field) is not a view either.
+    """
+    rows, cols, h_ok, v_ok = lines
+    left, top, right, bottom = rect
+
+    def centre(band: tuple[int, int]) -> float:
+        """Centre of a band of rows or columns."""
+        return (band[0] + band[1]) / 2
+
+    inner_rows = [centre(b) for b in rows if top + 1.5 < centre(b) < bottom - 1.5]
+    inner_cols = [centre(b) for b in cols if left + 1.5 < centre(b) < right - 1.5]
+
+    def covered_h(row: float, a: float, b: float) -> bool:
+        """A horizontal side between columns a and b is drawn."""
+        r, ia, ib = int(row), int(a), int(b)
+        return (h_ok[r, ib] - h_ok[r, ia]) >= OUTLINE_COVER_MIN * max(1, ib - ia)
+
+    def covered_v(col: float, a: float, b: float) -> bool:
+        """A vertical side between rows a and b is drawn."""
+        c, ia, ib = int(col), int(a), int(b)
+        return (v_ok[ib, c] - v_ok[ia, c]) >= OUTLINE_COVER_MIN * max(1, ib - ia)
+
+    for ti, t in enumerate(inner_rows):
+        for b in inner_rows[ti + 1:]:
+            for li, l in enumerate(inner_cols):
+                for r in inner_cols[li + 1:]:
+                    if not (covered_h(t, l, r) and covered_h(b, l, r)
+                            and covered_v(l, t, b) and covered_v(r, t, b)):
+                        continue
+                    # A hole on the inner rectangle's sides or corners (a grid
+                    # of centre lines through the pins) makes it not empty.
+                    if not any(l - h.r <= h.x <= r + h.r and t - h.r <= h.y <= b + h.r
+                               for h in holes):
+                        return True
+    return False
+
+
 def _is_collinear(points: np.ndarray, ratio: float = COLLINEAR_RATIO) -> bool:
     """True when the points lie on one straight line within ``ratio``.
 
@@ -2365,6 +2907,82 @@ def _single_misplaced(points: np.ndarray, targets: np.ndarray, tolerance_px: flo
 def _fit_assignment(points: np.ndarray, circles: Sequence[_Circle], assign: np.ndarray,
                     mask: np.ndarray, body: tuple[float, float] | None, *,
                     anchoring: bool = True, outlines: dict | None = None) -> _Fit:
+    """Fit one complete assignment, classify it (:func:`_classify_assignment`) and, when it confirms, say what it rests on.
+
+    A confirmation carries ``marks`` (how many of its targets are crossing
+    marks, :func:`_crossing_marks`, rather than drawn rings or slots) and
+    ``unassigned`` (:func:`_unassigned_refuting`): read-only evidence for
+    the caller, see :class:`LayoutCheck`.
+    """
+    fit = _classify_assignment(points, circles, assign, mask, body, anchoring=anchoring,
+                               outlines=outlines)
+    if fit.stage != "confirmed":
+        return fit
+    return replace(fit, marks=sum(circles[k].marked for k in assign),
+                   unassigned=_unassigned_refuting(points, circles, assign))
+
+
+def _axis_spacing(values: np.ndarray, tolerance: float) -> float | None:
+    """Largest gap between consecutive distinct coordinates (merged within ``tolerance``), or None for one coordinate."""
+    distinct: list[float] = []
+    for value in np.sort(values):
+        if not distinct or value - distinct[-1] > tolerance:
+            distinct.append(float(value))
+    if len(distinct) < 2:
+        return None
+    return float(np.diff(distinct).max())
+
+
+def _unassigned_refuting(points: np.ndarray, circles: Sequence[_Circle], assign: np.ndarray) -> int | None:
+    """Circles that may refute (:func:`_refutes`) inside the fitted view, to which no pad was assigned; None when not computed.
+
+    Why (re-audits D6, (a) and H3, 2026-11-13): a confirmation allows extra
+    circles, so a reading that LOSES positions (four pads read where six
+    holes are drawn) is confirmed while the lost holes are drawn in the
+    same view, most often as a lost END row or column. The view is taken
+    in the reading's own frame (mm; the circles are brought there by the
+    inverse of the fit): the bounding box of the pads, grown along each
+    axis by the LARGEST spacing between neighbouring distinct coordinates
+    of the pads along that axis (rows along Y, columns along X), plus the
+    per-hole tolerance. A lost end row lies one row spacing away, a lost
+    end column one column spacing away: both are inside, whatever the
+    pitch. Every quantity is the fit's own, no constant. Counted, never
+    judged: the caller decides (a mounting hole is also an unassigned
+    hole).
+
+    @return The count, or None when the pads hold a single distinct
+        coordinate along an axis (one row or one column): nothing in the
+        reading says how far its view extends across it, so "0" would
+        claim what was never looked at.
+    @note Declared limits: a lost group farther than the largest spacing
+        (two lost rows) is not counted; the drawn body outline would bound
+        a single row's view, but which rectangle is the body is often
+        unknown (see :func:`_body_check`), so a single row is "not
+        computed" instead.
+    """
+    targets = _centres(circles, assign)
+    sim = _fit_similarity(points, targets)
+    tolerance = _tolerance_mm(sim.scale)
+    grow = [_axis_spacing(points[:, axis], tolerance) for axis in (0, 1)]
+    if grow[0] is None or grow[1] is None:
+        return None
+    low = points.min(axis=0) - np.array(grow) - tolerance
+    high = points.max(axis=0) + np.array(grow) + tolerance
+    used = {int(k) for k in assign}
+    count = 0
+    for index, circle in enumerate(circles):
+        if index in used or not _refutes(circle):
+            continue
+        # The circle in the reading's frame: inverse of the similarity.
+        z = (complex(circle.x, circle.y) - sim.shift) / sim.gain
+        if low[0] <= z.real <= high[0] and low[1] <= z.imag <= high[1]:
+            count += 1
+    return count
+
+
+def _classify_assignment(points: np.ndarray, circles: Sequence[_Circle], assign: np.ndarray,
+                         mask: np.ndarray, body: tuple[float, float] | None, *,
+                         anchoring: bool = True, outlines: dict | None = None) -> _Fit:
     """Fit one complete assignment and classify it.
 
     The error budget has two separate terms (audit A10, 2026-11-10): the
@@ -2576,7 +3194,7 @@ def _missed_hole_explains(points: np.ndarray, circles: Sequence[_Circle], assign
     # counters scattered over the page excused a reading wrong everywhere
     # and kept a confirmed one from being chosen (user run 2026-10-31,
     # T7N relay: three of the four anchors were letters far from the view).
-    assigned = [p for p in range(n) if assign[p] >= 0 and circles[assign[p]].evidence]
+    assigned = [p for p in range(n) if assign[p] >= 0 and _refutes(circles[assign[p]])]
     if len(assigned) < MIN_PADS:
         return False
     sub = points[assigned]
@@ -2632,12 +3250,15 @@ class _Analysis:
     ``circles`` holds the rings AND the slots (kind "obround", see
     :class:`_Circle`); ``regions`` the closed non-circular contours (the
     same slots, and outlined rectangular lands), see :func:`_find_regions`.
+    ``outlined`` memoises :func:`_outlined_view_holds` per pad count: it
+    depends on the page only, not on the reading.
     """
 
     drawing: bool
     mask: np.ndarray | None
     circles: tuple[_Circle, ...]
     regions: tuple[_Region, ...] = ()
+    outlined: dict = field(default_factory=dict, compare=False, repr=False)
 
 
 _ANALYSES: OrderedDict[tuple[str, int, int], _Analysis | None] = OrderedDict()
@@ -2671,7 +3292,10 @@ def _analyse(path: Path) -> _Analysis | None:
             regions = _find_regions(mask, circles, _stroke_width(mask))
             circles = _without_composites(circles, regions)
             slots = [r.as_circle() for r in regions if r.kind == "obround"]
-            analysis = _Analysis(True, mask, tuple(circles + slots), tuple(regions))
+            # Hole centres drawn too small for the ring detector, marked by
+            # their centre lines (2026-11-13, see _crossing_marks).
+            marks = _crossing_marks(mask, circles + slots)
+            analysis = _Analysis(True, mask, tuple(circles + slots + marks), tuple(regions))
         else:
             analysis = _Analysis(False, None, ())
     with _ANALYSES_LOCK:
@@ -2762,7 +3386,7 @@ def _check_image(name: str, analysis: _Analysis, points: np.ndarray,
     if not analysis.drawing:
         return _ImageResult(name, False, 0, None)
     circles, mask = list(analysis.circles), analysis.mask
-    hole_like = sum(c.evidence for c in circles)
+    hole_like = sum(_refutes(c) for c in circles)
     references = np.zeros((0, 2)) if references is None else references
     if len(circles) < len(points):
         return _ImageResult(name, True, len(circles), None, hole_like)
@@ -2851,6 +3475,24 @@ def _check_image(name: str, analysis: _Analysis, points: np.ndarray,
         except _BudgetExceeded:
             return _ImageResult(name, True, len(circles), _Fit("search_limit", math.nan, math.nan),
                                 hole_like)
+        # Only holes of the reading's own view may contradict it
+        # (2026-11-13): without a view that anchors a strict majority of
+        # its pads on circles drawn like holes, nor an outlined view
+        # holding as many such circles as pads, the circles counted above
+        # may belong to other views and the page cannot tell (see
+        # _view_anchored and _outlined_view_holds).
+        # The view is shown either by the page (an outlined view with as
+        # many holes, memoised per page) or by the reading (a majority of
+        # its pads anchored); the page is asked first, so a search of the
+        # reading left unfinished never hides an outlined view.
+        try:
+            anchored = (_outlined_view_holds(mask, circles, len(points), analysis.outlined)
+                        or _view_anchored(points, circles, kinds))
+        except _BudgetExceeded:
+            return _ImageResult(name, True, len(circles), _Fit("search_limit", math.nan, math.nan),
+                                hole_like)
+        if not anchored:
+            return _ImageResult(name, True, len(circles), None, hole_like)
     if best is None:
         best = _Fit("no_match", math.inf, math.nan)
     return _ImageResult(name, True, len(circles), best, hole_like)
@@ -3202,7 +3844,7 @@ def _layout_candidates(points: np.ndarray, circles: Sequence[_Circle], mask: np.
         if declared is None and len(anchored_kinds) == 1 and circles[of_kind[0]].kind not in anchored_kinds:
             refusals.add("hole_kind")
             continue
-        if not circles[of_kind[0]].evidence:
+        if not _refutes(circles[of_kind[0]]):
             refusals.add("not_a_hole")
             continue
         complete = list(anchoring)

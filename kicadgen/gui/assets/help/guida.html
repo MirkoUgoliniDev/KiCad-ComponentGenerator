@@ -126,7 +126,12 @@ KiCad scelti per somiglianza di misure.</p>
   <code>%LOCALAPPDATA%\KiCadGen</code> (righe <code>OPENROUTER_API_KEY=sk-or-...</code>
   e/o <code>DEEPSEEK_API_KEY=...</code>) resta valido; una chiave salvata con
   «Account AI...» ha la precedenza su quella del file. Se manca la chiave,
-  il programma lo dice prima di avviare un'analisi e offre di aprire la finestra.
+  il programma lo dice già all'avvio, insieme a KiCad e FreeCAD se mancano, e di nuovo
+  prima di avviare un'analisi; in entrambi i casi offre di aprire la finestra. Chi lavora
+  senza AI spunta <span class="ui">Non avvisare più per la chiave AI</span>: l'avviso
+  d'avvio non nomina più la chiave, la domanda prima di un'analisi resta. Si riattiva con
+  <span class="ui">Avvisa all'avvio se manca una chiave AI</span> nella finestra
+  <span class="ui">Account AI...</span>.
   Quando la chiave funziona, la riga <span class="ui">Credito AI</span> della
   scheda <span class="ui">Progetto</span> mostra il saldo del provider del modello
   scelto.</li>
@@ -606,6 +611,10 @@ in cinque pagine: installare, posizionare il footprint, esportare e registrare i
 simbolo, collegarli, aggiornare il PCB), <span class="ui">Verifica componente per
 KiCad</span> (vedi sotto) e <span class="ui">Prova in KiCad...</span>. In
 <span class="ui">Installazione nella libreria</span> le due installazioni.</p>
+<p>Senza modello STEP (per esempio su un computer senza FreeCAD) i tre comandi funzionano
+lo stesso: dopo una conferma il footprint arriva in KiCad senza vista 3D e
+<code>KiCadGen.3dshapes</code> non viene creato. Per aggiungere il modello installa
+FreeCAD, rigenera il modello STEP e ripeti il comando.</p>
 <table>
   <tr><th>Comando</th><th>Che cosa fa</th></tr>
   <tr><td class="ui">Prova in KiCad...</td>

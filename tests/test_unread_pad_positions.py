@@ -383,9 +383,17 @@ def test_a_dedicated_reading_against_unread_main_pads_names_the_cause():
     data["package_geometry"].update(body_length_mm=20.0, body_width_mm=12.0)
     reading = dict(ext.pads_from_chains(CHAINS, 1.0), view="bottom", notes="")
     ext.apply_dedicated_pads(data, reading)
-    conflict = data["_pin_map_conflict"]
-    assert "non ha letto le posizioni dei pad 1, 2, 3, 4, 5" in conflict
-    assert "meno di due pad" not in conflict
+    # CONTRACT CHANGED 2026-11-13 (plan P3, rule change approved by the
+    # user: «unconfirmed asks instead of blocking»): a complete chain reading
+    # beside a main answer that placed none of its pads is offered in ONE
+    # question instead of a hard block (no witness here: nothing refutes it).
+    # The cause is still named, now in the question and its note.
+    assert "_pin_map_conflict" not in data
+    questions = [q for q in data["_questions"] if q["field"] == "pad_layout"]
+    assert len(questions) == 1
+    for text in (questions[0]["text"], data["_numbering_note"]):
+        assert "non ha letto le posizioni dei pad 1, 2, 3, 4, 5" in text
+        assert "meno di due pad" not in text
 
 
 def test_a_failed_dedicated_reading_also_names_the_unread_main_pads():

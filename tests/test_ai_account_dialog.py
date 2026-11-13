@@ -18,7 +18,7 @@ pytest.importorskip("PyQt6")
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QKeySequence
 from PyQt6.QtTest import QTest
-from PyQt6.QtWidgets import QApplication, QLabel, QMessageBox, QPushButton, QToolButton
+from PyQt6.QtWidgets import QApplication, QCheckBox, QLabel, QMessageBox, QPushButton, QToolButton
 
 from kicadgen.gui.ai_account_dialog import AiAccountDialog
 from kicadgen.services import credentials, dotenv_keys, openrouter
@@ -735,4 +735,26 @@ def test_other_dotenv_files_that_still_hold_the_key_are_named(app, monkeypatch, 
     dialog.move_key()
     _finish(dialog)
     assert "ancora in questi file" not in dialog.label_result.text()
+    dialog.done(0)
+
+
+def test_the_startup_key_notice_can_be_switched_back_on(app):
+    """@brief Positive: with a setting the checkbox shows its value and writes every change."""
+    written = []
+    dialog = AiAccountDialog(None, checker=lambda key: _status(),
+                             startup_notice=(lambda: False, written.append))
+    box = dialog.check_startup_notice
+    assert box is not None
+    assert box.text() == "Avvisa all'avvio se manca una chiave AI" and not box.isChecked()
+    box.setChecked(True)
+    box.setChecked(False)
+    assert written == [True, False]
+    dialog.done(0)
+
+
+def test_without_a_setting_there_is_no_startup_checkbox(app):
+    """@brief Negative: a caller that keeps no such setting gets no checkbox."""
+    dialog = AiAccountDialog(None, checker=lambda key: _status())
+    assert dialog.check_startup_notice is None
+    assert not dialog.findChildren(QCheckBox, "ai_startup_notice")
     dialog.done(0)

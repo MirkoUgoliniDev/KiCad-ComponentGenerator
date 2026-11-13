@@ -77,13 +77,16 @@ def test_without_a_key_nothing_paid_starts_and_the_account_window_is_offered(
     window = no_key
     started = _ready_for_extraction(window, monkeypatch)
     opened = []
-    monkeypatch.setattr(window, "_open_ai_account", lambda: opened.append(True))
+    # CONTRACT CHANGED 2026-11-12 (fresh-install review): the window opens on
+    # the provider that lacks the key, through `_open_ai_account_for`.
+    monkeypatch.setattr(window, "_run_models", lambda *args, **kwargs: ("openai/gpt-x",))
+    monkeypatch.setattr(window, "_open_ai_account_for", lambda provider: opened.append(provider))
     window._extract_with_ai()
     assert started == [] and opened == [] and len(questions) == 1
-    assert "Account AI..." in questions[0][1]
+    assert "Account AI..." in questions[0][1] and "OpenRouter" in questions[0][1]
     questions.answer = QMessageBox.StandardButton.Yes
     window._extract_with_ai()
-    assert started == [] and opened == [True]
+    assert started == [] and opened == ["openrouter"]
 
 
 def test_the_yolo_only_pretest_needs_no_key(no_key, monkeypatch, questions):  # noqa: F811
@@ -128,3 +131,231 @@ def test_the_terminal_detail_checks_the_key_before_paying(no_key, monkeypatch,
     window._start_terminal_refinement()
     assert workers == [] and len(questions) == 1
     assert "Account AI..." in questions[0][1]
+
+
+# --- Fresh install (user, 2026-11-12: «cosa succede se dopo il setup non trovo
+# kicad, freecad o almeno una key LLM?») --------------------------------------
+
+DEEPSEEK_MODEL = "deepseek-api/deepseek-chat"
+
+
+def test_a_missing_deepseek_key_offers_the_account_window_like_openrouter(
+        window, monkeypatch, questions):  # noqa: F811
+    """@brief Positive: no DeepSeek key -> the same question as OpenRouter, window on DeepSeek."""
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    opened = []
+    monkeypatch.setattr(window, "_open_ai_account_for", lambda provider: opened.append(provider))
+    assert window._ensure_keys_for((DEEPSEEK_MODEL,)) is False
+    assert len(questions) == 1 and "DeepSeek" in questions[0][1]
+    assert "Account AI..." in questions[0][1]
+    questions.answer = QMessageBox.StandardButton.Yes
+    assert window._ensure_keys_for((DEEPSEEK_MODEL,)) is False
+    assert opened == ["deepseek"]
+
+
+def test_a_present_deepseek_key_asks_nothing(window, monkeypatch, questions):  # noqa: F811
+    """@brief Negative: with the DeepSeek key set the paid command may start, no question."""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-ds-test-fixture")
+    assert window._ensure_keys_for((DEEPSEEK_MODEL,)) is True
+    assert questions == []
+
+
+def test_only_the_providers_of_the_models_are_checked(no_key, monkeypatch):  # noqa: F811
+    """@brief Negative: a missing OpenRouter key does not matter to a DeepSeek-only run."""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-ds-test-fixture")
+    assert no_key._providers_without_key((DEEPSEEK_MODEL,)) == []
+    assert no_key._providers_without_key((DEEPSEEK_MODEL, "openai/gpt-x")) == ["openrouter"]
+
+
+def _startup_box(window, monkeypatch, *, kicad, freecad, click_account=False):
+    """Run the start-up warning with the given applications; return what it showed."""
+    from kicadgen.services.system_dependencies import ExternalApplications
+    monkeypatch.setattr(gui, "detect_external_applications",
+                        lambda: ExternalApplications(kicad, freecad))
+    shown = []
+
+    def run_modal(message, *args, **kwargs):
+        buttons = {button.text(): button for button in message.buttons()}
+        shown.append((message.text(), message.informativeText(), tuple(buttons)))
+        if click_account:
+            # What a click does: QMessageBox records the clicked button.
+            buttons[window.i18n.text("Account AI...")].click()
+        return 0
+
+    monkeypatch.setattr(window, "_run_modal", run_modal)
+    window._startup_dependencies_checked = False
+    return window._warn_missing_external_applications(), shown
+
+
+def test_startup_names_a_missing_ai_key_even_with_kicad_and_freecad(
+        window, monkeypatch, tmp_path):  # noqa: F811
+    """@brief Positive: both applications found but no key -> warning with the key line and «Account AI...»."""
+    monkeypatch.setattr(window, "_run_models", lambda *args, **kwargs: (DEEPSEEK_MODEL,))
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    opened = []
+    monkeypatch.setattr(window, "_open_ai_account_for", lambda provider: opened.append(provider))
+    found, shown = _startup_box(window, monkeypatch, kicad=str(tmp_path / "k.exe"),
+                                freecad=str(tmp_path / "f.exe"), click_account=True)
+    assert found and len(shown) == 1
+    heading, explanation, buttons = shown[0]
+    assert heading == "Non rilevate: chiave AI DeepSeek"
+    assert "✗ Nessuna chiave AI per DeepSeek" in explanation
+    assert "KiCadGen-Tool" not in explanation and "KiCadGen" in explanation
+    assert set(buttons) == {"Account AI...", "Continua"}
+    assert opened == ["deepseek"]
+
+
+def test_startup_is_silent_with_applications_and_keys(window, monkeypatch, tmp_path):  # noqa: F811
+    """@brief Negative: applications found and the key present -> no warning at all."""
+    monkeypatch.setattr(window, "_run_models", lambda *args, **kwargs: (DEEPSEEK_MODEL,))
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-ds-test-fixture")
+    found, shown = _startup_box(window, monkeypatch, kicad=str(tmp_path / "k.exe"),
+                                freecad=str(tmp_path / "f.exe"))
+    assert not found and shown == []
+
+
+def test_startup_without_applications_but_with_the_key_has_no_account_button(
+        window, monkeypatch):  # noqa: F811
+    """@brief Negative: only applications missing -> no key line, no «Account AI...» button."""
+    monkeypatch.setattr(window, "_run_models", lambda *args, **kwargs: (DEEPSEEK_MODEL,))
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-ds-test-fixture")
+    found, shown = _startup_box(window, monkeypatch, kicad=None, freecad=None)
+    assert found
+    heading, explanation, buttons = shown[0]
+    assert heading == "Non rilevate: KiCad, FreeCAD"
+    assert "chiave AI" not in heading and "Nessuna chiave AI" not in explanation
+    assert buttons == ("Continua",)
+
+
+def test_both_missing_providers_are_named_in_one_question(no_key, monkeypatch, questions):  # noqa: F811
+    """@brief Positive: two providers without a key -> one question naming both, window on the first."""
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    opened = []
+    monkeypatch.setattr(no_key, "_open_ai_account_for", lambda provider: opened.append(provider))
+    questions.answer = QMessageBox.StandardButton.Yes
+    assert no_key._ensure_keys_for((DEEPSEEK_MODEL, "openai/gpt-x")) is False
+    assert len(questions) == 1 and "OpenRouter, DeepSeek" in questions[0][1]
+    assert opened == ["openrouter"]
+
+
+def test_a_malformed_key_is_not_called_missing(window, monkeypatch, questions):  # noqa: F811
+    """@brief Positive: a configured but unusable key keeps its own reason; negative: no «Nessuna chiave»."""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-\u00e9bad")
+    assert window._ensure_keys_for((DEEPSEEK_MODEL,)) is False
+    text = questions[0][1]
+    assert "DEEPSEEK_API_KEY" in text and "sostituirla" in text
+    assert "Nessuna chiave" not in text
+    monkeypatch.setattr(window, "_run_models", lambda *args, **kwargs: (DEEPSEEK_MODEL,))
+    found, shown = _startup_box(window, monkeypatch, kicad="k.exe", freecad="f.exe")
+    assert found and "Chiave AI per DeepSeek non utilizzabile" in shown[0][1]
+    assert "Nessuna chiave AI" not in shown[0][1]
+
+
+def test_escape_closes_the_startup_box_as_continue(window, monkeypatch):  # noqa: F811
+    """@brief Positive: Escape on the two-button box means «Continua» and opens nothing."""
+    monkeypatch.setattr(window, "_run_models", lambda *args, **kwargs: (DEEPSEEK_MODEL,))
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    from kicadgen.services.system_dependencies import ExternalApplications
+    monkeypatch.setattr(gui, "detect_external_applications", lambda: ExternalApplications("k", "f"))
+    opened, escape = [], []
+    monkeypatch.setattr(window, "_open_ai_account_for", lambda provider: opened.append(provider))
+
+    def run_modal(message, *args, **kwargs):
+        escape.append(message.escapeButton().text())
+        message.escapeButton().click()
+        return 0
+
+    monkeypatch.setattr(window, "_run_modal", run_modal)
+    window._startup_dependencies_checked = False
+    assert window._warn_missing_external_applications()
+    assert escape == ["Continua"] and opened == []
+
+
+def test_a_failing_model_lookup_still_shows_the_application_warning(window, monkeypatch):  # noqa: F811
+    """@brief Negative: `_run_models` raising never stops the start; the key line is left out and logged."""
+    def broken(*args, **kwargs):
+        raise RuntimeError("profile edge case")
+    monkeypatch.setattr(window, "_run_models", broken)
+    logged = []
+    monkeypatch.setattr(window, "_append_log", lambda text, **kwargs: logged.append(text))
+    found, shown = _startup_box(window, monkeypatch, kicad=None, freecad=None)
+    assert found and shown[0][0] == "Non rilevate: KiCad, FreeCAD"
+    assert logged and "profile edge case" in logged[0]
+
+
+def _key_only_startup(window, monkeypatch, tick):
+    """Start-up with KiCad and FreeCAD found and no DeepSeek key; optionally tick the dismiss box."""
+    from kicadgen.services.system_dependencies import ExternalApplications
+    monkeypatch.setattr(window, "_run_models", lambda *args, **kwargs: (DEEPSEEK_MODEL,))
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.setattr(gui, "detect_external_applications", lambda: ExternalApplications("k", "f"))
+    saved, boxes = [], []
+    monkeypatch.setattr(gui, "save_config", lambda config: saved.append(dict(config)))
+
+    def run_modal(message, *args, **kwargs):
+        boxes.append(message.checkBox())
+        if tick and message.checkBox() is not None:
+            message.checkBox().setChecked(True)
+        return 0
+
+    monkeypatch.setattr(window, "_run_modal", run_modal)
+    window._startup_dependencies_checked = False
+    return window._warn_missing_external_applications(), boxes, saved
+
+
+def test_the_key_notice_can_be_dismissed_for_good(window, monkeypatch, questions):  # noqa: F811
+    """@brief Positive: ticked once -> saved, and the next start with only the key missing is silent."""
+    window._config.pop(gui.STARTUP_KEY_NOTICE_DISMISSED_KEY, None)
+    shown, boxes, saved = _key_only_startup(window, monkeypatch, tick=True)
+    assert shown and boxes[0] is not None
+    assert boxes[0].text() == "Non avvisare più per la chiave AI"
+    assert saved and saved[-1][gui.STARTUP_KEY_NOTICE_DISMISSED_KEY] is True
+    shown, boxes, _saved = _key_only_startup(window, monkeypatch, tick=False)
+    assert not shown and boxes == []
+    # The question before a paid command is not silenced by the start-up choice.
+    assert window._ensure_keys_for((DEEPSEEK_MODEL,)) is False and len(questions) == 1
+
+
+def test_not_ticking_keeps_the_key_notice(window, monkeypatch):  # noqa: F811
+    """@brief Negative: left unticked -> nothing saved and the next start warns again."""
+    window._config.pop(gui.STARTUP_KEY_NOTICE_DISMISSED_KEY, None)
+    shown, _boxes, saved = _key_only_startup(window, monkeypatch, tick=False)
+    assert shown and saved == []
+    shown, boxes, _saved = _key_only_startup(window, monkeypatch, tick=False)
+    assert shown and boxes[0] is not None
+
+
+def test_a_dismissed_key_notice_still_reports_missing_applications(window, monkeypatch):  # noqa: F811
+    """@brief Negative: dismissed key notice, FreeCAD missing -> warning without key line nor box."""
+    from kicadgen.services.system_dependencies import ExternalApplications
+    window._config[gui.STARTUP_KEY_NOTICE_DISMISSED_KEY] = True
+    monkeypatch.setattr(window, "_run_models", lambda *args, **kwargs: (DEEPSEEK_MODEL,))
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.setattr(gui, "detect_external_applications", lambda: ExternalApplications("k", None))
+    shown = []
+
+    def run_modal(message, *args, **kwargs):
+        shown.append((message.text(), message.informativeText(), message.checkBox(),
+                      tuple(button.text() for button in message.buttons())))
+        return 0
+
+    monkeypatch.setattr(window, "_run_modal", run_modal)
+    window._startup_dependencies_checked = False
+    assert window._warn_missing_external_applications()
+    heading, explanation, box, buttons = shown[0]
+    assert heading == "Non rilevate: FreeCAD"
+    assert "chiave AI per" not in explanation.lower() and box is None
+    assert buttons == ("Continua",)
+
+
+def test_the_account_window_switches_the_key_notice_back_on(window, monkeypatch):  # noqa: F811
+    """@brief Positive: dismissed at start-up, then ticked in «Account AI» -> warned again and saved."""
+    saved = []
+    monkeypatch.setattr(gui, "save_config", lambda config: saved.append(dict(config)))
+    window._config[gui.STARTUP_KEY_NOTICE_DISMISSED_KEY] = True
+    assert window._startup_key_notice_on() is False
+    window._set_startup_key_notice(True)
+    assert window._startup_key_notice_on() is True
+    assert saved[-1][gui.STARTUP_KEY_NOTICE_DISMISSED_KEY] is False
+    window._set_startup_key_notice(False)
+    assert window._startup_key_notice_on() is False

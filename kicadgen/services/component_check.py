@@ -96,6 +96,10 @@ def _pad_geometry(pad):
     return args
 
 
+class _NoStep(Exception):
+    """The component has no STEP model: the 3D checks are skipped (already reported)."""
+
+
 def verify_component(directory, name, rows, *, pending=False, issues=(), emit=lambda result: None,
                      footprint_pending=False, model_offset=(0.0, 0.0, 0.0)):
     """@brief Use scratch copies only; failed checks do not suppress independent checks.
@@ -245,7 +249,7 @@ def verify_component(directory, name, rows, *, pending=False, issues=(), emit=la
             if any(not p[0] and p[1] != 'np_thru_hole' for p in pads):
                 add('WARN', tx('Pad senza numero'), tx('Pad di rame senza numero esclusi dalla corrispondenza elettrica.'))
             models = _children(text, 'model')
-            if not models:
+            if not models and step.is_file():
                 add('WARN', tx('Collegamento 3D originale'), tx('Il footprint su disco non contiene un riferimento 3D; il test di importazione lo aggiunge soltanto nella copia temporanea.'))
             for model in models:
                 # The isolated import normalizes transforms; inspect the original
@@ -314,6 +318,14 @@ def verify_component(directory, name, rows, *, pending=False, issues=(), emit=la
             add('ERROR', tx('Simbolo'), exc)
 
         try:
+            if not step.is_file():
+                # Delivery without STEP (user decision A, 2026-11-12): a PC
+                # without FreeCAD delivers the footprint alone. A missing model
+                # is a warning, never an ERROR («NON USARE»); a STEP that exists
+                # but is truncated stays an ERROR below.
+                add('WARN', tx('Modello STEP'), tx('Nessun modello STEP: il componente sarà consegnato a KiCad senza vista 3D.'))
+                add('SKIP', tx('Importazione 3D in KiCad'), tx('Nessun modello STEP da importare.'))
+                raise _NoStep()
             if not step_file_is_complete(step):
                 raise ValueError(tx('STEP incompleto o troncato.'))
             add('OK', tx('Integrità STEP'), str(step))
@@ -327,6 +339,8 @@ def verify_component(directory, name, rows, *, pending=False, issues=(), emit=la
                         add('WARN', tx('Solidi 3D'), tx('Esportazione riuscita, ma presenza di solidi non confermata.'))
             else:
                 add('SKIP', tx('Importazione 3D in KiCad'), tx('Footprint mancante.'))
+        except _NoStep:
+            pass
         except (OSError, ValueError, RuntimeError) as exc:
             add('ERROR', tx('Modello STEP'), exc)
     add('WARN', tx('Verifiche manuali'),

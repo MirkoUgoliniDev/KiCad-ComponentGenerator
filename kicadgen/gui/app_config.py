@@ -88,6 +88,10 @@ DEFAULTS = {
     "show_pin_numbers_3d": True,
     # Active UI language; translations are stored in the profile SQLite catalog.
     "language": "it",
+    # «Non avvisare più per la chiave AI» ("Do not warn about the AI key again")
+    # ticked in the start-up warning (user, 2026-11-12): whoever works without AI
+    # is not told at every start. The question before a paid command stays.
+    "startup_key_notice_dismissed": False,
 }
 
 
