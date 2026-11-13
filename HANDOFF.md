@@ -1,6 +1,6 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
-## STATO 13/11/2026 POMERIGGIO — giro «pannello + vicoli ciechi dei pad» COMMITTATO su FOOTPRINT-ADVANCE (hash nel commit docs successivo), pushato e mergiato in main (utente: «committa tutto pusha, poi mergia in main pusha»; pacchetto MSI ANNULLATO dall'utente). Suite completa VERDE sul codice fermo: prima meta' 8528 passati / 9 saltati / 19 sottotest (rilanciata da sola: il riepilogo della corsa doppia era perso dietro un `| tail`), seconda meta' 5435 / 4 = 13963 passati, 13 saltati, 19 sottotest. Prossimo giro APPROVATO: punti 1-6 qui sotto (modelli AI, «modello predefinito», coerenza lati/pinout, verifica componente, nomi corti dei pin, riga riassuntiva); piano dei punti 3-4 in docs/pinout-coherence-plan.md.
+## STATO 13/11/2026 POMERIGGIO — giro «pannello + vicoli ciechi dei pad» COMMITTATO su FOOTPRINT-ADVANCE come `f58bf0b`, pushato e mergiato in main (utente: «committa tutto pusha, poi mergia in main pusha»; pacchetto MSI ANNULLATO dall'utente). Suite completa VERDE sul codice fermo: prima meta' 8528 passati / 9 saltati / 19 sottotest (rilanciata da sola: il riepilogo della corsa doppia era perso dietro un `| tail`), seconda meta' 5435 / 4 = 13963 passati, 13 saltati, 19 sottotest. Prossimo giro APPROVATO: punti 1-6 qui sotto (modelli AI, «modello predefinito», coerenza lati/pinout, verifica componente, nomi corti dei pin, riga riassuntiva); piano dei punti 3-4 in docs/pinout-coherence-plan.md.
 
 ## (FATTO) 13/11/2026 — pannello laterale della scheda Footprint (utente, con screenshot)
 
