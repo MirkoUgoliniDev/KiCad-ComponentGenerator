@@ -3282,9 +3282,10 @@ def apply_dedicated_body(data: dict, reading: Optional[dict], progress=None, tie
 
 
 def _pad_summary(pads: dict) -> str:
-    """'1@(2.54,0.00), 4@(0.00,7.62)' for the log and the conflict message."""
+    """'1@(2.54,0.00), 4@(0.00,7.62)' for the log and the conflict message, in natural pad order."""
     return ", ".join(f"{number}@({x:.2f},{y:.2f})"
-                     for number, (x, y) in sorted(pads.items(), key=lambda item: item[0]))
+                     for number, (x, y) in sorted(pads.items(),
+                                                  key=lambda item: _pad_number_key(item[0])))
 
 
 def _offset_disagreements(first: dict, second: dict, common, tolerance: float) -> list:
@@ -3816,8 +3817,29 @@ def _holes_confirm(verdict) -> bool:
     return getattr(verdict, "status", None) == "confirmed"
 
 
-def _hole_text(verdict) -> str:
-    """One clause saying what the drawn holes said about one layout."""
+def _verdict_rank(verdict, pads: Optional[dict] = None) -> int:
+    """Order of a layout option by its drawn-hole verdict: 0 confirmed, 1 not checkable, 2 refuted.
+
+    «Refuted» is what `_layout_refuted` calls so when `pads` is given (an
+    unobservable «no_match» is NOT a refutation, third re-audit); without
+    `pads` any «not_confirmed» counts as refuted.
+    """
+    if _holes_confirm(verdict) and not isinstance(verdict, _WitnessConflict):
+        return 0
+    if pads is not None:
+        return 2 if _layout_refuted(verdict, pads) else 1
+    if isinstance(verdict, _WitnessConflict) or getattr(verdict, "status", None) == "not_confirmed":
+        return 2
+    return 1
+
+
+def _hole_text(verdict, pads: Optional[dict] = None) -> str:
+    """One clause saying what the drawn holes said about one layout.
+
+    `pads`, when given, is the layout checked: a confirmation whose every
+    matched target is a centre-line mark (`marks_used`, drawing_holes) is
+    then said to rest on marks only -- a mark may be a datum on the axes.
+    """
     if verdict is None:
         return tx("controllo dei fori disegnati non eseguito")
     if isinstance(verdict, _WitnessConflict):
@@ -3845,6 +3867,9 @@ def _hole_text(verdict) -> str:
         # proportions always, the absolute size only when the drawn body
         # outline agreed with the declared body. A witness that does not say
         # (an older one, a library footprint) adds nothing.
+        marks = getattr(verdict, "marks_used", None)
+        if pads and isinstance(marks, int) and marks > 0 and marks >= len(pads):
+            text += "; " + tx("conferma basata solo sui segni sugli assi, non su fori disegnati")
         verified = getattr(verdict, "scale_verified", None)
         if verified is True:
             text += "; " + tx("scala verificata dal contorno del corpo disegnato")
@@ -3862,8 +3887,10 @@ def _hole_text(verdict) -> str:
     if reason == "not_a_drawing":
         return tx("nessuna immagine e' un disegno a linee: i fori non si possono controllare")
     if reason == "no_round_holes":
-        return tx("nel disegno non c'e' nessun foro circolare da controllare (piazzole o asole "
-                  "soltanto)")
+        # Said without claiming the drawing has no holes (2026-11-13): marks
+        # on the centre lines may confirm a layout but never refute one.
+        return tx("nessun foro disegnato puo' smentire queste posizioni (solo piazzole, asole o "
+                  "segni sugli assi): ne' confermate ne' smentite")
     if reason == "no_match_unobservable":
         return tx("i fori disegnati in {image} non coincidono, ma con questi pad il controllo non "
                   "distingue una lettura sbagliata da una pagina non in scala", image=image)
@@ -3883,6 +3910,18 @@ def _hole_text(verdict) -> str:
         return tx("meno di due pad: niente da controllare sui fori disegnati")
     if reason == "no_image":
         return tx("nessuna immagine leggibile per il controllo dei fori")
+    if reason == "low_resolution":
+        return tx("il disegno ha una risoluzione troppo bassa per controllare queste posizioni: "
+                  "ne' confermate ne' smentite")
+    if reason == "search_limit":
+        return tx("la ricerca dei fori disegnati si e' fermata al suo limite: posizioni ne' "
+                  "confermate ne' smentite")
+    if verdict.status == "unverifiable" and not isinstance(verdict, _HoleFailure):
+        # Any other «cannot tell» reason (e.g. a plan view that cannot show
+        # the pads): never a refutation, said as such, without the machine
+        # code (third re-audit: codes leaked into the user's text).
+        return tx("i fori disegnati non permettono di controllare queste posizioni: ne' "
+                  "confermate ne' smentite")
     return tx("controllo dei fori disegnati non riuscito ({reason})", reason=reason)
 
 
@@ -4255,7 +4294,8 @@ def _write_candidate(data: dict, pins: list, payload: dict, factor: float) -> No
 
 
 def _block_or_ask(data: dict, pins: list, readings: list, holes, factor: float, message: str,
-                  progress, remark: str = "", extras=(), contradicted: bool = False) -> None:
+                  progress, remark: str = "", extras=(), contradicted: bool = False,
+                  offer: Optional[dict] = None) -> None:
     """Ask which complete layout is right when there are at least two, else block.
 
     `readings` are the (key, pads, spans, centred) tuples at hand; only the
@@ -4284,6 +4324,11 @@ def _block_or_ask(data: dict, pins: list, readings: list, holes, factor: float, 
     option is enough for the question (the user confirms the agreed layout
     after checking the drawing, or goes back). Only pads sharing a number
     still block, since no chosen layout could be written back.
+
+    `offer` (2026-11-13, plan P3): the dedicated reading as a whole-layout
+    proposal. When no choice between complete layouts is possible, before
+    the hard block, `_offer_pad_set_change` may turn it into ONE question
+    that adds or removes pads; None (default) offers nothing.
     """
     listed = [_pad_number_text(pin.get("number")) for pin in pins if isinstance(pin, dict)]
     numbers = set(listed)
@@ -4338,9 +4383,23 @@ def _block_or_ask(data: dict, pins: list, readings: list, holes, factor: float, 
             remark = remark + " " + tx("Disposizioni escluse dalla domanda perche' smentite dai fori "
                                        "disegnati: {sources}.",
                                        sources=", ".join(_reading_source(k) for k in refuted))
+        withheld = []
+        if offer is not None and (contradicted or extras):
+            # Said, never silent (coordinator round 3, (c)): the readings
+            # agree against the holes, or a layout the holes confirm is on
+            # offer -- the dedicated layout alone is not proposed then.
+            withheld.append(tx("i fori disegnati contraddicono letture concordi") if contradicted
+                            else tx("i fori disegnati confermano un'altra disposizione"))
+        elif (offer is not None
+              and _offer_pad_set_change(data, pins, offer, holes, factor, message, progress,
+                                        remark, withheld)):
+            return
+        if withheld and _offer_relevant(pins, offer):
+            remark = remark + " " + tx("Disposizione della lettura dedicata non proposta: "
+                                       "{reasons}.", reasons="; ".join(withheld))
         _block(data, message + remark, progress)
         return
-    options, candidates = [], {}
+    options, candidates, ranks = [], {}, {}
     for index, (keys, pads, spans, centred) in enumerate(distinct):
         value = "+".join(keys) + ":" + _layout_digest(pads)
         view = next((holes.views.get(key) for key in keys if holes.views.get(key) in ("top", "bottom")),
@@ -4351,17 +4410,14 @@ def _block_or_ask(data: dict, pins: list, readings: list, holes, factor: float, 
             # from and which pad differs from the readings.
             label = tx("{sources} -- {evidence} -- {pads}", sources=_reading_source(HOLES_SOURCE),
                        evidence=extra["label"], pads=_pad_summary(pads))
-        elif backed or contradicted:
-            # Beside a hole-backed layout, or when the holes did not confirm
-            # an agreement, every reading's option carries what the holes
-            # said about it.
+        else:
+            # Every reading's option says what the drawn holes said about it
+            # (user, 2026-11-13, «ok, procedi»): the choice is never blind.
             label = tx("{sources} ({holes}): {pads}",
                        sources=", ".join(_reading_source(k) for k in keys),
-                       holes=_hole_text(holes(pads)), pads=_pad_summary(pads))
-        else:
-            label = tx("{sources}: {pads}", sources=", ".join(_reading_source(k) for k in keys),
-                       pads=_pad_summary(pads))
+                       holes=_hole_text(holes(pads), pads), pads=_pad_summary(pads))
         options.append({"label": label, "value": value})
+        ranks[value] = 0 if extra is not None else _verdict_rank(holes(pads), pads)
         exchange = None
         if (getattr(holes(pads), "body_exchanged", False)
                 and not getattr(holes, "axes_adopted", True)):
@@ -4384,6 +4440,11 @@ def _block_or_ask(data: dict, pins: list, readings: list, holes, factor: float, 
                 if entry["number"] == extra["moved"]:
                     entry["source"] = MEASURED_PIXELS_SOURCE
         candidates[value] = payload
+    # Ordered by what the holes said: confirmed, then not checkable, then
+    # refuted; ties keep the readings' order. Only the order and the labels
+    # change: the question key is built from the SORTED option values
+    # (`question_key`), so a saved answer still applies.
+    options.sort(key=lambda option: ranks.get(option["value"], 1))
     if len(distinct) == 1:
         # Only with `contradicted`: one layout to confirm, not a choice. The
         # message already opens with «Posizioni dei pad NON confermate»
@@ -4420,6 +4481,13 @@ def _block_or_ask(data: dict, pins: list, readings: list, holes, factor: float, 
         asked = tx("La scelta fra le {count} disposizioni lette e' chiesta all'utente; fino alla "
                    "risposta restano le coordinate della risposta principale, da verificare.",
                    count=len(distinct))
+    confirmed = [keys for keys, pads, _spans, _centred in distinct
+                 if "main" not in keys and _verdict_rank(holes(pads), pads) == 0]
+    if confirmed:
+        # The provisional pads are the main answer's: the note says which
+        # option the drawn holes confirm instead (never a silent preference).
+        asked += " " + tx("I fori disegnati confermano invece: {source}.",
+                          source=", ".join(_reading_source(k) for k in confirmed[0]))
     data["_numbering_note"] = message + remark + " " + asked
     if progress:
         progress(data["_numbering_note"])
@@ -5436,6 +5504,41 @@ def apply_dedicated_pads(data: dict, reading: Optional[dict], progress=None,
                           labels=", ".join(sorted(reading["references"]))))
     remark = (" " + tx("Nota sulla lettura per catene: {remarks}.", remarks="; ".join(remarks[:6]))
               if remarks else "")
+    # The dedicated reading as a whole-layout proposal (`_offer_pad_set_change`):
+    # only when it describes the drawing coherently -- its chains contradict
+    # nothing (checked above), it placed every pad it names, it declares no
+    # view the main answer contradicts and no pad repeats a number.
+    independent, own = _pad_witnesses(reading, candidate, main, tolerance)
+    witnessed = independent | own
+    numbers_here = sorted({_pad_number_text(pin.get("number")) for pin in pins
+                           if isinstance(pin, dict) and _pad_number_text(pin.get("number"))},
+                          key=_pad_number_key)
+    # The main answer's pads no witness names at all (no chain stop, printed
+    # hole or terminal callout, reference stop at its position, nor the main
+    # answer's own chain sums), and those named ONLY by the main answer's
+    # own chain sums: exposed with a dropped geometry as `unquoted_pads` and
+    # `self_quoted_pads`, so the window can tell «this pad's hole is not
+    # printed» from «nothing printed speaks of this pad» and never calls a
+    # pad quoted in the drawing on the main answer's word alone.
+    data["_unquoted_pads"] = [n for n in numbers_here if n.lower() not in witnessed]
+    data["_self_quoted_pads"] = [n for n in numbers_here
+                                 if n.lower() in own and n.lower() not in independent]
+    spans = reading.get("spans") or {}
+    offer = {"pads": dedicated, "spans": spans, "centred": _centred(spans, exchanged),
+             "view": reading["view"], "main": main, "witnessed": witnessed,
+             "holes": reading.get("holes") or {},
+             # The terminals it transcribed, only when it is an independent
+             # reading (as `_dedicated_leads`): None otherwise.
+             "leads": dict(reading.get("leads") or {}) if not same_model else None}
+    # Why the dedicated reading cannot be proposed as a whole layout, said in
+    # the block when it would otherwise have been (coordinator round 3, (c)).
+    if views_differ:
+        offer["refused"] = tx("le due letture dichiarano viste diverse")
+    elif repeated:
+        offer["refused"] = tx("piu' pad con lo stesso numero")
+    elif reading.get("unplaced"):
+        offer["refused"] = tx("la lettura dedicata non ha posizionato i pad {pads}",
+                              pads=", ".join(sorted(reading["unplaced"], key=_pad_number_key)))
     if candidate is not None:
         _resolve_chain_candidate(data, pins, main, reading, views_differ, factor, progress,
                                  remark, holes, exchanged)
@@ -5459,22 +5562,27 @@ def apply_dedicated_pads(data: dict, reading: Optional[dict], progress=None,
             "la risposta principale non ha letto le posizioni dei pad {pads}: la lettura dedicata "
             "({read}) resta l'unica lettura, senza una seconda che la confermi",
             pads=", ".join(unread), read=", ".join(sorted(dedicated, key=_pad_number_key))
-            or tx("nessuno")), remark)
+            or tx("nessuno")), remark, offer=offer)
         return
     if len(common) < 2:
+        # Both pad sets named, in natural pad order (2026-11-13: the text
+        # listed only the dedicated numbers, sorted as strings).
         _unconfirmed(data, pins, readings, holes, factor, progress, tx(
-            "la lettura dedicata ha in comune con la risposta principale meno di due pad "
-            "numerati ({read})", read=", ".join(sorted(dedicated)) or tx("nessuno")), remark)
+            "la lettura dedicata ({read}) ha in comune con la risposta principale ({main}) meno "
+            "di due pad numerati", read=", ".join(sorted(dedicated, key=_pad_number_key))
+            or tx("nessuno"), main=", ".join(sorted(
+                {_pad_number_text(pin.get("number")) for pin in pins if isinstance(pin, dict)},
+                key=_pad_number_key)) or tx("nessuno")), remark, offer=offer)
         return
     if not disagreements and not views_differ:
-        extra = sorted(set(dedicated) - set(main))
+        extra = sorted(set(dedicated) - set(main), key=_pad_number_key)
         if set(main) <= set(dedicated) and extra:
             # The pads the main answer has agree, but the drawing has more:
             # a grid or a list that leaves out a terminal is not confirmed by
             # the terminals it does have (generality audit, 2026-10-31).
             _unconfirmed(data, pins, readings, holes, factor, progress, tx(
                 "la lettura dedicata trova pad che la risposta principale non ha ({numbers})",
-                numbers=", ".join(extra)), remark)
+                numbers=", ".join(extra)), remark, offer=offer)
             return
         if set(main) <= set(dedicated):
             if same_model:
@@ -5540,7 +5648,7 @@ def apply_dedicated_pads(data: dict, reading: Optional[dict], progress=None,
             return
         _unconfirmed(data, pins, readings, holes, factor, progress, tx(
             "la lettura dedicata conferma solo {read} pad su {total}", read=len(common),
-            total=len(main)), remark)
+            total=len(main)), remark, offer=offer)
         return
     why = tx("Le due letture delle posizioni dei pad non coincidono{views}. Scostamenti diversi: "
              "{pairs}. Risposta principale ({main_view}): {main}. Lettura dedicata "
@@ -5558,18 +5666,917 @@ def apply_dedicated_pads(data: dict, reading: Optional[dict], progress=None,
     _block_or_ask(data, pins, offered, holes, factor,
                   why + ". " + tx("Controllo dei fori disegnati: {verdicts}.",
                                   verdicts=_hole_verdicts(readings, holes))
-                  + " " + tx("Nessuna delle due e' stata scelta."), progress, remark)
+                  + " " + tx("Nessuna delle due e' stata scelta."), progress, remark, offer=offer)
 
 
-def _unconfirmed(data, pins, readings, holes, factor, progress, why, remark) -> None:
-    """Positions no second reading confirms: the drawn holes decide, the user is asked, or the generation is blocked."""
+def _unconfirmed(data, pins, readings, holes, factor, progress, why, remark, offer=None) -> None:
+    """Positions no second reading confirms: the drawn holes decide, the user is asked, or the generation is blocked.
+
+    `offer` is the dedicated reading as a whole-layout proposal, handed to
+    `_block_or_ask` (`_offer_pad_set_change`); None offers nothing.
+    """
     if _settle_by_holes(data, pins, readings, holes, factor, progress, why, remark):
         return
     own = (data["_pin_map_conflict"] + " ") if data.get("_chain_candidate") else ""
     _block_or_ask(data, pins, readings, holes, factor,
                   own + tx("Posizioni dei pad NON confermate ({why}). Controllo dei fori "
                            "disegnati: {verdicts}.", why=why,
-                           verdicts=_hole_verdicts(readings, holes)), progress, remark)
+                           verdicts=_hole_verdicts(readings, holes)), progress, remark,
+                  offer=offer)
+
+
+def _independently_named_pads(reading: dict) -> set:
+    """The pad names the dedicated reading speaks of BY NAME, lower-cased.
+
+    Its chain stops (placed `pads` and `unplaced`) and the pads its printed
+    hole and terminal callouts name (`holes`, `leads`). Its datum and
+    mounting-hole stops (`references`) are NOT pad names: they are labels
+    of their own (A, B, C...), and a reference witnesses a pad only by its
+    POSITION (`_pads_on_references`; generality audit 2026-11-13, D4: a
+    datum «C» made an invented pad «C» look witnessed).
+    """
+    names = set()
+    for key in ("pads", "holes", "leads"):
+        value = reading.get(key)
+        if isinstance(value, dict):
+            names.update(str(name) for name in value)
+    names.update(str(name) for name in reading.get("unplaced") or ())
+    return {name.strip().lower() for name in names}
+
+
+def _translation(main: dict, dedicated: dict, tolerance: float):
+    """The translation (dx, dy) taking the main pads onto the dedicated ones, or None.
+
+    Only when the pads both readings place agree on ONE translation within
+    `tolerance` (the readings choose their own origins): two readings that
+    disagree give no frame in which a main-only pad could be compared with
+    the dedicated reading's stops.
+    """
+    common = [n for n in main if n in dedicated]
+    if not common:
+        return None
+    offsets = [(dedicated[n][0] - main[n][0], dedicated[n][1] - main[n][1]) for n in common]
+    dx = sum(o[0] for o in offsets) / len(offsets)
+    dy = sum(o[1] for o in offsets) / len(offsets)
+    if any(abs(o[0] - dx) > tolerance or abs(o[1] - dy) > tolerance for o in offsets):
+        return None
+    return dx, dy
+
+
+def _pads_on_references(main: dict, dedicated: dict, references, tolerance: float) -> set:
+    """The main pads that lie, within `tolerance`, on a datum or mounting-hole stop of the dedicated reading.
+
+    The stops are in the dedicated reading's frame: a main pad is compared
+    there through `_translation`; without an agreed translation no pad is
+    on a reference (nothing can be compared). Lower-cased numbers.
+    """
+    shift = _translation(main, dedicated, tolerance)
+    points = [(x, y) for x, y in (references or {}).values() if x is not None and y is not None]
+    if shift is None or not points:
+        return set()
+    found = set()
+    for number, (x, y) in main.items():
+        px, py = x + shift[0], y + shift[1]
+        if any(abs(px - rx) <= tolerance and abs(py - ry) <= tolerance for rx, ry in points):
+            found.add(str(number).strip().lower())
+    return found
+
+
+def _pad_witnesses(reading: dict, candidate: Optional[dict], main: dict, tolerance: float) -> tuple:
+    """(independent, self) witnesses of the main answer's pads, lower-cased.
+
+    `independent`: named by the dedicated reading (`_independently_named_pads`)
+    or lying on one of its reference stops (`_pads_on_references`).
+    `self`: named only by the main answer's own chain sums (`candidate`), a
+    transcription from the same paid answer -- counted as a witness against
+    a removal (conservative), but never called «quoted in the drawing».
+    """
+    independent = _independently_named_pads(reading) | _pads_on_references(
+        main, reading.get("pads") or {}, reading.get("references"), tolerance)
+    own = set()
+    if isinstance(candidate, dict) and isinstance(candidate.get("pads"), dict):
+        own = {str(name).strip().lower() for name in candidate["pads"]}
+    return independent, own
+
+
+def _layout_refuted(verdict, pads: dict) -> bool:
+    """Whether the drawn holes speak AGAINST a layout, for the purpose of offering it.
+
+    Stricter than `_losing_verdict` on purpose: a layout put to the user
+    as the only complete one must not be one the holes contradict in any
+    way -- an observable «no_match», a «distorted» fit, a body refused
+    («body_scale», outline «contradicted») or a conflict between the two
+    witnesses. Every «cannot tell» verdict (unverifiable, too few circles,
+    no drawing, a witness that could not run) is NOT a refutation.
+    """
+    if isinstance(verdict, _WitnessConflict):
+        return True
+    if _losing_verdict(verdict, pads, ("no_match", "distorted")):
+        return True
+    return _body_contradicted(verdict)
+
+
+def _confirmation_covers_every_hole(verdict, pads: dict) -> bool:
+    """Whether a confirmation may justify a layout that LOSES positions of the other reading.
+
+    Generality audit 2026-11-13, D6: «confirmed» tolerates drawn circles no
+    pad matched, and may rest on centre-line crossing marks only. A layout
+    with fewer pads is offered only when the witness found no unmatched
+    drawn hole in the region it looked at (`unassigned_refuting` == 0) and
+    not every matched target was a mark (`marks_used` below the matched
+    count). LIMIT, declared: the witness counts unmatched holes only near
+    the matched ones (its region around the fit), so a lost end row or
+    column outside it is not seen -- this is evidence, not a proof that no
+    terminal was lost, and the question says how many positions go. A
+    witness that does not say (fields absent or None, «not computed»)
+    cannot justify it: refused.
+    """
+    if not _holes_confirm(verdict):
+        return False
+    unassigned = getattr(verdict, "unassigned_refuting", None)
+    marks = getattr(verdict, "marks_used", None)
+    if not isinstance(unassigned, int) or not isinstance(marks, int):
+        return False
+    return unassigned == 0 and marks < len(pads)
+
+
+def _match_positions(main: dict, pads: dict, tolerance: float) -> list:
+    """Every {dedicated pad: main pad} matching each dedicated pad to a distinct main POSITION.
+
+    Under convention numbering the numbers say nothing, but each position
+    of the main answer carries what was printed for it -- its hole above all
+    (generality audit 2026-11-13, D1). The two readings choose their own
+    origins: every translation that puts one main pad on one dedicated pad
+    is tried, and kept when it puts every dedicated pad that CAN have a
+    position (all of them, or as many as there are positions) on a distinct
+    main position within `tolerance`; a pad two positions could take breaks
+    it. A reading with fewer pads than positions
+    may fit several translations; the caller uses them only when they all
+    give each pad the same printed attributes (`_inherited_positions`).
+    """
+    if not main or not pads or len(main) * len(pads) > 4096:
+        return []
+    # Every position can be matched when the reading has at least as many
+    # pads; otherwise every pad must be. Pads beyond the positions (a pin the
+    # main answer left out) stay unmatched and inherit nothing.
+    needed = min(len(main), len(pads))
+    found = []
+    for mx, my in main.values():
+        for px, py in pads.values():
+            dx, dy = px - mx, py - my
+            pairs, used, broken = {}, set(), False
+            for number, (x, y) in pads.items():
+                hits = [m for m, (ax, ay) in main.items() if m not in used
+                        and abs(ax + dx - x) <= tolerance and abs(ay + dy - y) <= tolerance]
+                if len(hits) > 1:
+                    broken = True
+                    break
+                if hits:
+                    pairs[number] = hits[0]
+                    used.add(hits[0])
+            if not broken and len(pairs) == needed and pairs not in found:
+                found.append(pairs)
+    return found
+
+
+#: Pad fields of a main POSITION a pad matched to it inherits (D1): what was
+#: printed or estimated for that position, with the words that say which.
+_POSITION_FIELDS = ("pad_type", "drill_mm", "drill_length_mm", "hole_callout", "lead",
+                    "pad_length_mm", "pad_width_mm", "shape", "value_sources", "sources")
+
+
+def _inherited_positions(main: dict, pads: dict, pins, tolerance: float) -> Optional[dict]:
+    """{dedicated pad: main pad} when every matching gives each pad the same position attributes, else None.
+
+    One matching (`_match_positions`) is used as it is. Several -- a reading
+    with fewer pads than positions fits more than one translation -- are
+    used only when they agree on what each pad inherits (every position of
+    the part printed alike, or alike along the ambiguity): the attributes
+    are then the same whichever positions are the real ones. Otherwise
+    nothing is inherited and the pad-hole question asks (no guess).
+    """
+    import json
+    matchings = _match_positions(main, pads, tolerance)
+    if not matchings:
+        return None
+    by_number = {_pad_number_text(pin.get("number")): pin for pin in pins or ()
+                 if isinstance(pin, dict)}
+
+    def signature(number):
+        """The inherited attributes of main pad `number`, comparable."""
+        pin = by_number.get(number) or {}
+        return json.dumps({key: pin.get(key) for key in _POSITION_FIELDS}, sort_keys=True,
+                          default=str)
+
+    first = matchings[0]
+    if all(set(other) == set(first) and all(signature(other[pad]) == signature(first[pad])
+                                            for pad in first) for other in matchings[1:]):
+        return first
+    return None
+
+
+def _offer_relevant(pins, offer) -> bool:
+    """Whether the dedicated reading differs from the main answer in its pad SET or placement.
+
+    Only then is a withheld whole-layout offer worth naming in a block: two
+    complete readings of the same pads disagree, nothing would be offered.
+    """
+    if not isinstance(offer, dict):
+        return False
+    numbers = {_pad_number_text(pin.get("number")) for pin in pins if isinstance(pin, dict)}
+    pads = set(offer.get("pads") or ())
+    return numbers != pads or bool(numbers - set(offer.get("main") or ()))
+
+
+#: Payload `kind` of the «keep the main layout» option of a removal question.
+_KEEP_MAIN = "keep_main"
+
+
+def _offer_pad_set_change(data: dict, pins: list, offer: dict, holes, factor: float,
+                          message: str, progress, remark: str, why: Optional[list] = None) -> bool:
+    """Offer the dedicated reading as ONE «use this layout» question when it alone is complete.
+
+    Rule change approved by the user (2026-11-13, plan P3: «unconfirmed asks
+    instead of blocking»). Before, three filters took the main answer's pad
+    SET as the reference (`_settle_by_holes`, `_block_or_ask`,
+    `_replace_by_confirmed_reading`): a main answer that invented a pad
+    (T7N relay: a contact-form letter «C» printed on the case) or lost pads
+    (TEL converter: a self-contradicting grid) made the only correct layout
+    ineligible, and the generation blocked with a remedy that could not help.
+
+    The question is offered only when, structurally:
+    - the dedicated reading is coherent with the printed quotes (its chains
+      contradict nothing, it placed every pad it names: built so by
+      `apply_dedicated_pads`, which otherwise marks the offer «refused»
+      with its reason) and the drawn holes do not refute it
+      (`_layout_refuted`);
+    - the main answer is INCOMPLETE beside it -- its pads a strict subset
+      of the reading's, pads without a position the reading places, or
+      numbers by convention -- OR it has pads the reading lacks that NO
+      witness names (`_pad_witnesses`: by name, or by position on a
+      reference stop) while the drawn holes neither confirm the main layout
+      nor leave an unmatched hole that could be such a pad (D6). Pads both
+      added and removed (another numbering scheme) are never offered unless
+      the main numbering was a convention; under convention a reading with
+      FEWER pads than the answer has positions is offered only when the
+      drawn holes confirm it with every hole accounted for
+      (`_confirmation_covers_every_hole`), and the question names the
+      positions lost (C3, D6).
+    A removal question always has a «keep the main layout» option (when the
+    main answer placed every pad): answering never forces a removal. Pads
+    the reading adds take only what was printed for THEM (`_change_pad_set`);
+    under convention each takes what its matched POSITION carried (D1).
+    Never adopted silently: a saved answer applies it, otherwise the
+    question waits with the main pads under needs_review.
+    FRAGILE SEPARATION, declared: the drawn-hole witness accepts extra
+    circles and cannot prove that a pad does NOT exist, and «no witness
+    names it» rests on what the dedicated reading transcribed. That is why
+    this is a question for the user, never an automatic removal.
+
+    @param why Receives the reason when the offer is withheld for a reason
+        the block text should name (None: not collected).
+    @return True when the question was recorded or a saved answer applied;
+        False when the offer does not apply (the caller blocks).
+    """
+    why = why if why is not None else []
+    if offer.get("refused"):
+        why.append(offer["refused"])
+        return False
+    listed = [_pad_number_text(pin.get("number")) for pin in pins if isinstance(pin, dict)]
+    numbers = set(listed)
+    pads = offer.get("pads") or {}
+    if len(listed) != len(numbers):
+        why.append(tx("piu' pad con lo stesso numero"))
+        return False
+    if holes.views_differ:
+        why.append(tx("le due letture dichiarano viste diverse"))
+        return False
+    if len(pads) < 2:
+        return False
+    main = offer.get("main") or {}
+    convention = bool(data.get("_numbers_by_convention"))
+    removed = sorted(numbers - set(pads), key=_pad_number_key)
+    added = sorted(set(pads) - numbers, key=_pad_number_key)
+    placed = sorted((numbers & set(pads)) - set(main), key=_pad_number_key)
+    verdict = holes(pads)
+    if removed and not convention:
+        if added:
+            # Pads removed AND added: another numbering scheme, which the
+            # geometry witness cannot judge (generality audit S1).
+            why.append(tx("le due letture usano numerazioni diverse ({main} contro {read})",
+                          main=", ".join(removed), read=", ".join(added)))
+            return False
+        witnessed = set(offer.get("witnessed") or ())
+        named = [number for number in removed if number.lower() in witnessed]
+        if named:
+            # A printed fact names the pad: dropping it would lose a
+            # terminal (audit H1).
+            why.append(tx("i pad {pads} sono nominati dalle quote o dai richiami del disegno",
+                          pads=", ".join(named)))
+            return False
+        if len(main) >= 2 and _holes_confirm(holes(main)):
+            # The extra pads sit on drawn holes.
+            why.append(tx("i fori disegnati confermano la disposizione della risposta principale, "
+                          "con i pad {pads}", pads=", ".join(removed)))
+            return False
+        unassigned = getattr(verdict, "unassigned_refuting", None)
+        if isinstance(unassigned, int) and unassigned > 0:
+            # A drawn hole no pad of the reading matched may be the very pad
+            # it would remove (D6).
+            why.append(tx("nel disegno restano {count} fori che la lettura dedicata non usa",
+                          count=unassigned))
+            return False
+    if not (removed or added or placed or convention):
+        # Same pads, all placed by the main answer: a disagreement between
+        # two complete readings, not an incomplete answer (today's rules).
+        return False
+    if _layout_refuted(verdict, pads):
+        why.append(tx("i fori disegnati smentiscono la lettura dedicata ({holes})",
+                      holes=_hole_text(verdict, pads)))
+        return False
+    # Under convention numbering the numbers say nothing, but the POSITIONS
+    # still count (C3, the H1 rule `_replace_by_confirmed_reading` keeps
+    # under convention too): fewer pads than positions is offered only on a
+    # confirmation that accounts for every drawn hole (D6).
+    lost = len(listed) - len(pads) if convention else 0
+    if lost > 0 and not _confirmation_covers_every_hole(verdict, pads):
+        why.append(tx("la lettura dedicata ha {count} pad in meno delle posizioni della risposta "
+                      "principale e i fori disegnati non escludono che siano terminali",
+                      count=lost))
+        return False
+    tolerance = _reading_tolerance(factor)
+    inherit = _inherited_positions(main, pads, pins, tolerance) if convention else None
+    if convention:
+        # Under convention the main numbers are no reading: EVERY main pin
+        # is replaced and EVERY read pad takes what its matched POSITION
+        # carried (`inherit`), never what a main pin with the same invented
+        # number carried (third re-audit, item 1: pad «2» read at column 1
+        # got column 0's printed hole). Without one consistent matching
+        # (`inherit` None) the read pads take nothing position-specific and
+        # their holes are asked (`_ask_pad_holes`), never borrowed.
+        removed = sorted(numbers, key=_pad_number_key)
+        added = sorted(pads, key=_pad_number_key)
+    shared = {"pad_type", "pad_length_mm", "pad_width_mm", "shape"}
+    unmatched = [number for number in added if number not in (inherit or {})]
+    if unmatched and shared & set(_uniform_pad_fields(pins)[1]):
+        # Pads no position gives attributes to take only the type and land
+        # the main pads share (`_change_pad_set`): with different ones,
+        # which to give is unknown.
+        why.append(tx("i pad della risposta principale hanno tipo o piazzola diversi, e non si "
+                      "sa quali dare ai pad {pads}", pads=", ".join(unmatched)))
+        return False
+    exchange = None
+    if getattr(verdict, "body_exchanged", False) and not getattr(holes, "axes_adopted", True):
+        exchange = {"measured_mm": [holes.body[1], holes.body[0]], "evidence": _hole_text(verdict)}
+    payload = _candidate_payload(data, ["dedicated"], pads, offer.get("spans") or {},
+                                 bool(offer.get("centred")), offer.get("view"), factor, exchange)
+    payload["remove"] = removed
+    payload["add"] = added
+    if inherit:
+        payload["inherit"] = inherit
+    # What was printed for each added pad itself (mm), for `apply_answers`
+    # (`_change_pad_set`): never a hole of another pad (C2, D3).
+    printed = offer.get("holes") if isinstance(offer.get("holes"), dict) else {}
+    payload["added_holes"] = {number: dict(printed[number]) for number in added
+                              if isinstance(printed.get(number), dict)}
+    leads = offer.get("leads")
+    payload["added_leads"] = ({number: dict(leads[number]) for number in added
+                               if isinstance(leads.get(number), dict)}
+                              if isinstance(leads, dict) else None)
+    # Whether the holed pads share one drill once the layout is applied:
+    # the part-level terminal stands for an added pad only then (D3), the
+    # rule the pad rules apply (`_resolve_pad_terminals`, `_added_pads`).
+    # Holed pads only, as `_resolve_pad_terminals` counts them. Under
+    # convention every main POSITION counts, removed or not: the positions
+    # are the part's, only their numbers were invented (fourth re-audit, H2:
+    # with none counted, one part terminal replaced holes printed 1.0-1.6).
+    drills = {round(drill, 6) for pin in pins if isinstance(pin, dict)
+              and pin.get("pad_type", "smd") in _HOLED_PAD_TYPES
+              and (convention or _pad_number_text(pin.get("number")) not in removed)
+              and (drill := _optional_number(pin.get("drill_mm"), positive=True)) is not None}
+    by_number = {_pad_number_text(pin.get("number")): pin for pin in pins if isinstance(pin, dict)}
+    for main_number in (inherit or {}).values():
+        source = by_number.get(main_number, {})
+        drill = _optional_number(source.get("drill_mm"), positive=True)
+        if drill is not None and source.get("pad_type", "smd") in _HOLED_PAD_TYPES:
+            drills.add(round(drill, 6))
+    payload["drills_uniform"] = len(drills) <= 1
+    payload["convention"] = convention
+    if convention and not inherit and _printed_hole_donors(pins, data, factor):
+        # Printed holes the read pads could not be matched to: the part's one
+        # terminal must not stand in for them silently -- the holes are asked.
+        payload["drills_uniform"] = False
+    value = "dedicated:" + _layout_digest(pads)
+    # The numbers that vanish (pinout and symbol entries go with them).
+    vanishing = sorted(numbers - set(pads), key=_pad_number_key)
+    changes = []
+    if convention:
+        changes.append(tx("sostituisce la numerazione per convenzione della risposta principale "
+                          "({old}) con i numeri letti ({new})",
+                          old=", ".join(sorted(numbers, key=_pad_number_key)),
+                          new=", ".join(sorted(pads, key=_pad_number_key))))
+        if lost > 0:
+            # What the witness checked, said as narrowly as it is (fourth
+            # re-audit, H3): no unmatched hole NEAR the read layout -- a row
+            # farther away is not covered, so «every hole checked» is never said.
+            changes.append(tx("nessun foro disegnato non abbinato vicino alla disposizione letta; "
+                              "le file piu' lontane non sono controllate"))
+            # Named even when the holes confirm the reading (C3).
+            changes.append(tx("{count} delle {total} posizioni della risposta principale non hanno "
+                              "un pad nella lettura dedicata e spariscono, con i loro pin di pinout "
+                              "e simbolo (numeri per convenzione tolti: {pads})", count=lost,
+                              total=len(listed), pads=", ".join(vanishing) or tx("nessuno")))
+    elif removed:
+        changes.append(tx("toglie i pad {pads} della risposta principale: nessun riscontro "
+                          "indipendente li nomina (catene di quote, fori o terminali stampati, "
+                          "riferimenti della lettura dedicata) e i fori disegnati non confermano "
+                          "la disposizione che li contiene; pinout e simbolo li perdono",
+                          pads=", ".join(removed)))
+    if added and not convention:
+        changes.append(tx("aggiunge i pad {pads}, che la risposta principale non ha",
+                          pads=", ".join(added)))
+    if placed:
+        changes.append(tx("da' una posizione ai pad {pads}, che la risposta principale non ha "
+                          "letto", pads=", ".join(placed)))
+    summary = "; ".join(changes)
+    text = tx("Posizioni dei pad: {message} Solo la lettura dedicata descrive tutti i pad in modo "
+              "coerente con le quote stampate (fori disegnati: {holes}). Usarla {changes}. Il "
+              "controllo dei fori non puo' provare che un pad manchi o non esista, quindi la "
+              "disposizione non e' adottata da sola: usare questa disposizione?",
+              message=message + remark, holes=_hole_text(verdict), changes=summary)
+    options = [{"label": tx("Usa la lettura dedicata ({count} pad, fori disegnati: {holes}): {pads}",
+                            count=len(pads), holes=_hole_text(verdict, pads),
+                            pads=_pad_summary(pads)), "value": value}]
+    candidates = {value: payload}
+    if ((removed and not convention) or lost > 0) and len(main) == len(listed):
+        # A removal question -- pads removed, or positions lost under
+        # convention (third re-audit, item 3) -- always lets the user keep
+        # what the main answer read: answering never forces a removal.
+        keep_value = "main:" + _layout_digest(main)
+        keep = _candidate_payload(data, ["main"], main, {}, False, data.get("contacts_view"), factor)
+        keep["kind"] = _KEEP_MAIN
+        options.append({"label": tx("Tieni la disposizione della risposta principale ({count} pad, "
+                                    "fori disegnati: {holes}): {pads}", count=len(main),
+                                    holes=_hole_text(holes(main), main), pads=_pad_summary(main)),
+                        "value": keep_value})
+        candidates[keep_value] = keep
+        # Ordered by verdict like every layout question (stable on ties).
+        ranks = {value: _verdict_rank(verdict, pads),
+                 keep_value: _verdict_rank(holes(main), main)}
+        options.sort(key=lambda option: ranks[option["value"]])
+    chosen = _ask(data, "pad_layout", text, options, _question_evidence(data), candidates)
+    if chosen is not None:
+        chosen_payload = candidates[str(chosen)]
+        if chosen_payload.get("kind") == _KEEP_MAIN:
+            # The main pads stay as read; a pad among them without a printed
+            # hole is asked about by the pad-hole question (`_ask_pad_holes`).
+            _settle(data, tx("Disposizione della risposta principale tenuta dall'utente; da "
+                             "verificare sul disegno.") + remark, progress)
+            return True
+        donors = _printed_hole_donors([by_number[n] for n in vanishing if n in by_number],
+                                      data, factor)
+        if donors:
+            # The part's printed holes, as they were before the removal, for
+            # the pad-hole question that may follow (D1).
+            data["_printed_before_removal"] = donors
+        data["_added_pads"] = list(added)
+        data["_added_lead_allowed"] = bool(payload["drills_uniform"])
+        _drop_pinout_pads(data, _change_pad_set(data["package_geometry"], payload),
+                          renumbered=convention)
+        _write_candidate(data, data["package_geometry"]["pins"], payload, factor)
+        if "exchange_body" not in payload:
+            _align_body_axes(data, holes, pads)
+        data.pop("_numbers_by_convention", None)
+        _settle(data, tx("Disposizione dei pad della lettura dedicata scelta dall'utente ({changes}); "
+                         "da verificare sul disegno.", changes=summary) + remark, progress)
+        return True
+    data.pop("_pin_map_conflict", None)
+    data["package_geometry"]["needs_review"] = True
+    data["_numbering_note"] = message + remark + " " + tx(
+        "La disposizione della lettura dedicata e' proposta all'utente; fino alla risposta nessun "
+        "pad e' aggiunto o tolto e restano le coordinate della risposta principale, da verificare.")
+    if progress:
+        progress(data["_numbering_note"])
+    return True
+
+
+def _printed_hole_donors(pins, data: Optional[dict] = None, factor: float = 1.0) -> list:
+    """The printed holes of `pins` as [[drill mm, slot length mm or None, [pad numbers]], ...].
+
+    A pin's hole is printed when its provenance says «read»: the program's
+    `sources` after the pad rules, or, before them, the model's per-pad
+    `value_sources` -- else the answer-level word of `data`, the word every
+    pad that declares nothing inherits (D1). `factor` converts drawing
+    units to mm for pins before the pad rules. JSON-able, for the answer.
+    """
+    top = (data or {}).get("value_sources") if isinstance((data or {}).get("value_sources"),
+                                                          dict) else {}
+    groups = {}
+    for pin in pins or ():
+        if not isinstance(pin, dict):
+            continue
+        drill = _optional_number(pin.get("drill_mm"), positive=True)
+        if drill is None:
+            continue
+        if isinstance(pin.get("sources"), dict):
+            word, scale = pin["sources"].get("drill_mm"), 1.0
+        else:
+            own = pin.get("value_sources") if isinstance(pin.get("value_sources"), dict) else {}
+            word, scale = _pad_word(own, "drill_mm") or _pad_word(top, "drill_mm"), factor
+        if word != "read":
+            continue
+        length = _optional_number(pin.get("drill_length_mm"), positive=True)
+        key = (round(drill * scale, 4), None if length is None else round(length * scale, 4))
+        groups.setdefault(key, []).append(_pad_number_text(pin.get("number")))
+    return [[drill, length, sorted(numbers, key=_pad_number_key)]
+            for (drill, length), numbers in groups.items()]
+
+
+def _part_lead_of_result(result):
+    """The part-level terminal of a RESULT as `_part_lead` gives it for an answer, or None."""
+    diameter = _optional_number(getattr(result, "lead_diameter_mm", None), positive=True)
+    if diameter is None or diameter > _MAX_LEAD_MM:
+        return None
+    sources = result.value_sources if isinstance(result.value_sources, dict) else {}
+    word = sources.get("lead_diameter_mm")
+    return ({"shape": "round", "diameter_mm": diameter},
+            word if word in ("read", "derived", "estimated") else "estimated")
+
+
+def _change_pad_set(geometry: dict, payload: dict, part_lead=None, notes: Optional[list] = None) -> list:
+    """Remove and add the pads a chosen whole-layout candidate names, in place; the removed numbers.
+
+    @param geometry An explicit geometry (drawing units during the
+        extraction, canonical mm in `apply_answers`): its `pins` list is
+        changed IN PLACE, and the record of the lands the program wrote
+        (`_DERIVED_LANDS_KEY`, by pad index) is re-indexed so it still
+        points at the same pads.
+    @param payload The candidate (`_offer_pad_set_change`): "remove" and
+        "add" lists of pad numbers; a payload without them changes nothing.
+    @param part_lead The part-level terminal (`_part_lead_of_result`), used
+        only for pins already through the pad rules (`apply_answers`).
+    @param notes Receives the notes of the pad rules run on added pads.
+    @return The numbers removed and not added back (they vanish from the
+        pinout and the symbol), in natural order.
+    @note An added pad is one of two kinds:
+        - under convention numbering, matched to a main POSITION
+          (`payload["inherit"]`, D1): it is that position's pad under its
+          printed number -- hole, land, terminal and their provenance, as
+          `_replace_by_confirmed_reading` keeps them;
+        - otherwise it takes only the type and the land the main pads share,
+          marked "estimated" (C2: never their hole and never «read»). Its
+          hole is what was printed FOR IT, by the one rule of the pad rules
+          (`_resolve_one_pad`): before them, in the extraction, the rules
+          find the dedicated reading's callout (`_dedicated_holes`) and,
+          only when the holed pads share one drill, the part-level terminal
+          (`_added_pads`); after them, in `apply_answers`, the same rule is
+          run here on the payload's `added_holes`/`added_leads` and
+          `drills_uniform` (D3). A pad nothing printed for stays without a
+          hole: the pad-hole question asks about it.
+    """
+    pins = geometry.get("pins") if isinstance(geometry, dict) else None
+    removed = {_pad_number_text(n) for n in payload.get("remove") or ()}
+    added = [_pad_number_text(n) for n in payload.get("add") or () if _pad_number_text(n)]
+    if not isinstance(pins, list) or (not removed and not added):
+        return []
+    uniform, _differing = _uniform_pad_fields(pins)
+    inherited = {key: value for key, value in uniform.items()
+                 if key in ("pad_type", "pad_length_mm", "pad_width_mm", "shape")}
+    # Resolved pins (canonical, after the pad rules) carry `sources`; the
+    # answer's pins, before them, carry the model's `value_sources`.
+    resolved = any(isinstance(pin, dict) and isinstance(pin.get("sources"), dict) for pin in pins)
+    words = {key: "estimated" for key, field in (("pad_size", "pad_length_mm"), ("shape", "shape"))
+             if field in inherited}
+    inherit = payload.get("inherit") if isinstance(payload.get("inherit"), dict) else {}
+    by_number = {_pad_number_text(pin.get("number")): pin for pin in pins if isinstance(pin, dict)}
+    record = geometry.get(_DERIVED_LANDS_KEY)
+    lands = {}
+    if isinstance(record, list):
+        for entry in record:
+            index = entry.get("index") if isinstance(entry, dict) else None
+            if isinstance(index, int) and not isinstance(index, bool) and 0 <= index < len(pins):
+                lands[id(pins[index])] = entry.get("land")
+    kept = [pin for pin in pins
+            if not (isinstance(pin, dict) and _pad_number_text(pin.get("number")) in removed)]
+    present = {_pad_number_text(pin.get("number")) for pin in kept if isinstance(pin, dict)}
+    found = {name: [] for name in (
+        "smd_drill", "lead_dropped", "slot_dropped", "only_main", "only_dedicated", "disagree",
+        "unfounded", "withheld", "part_lead", "lead_withheld", "slot_unoriented", "loose_blade",
+        "land_capped", "land_model", "slot_turned", "thin_ring", "lead_contradicted",
+        "lead_lifted", "widened", "part_narrow", "part_protected", "part_lifted", "part_widened",
+        "zero_hole", "lead_once", "lead_disagree")}
+    derived: dict = {}
+    for number in added:
+        if number in present:
+            continue
+        source = by_number.get(inherit.get(number)) if inherit.get(number) else None
+        if isinstance(source, dict):
+            # The same physical position under its printed number (D1).
+            pin = copy.deepcopy(source)
+            pin.update(number=number, x_mm=None, y_mm=None)
+            if id(source) in lands:
+                derived[id(pin)] = (pin, lands[id(source)])
+            kept.append(pin)
+            continue
+        pin = dict(copy.deepcopy(inherited), number=number, x_mm=None, y_mm=None)
+        pin["value_sources"] = dict(words)
+        if resolved:
+            # The pad rules already ran on the others: the one rule is run on
+            # this pad with what was printed for it (D3).
+            uniform_drills = bool(payload.get("drills_uniform", True))
+            _resolve_one_pad(pin, {"drill_mm": None, "pad_size": None},
+                             payload.get("added_holes") or {}, found,
+                             part_lead if uniform_drills else None, uniform_drills, derived,
+                             payload.get("added_leads"))
+        kept.append(pin)
+    pins[:] = kept
+    for pin in pins:
+        if id(pin) in derived and id(pin) not in lands:
+            lands[id(pin)] = derived[id(pin)][1]
+    if isinstance(record, list) or lands:
+        geometry[_DERIVED_LANDS_KEY] = [{"index": index, "land": lands[id(pin)]}
+                                        for index, pin in enumerate(pins) if id(pin) in lands]
+    if notes is not None:
+        if found["only_dedicated"]:
+            notes.append(tx("Pad {pads}: foro stampato letto solo dalla lettura dedicata, usato.",
+                            pads=", ".join(found["only_dedicated"])))
+        if found["part_lead"] and part_lead is not None:
+            lead, word = part_lead
+            notes.append(tx("Pad {pads}: foro non stampato e terminale del pad non dichiarato: foro "
+                            "e piazzola ricavati dal terminale dichiarato per il componente "
+                            "(Ø{lead:.2f} mm, provenienza {source}).",
+                            pads=", ".join(found["part_lead"]), lead=lead["diameter_mm"],
+                            source=word))
+    # Under convention every number is removed and the read ones added
+    # back: only those that vanish leave the pinout.
+    return sorted(removed - set(added), key=_pad_number_key)
+
+
+def _drop_pinout_pads(owner, removed, renumbered: bool = False) -> None:
+    """Remove from the pinout of `owner` (an answer dict or ExtractedParams) the entries of the removed pads.
+
+    The symbol pins are the footprint pads (`symbol_pins.pinout_on_pads`):
+    a pad removed by the user's choice must not survive as a pinout name.
+    A note names the pads; nothing happens when none is removed. With
+    `renumbered` the numbers were a convention replaced by the printed ones
+    (fourth re-audit, M2): they are no removed terminals, and the note says
+    the convention numbers left the pinout, not that pads were removed.
+    """
+    removed = {_pad_number_text(n) for n in removed or ()}
+    if not removed:
+        return
+    is_dict = isinstance(owner, dict)
+    pinout = owner.get("pinout") if is_dict else getattr(owner, "pinout", None)
+    if isinstance(pinout, (list, tuple)):
+        kept = [entry for entry in pinout if not (
+            isinstance(entry, dict) and _pad_number_text(entry.get("pin")) in removed)]
+        if is_dict:
+            owner["pinout"] = kept
+        else:
+            owner.pinout = kept or None
+    note = (tx("Numeri per convenzione {pads} sostituiti dai numeri letti: le loro voci del pinout "
+               "sono tolte.", pads=", ".join(sorted(removed, key=_pad_number_key))) if renumbered
+            else tx("Pad {pads} tolti per scelta dell'utente (non sono terminali del disegno): tolti "
+                    "anche dal pinout e dal simbolo.",
+                    pads=", ".join(sorted(removed, key=_pad_number_key))))
+    if is_dict:
+        owner["notes"] = (str(owner.get("notes") or "") + "\n" + note).strip()
+    else:
+        owner.notes = ((owner.notes or "") + "\n" + note).strip()
+
+
+#: `kind` of the payload of the question about pads without a hole
+#: (`_ask_pad_holes`). The question shares the "pad_layout" field: the window
+#: asks every such question before it writes a footprint.
+PAD_HOLE_KIND = "pad_hole"
+
+
+def _pads_offered_for_removal(data: dict) -> set:
+    """The pad numbers an open whole-layout question proposes to remove (`_offer_pad_set_change`)."""
+    removed = set()
+    for options in (data.get("_candidates") or {}).values():
+        for payload in (options or {}).values() if isinstance(options, dict) else ():
+            if isinstance(payload, dict) and payload.get("kind") not in (PAD_HOLE_KIND, _KEEP_MAIN):
+                removed.update(_pad_number_text(n) for n in payload.get("remove") or ())
+    return removed
+
+
+def _apply_pad_hole_choice(geometry: dict, payload: dict, notes: list) -> list:
+    """Apply one answer of the question about pads without a hole to an explicit geometry, in place.
+
+    @param geometry The geometry after the pad rules (canonical mm).
+    @param payload The chosen option (`_ask_pad_holes`): "remove" drops the
+        pads; otherwise "drill_mm" (and "drill_length_mm" for a printed slot)
+        is the PRINTED hole of other pads of the same part, given to these
+        pads with the provenance "estimated" -- the user judged them alike,
+        nothing was read for them. Their land is not touched: steps 3 and 4
+        of the pad rules (`_settle_lands_and_fit`) judge it with the hole
+        afterwards, never an invented value.
+    @param notes Receives the note.
+    @return The numbers removed (the caller drops them from the pinout).
+    """
+    pads = [_pad_number_text(n) for n in payload.get("pads") or ()]
+    if payload.get("remove"):
+        return _change_pad_set(geometry, {"remove": pads})
+    drill = _optional_number(payload.get("drill_mm"), positive=True)
+    if drill is None:
+        return []
+    length = _optional_number(payload.get("drill_length_mm"), positive=True)
+    for pin in geometry.get("pins") or ():
+        if (isinstance(pin, dict) and _pad_number_text(pin.get("number")) in pads
+                and pin.get("drill_mm") is None):
+            pin["drill_mm"] = drill
+            if length is not None:
+                pin["drill_length_mm"] = length
+            sources = dict(pin.get("sources") or {}) if isinstance(pin.get("sources"), dict) else {}
+            sources["drill_mm"] = "estimated"
+            pin["sources"] = sources
+    notes.append(tx("Pad {pads}: foro Ø{drill:.2f} mm scelto dall'utente uguale a quello stampato "
+                    "per i pad {others}; per questi pad il disegno non lo stampa: valore STIMATO, "
+                    "da verificare sul disegno.", pads=", ".join(pads), drill=drill,
+                    others=", ".join(str(n) for n in payload.get("like") or ())))
+    return []
+
+
+def _ask_pad_holes(data: dict, geometry, notes: list, donors=None):
+    """Ask what to do with placed holed pads for which no hole was read, instead of a dead end.
+
+    User-approved plan P4 (2026-11-13): a pad with a position whose hole the
+    drawing does not print, and for which no terminal is declared, used to
+    drop the footprint with a remedy («the hole is to be read on the
+    drawing») the user could not act on. One structured question now names
+    the pads, with one option per DISTINCT printed hole of the same part
+    («Stesso foro dei pad X (Ø… stampato)»: written as estimated, with a
+    note), one to remove the pads (not terminals) and one to leave them
+    blocked. With no printed hole anywhere in the part only the last two
+    are offered: a value is never invented. Pads an open whole-layout
+    question already proposes to remove are not asked about twice. The
+    part's printed holes include those of pads a chosen layout removed
+    (`donors`, `data["_printed_before_removal"]`; D1): removing a pad does
+    not unprint its hole.
+
+    @param data The canonical answer (questions and saved answers live there).
+    @param geometry The explicit geometry after `_resolve_pad_terminals`;
+        changed in place when a saved answer applies.
+    @param notes Receives the notes of an applied answer.
+    @param donors More printed holes of the part, as `_printed_hole_donors`
+        lists them, or None.
+    @return None when nothing was applied; otherwise the new list of
+        (pad number, reason) problems of steps 3 and 4 of the pad rules,
+        run again on the changed geometry.
+    """
+    pins = geometry.get("pins") if isinstance(geometry, dict) else None
+    if not isinstance(pins, list):
+        return None
+    pending = _pads_offered_for_removal(data)
+    asked = [_pad_number_text(pin.get("number")) for pin in pins
+             if isinstance(pin, dict) and pin.get("pad_type", "smd") in _HOLED_PAD_TYPES
+             and pin.get("drill_mm") is None and _pad_number_text(pin.get("number"))
+             and _optional_number(pin.get("x_mm")) is not None
+             and _optional_number(pin.get("y_mm")) is not None
+             and _pad_number_text(pin.get("number")) not in pending]
+    if not asked:
+        return None
+    printed = {}
+    for drill, length, like in (_printed_hole_donors(pins) + list(donors or ())
+                                + list(data.get("_printed_before_removal") or ())):
+        key = (round(float(drill), 4), None if length is None else round(float(length), 4))
+        printed.setdefault(key, set()).update(str(n) for n in like)
+    group = ",".join(asked)
+    options, candidates = [], {}
+    for (drill, length), like in sorted(printed.items(), key=lambda item: (item[0][0], item[0][1] or 0)):
+        like = sorted(like, key=_pad_number_key)
+        label = (tx("Stesso foro dei pad {pads} (Ø{drill:.2f} mm stampato)", pads=", ".join(like),
+                    drill=drill) if length is None else
+                 tx("Stessa asola dei pad {pads} ({drill:.2f} x {length:.2f} mm stampata)",
+                    pads=", ".join(like), drill=drill, length=length))
+        value = f"{PAD_HOLE_KIND}:{group}=" + (f"{drill:g}" if length is None else f"{drill:g}x{length:g}")
+        options.append({"label": label, "value": value})
+        candidates[value] = {"kind": PAD_HOLE_KIND, "pads": asked, "drill_mm": drill,
+                             "drill_length_mm": length, "like": like}
+    every = {_pad_number_text(pin.get("number")) for pin in pins if isinstance(pin, dict)}
+    if set(asked) != every:
+        # Removing every pad of the part would leave no footprint (fourth
+        # re-audit, M3): that option is offered only when some pads remain.
+        remove = f"{PAD_HOLE_KIND}:{group}=remove"
+        options.append({"label": tx("Non sono terminali: rimuovi i pad {pads}",
+                                    pads=", ".join(asked)), "value": remove})
+        candidates[remove] = {"kind": PAD_HOLE_KIND, "pads": asked, "remove": True}
+    block = f"{PAD_HOLE_KIND}:{group}=block"
+    options.append({"label": tx("Lascia bloccato: il foro va letto sul disegno"), "value": block})
+    candidates[block] = {"kind": PAD_HOLE_KIND, "pads": asked, "block": True}
+    text = (tx("Pad {pads}: il disegno non stampa il foro e nessun terminale e' dichiarato, quindi "
+               "il programma non puo' ricavarlo. Che cosa fare?", pads=", ".join(asked))
+            + (" " + tx("Nessun altro pad del componente ha un foro stampato: nessun valore e' "
+                        "proposto.") if not printed else ""))
+    chosen = _ask(data, "pad_layout", text, options, _question_evidence(data), candidates)
+    if chosen is None:
+        return None
+    payload = candidates[str(chosen)]
+    if payload.get("block"):
+        notes.append(tx("Pad {pads}: lasciati bloccati per scelta dell'utente; il foro resta da "
+                        "leggere sul disegno.", pads=", ".join(asked)))
+        return None
+    dropped = _apply_pad_hole_choice(geometry, payload, notes)
+    _drop_pinout_pads(data, dropped)
+    # Steps 3 and 4 of the pad rules again, on the changed pads.
+    pins = [pin for pin in geometry.get("pins") or () if isinstance(pin, dict)]
+    derived = {}
+    record = geometry.get(_DERIVED_LANDS_KEY)
+    for entry in record if isinstance(record, list) else ():
+        index = entry.get("index") if isinstance(entry, dict) else None
+        all_pins = geometry.get("pins") or ()
+        if (isinstance(index, int) and not isinstance(index, bool) and 0 <= index < len(all_pins)
+                and isinstance(all_pins[index], dict) and isinstance(entry.get("land"), dict)):
+            derived[id(all_pins[index])] = (all_pins[index], entry["land"])
+    found = {"land_capped": [], "land_model": [], "thin_ring": []}
+    unfit = _settle_lands_and_fit(pins, derived, found)
+    for line in _land_notes(found):
+        if line not in notes:
+            notes.append(line)
+    return [(_pad_number_text(pin.get("number")) or "?", unfit[id(pin)])
+            for pin in pins if id(pin) in unfit]
+
+
+def _exchange_result_body(result, exchange: dict, notes: list) -> None:
+    """Exchange the body's plan sizes of a RESULT (fields and provenance), with the note, as a chosen layout requires."""
+    result.body_length_mm, result.body_width_mm = result.body_width_mm, result.body_length_mm
+    sources = dict(result.value_sources or {})
+    length, width = sources.pop("body_length_mm", None), sources.pop("body_width_mm", None)
+    if width is not None:
+        sources["body_length_mm"] = width
+    if length is not None:
+        sources["body_width_mm"] = length
+    result.value_sources = sources
+    measured = exchange.get("measured_mm") or (0.0, 0.0)
+    notes.append(tx(
+        "Lunghezza e larghezza del corpo scambiate rispetto alla risposta principale: il "
+        "contorno disegnato attorno ai fori misura {x:.2f} mm lungo X e {y:.2f} mm lungo Y "
+        "({holes}). Nessuna quota in pianta fissa l'orientamento del corpo: da verificare "
+        "sul disegno.", x=measured[0], y=measured[1], holes=exchange.get("evidence") or ""))
+
+
+def _hold_holeless_pads(result, target: dict, payload: dict, dropped, notes: list,
+                        remaining: list, candidates: dict, donors=None) -> bool:
+    """Apply a chosen layout whose pads lack a printed hole as dropped geometry plus the pad-hole question.
+
+    Generality audit 2026-11-13, C2/D2: a pad the chosen layout adds takes
+    no hole from the other pads (`_change_pad_set`), and a kept main layout
+    may hold a pad nothing printed a hole for; the footprint cannot be
+    written yet. Instead of refusing the user's answer (a loop) or writing a
+    holed pad without a hole, the layout is applied (positions, removed
+    pads, pinout, the body sizes exchanged when the candidate says so) and
+    the geometry is kept apart as unread (`unread_pad_geometry`), with the
+    question an analysis asks about such pads (`_ask_pad_holes`: the part's
+    printed holes -- `donors`, those of removed pads included -- remove, or
+    leave blocked).
+
+    @param result The result being answered (changed in place when handled).
+    @param target The answered geometry copy, every pad placed.
+    @param payload The chosen candidate.
+    @param dropped Numbers the layout removed (their pinout entries go).
+    @param notes Receives the notes.
+    @param remaining The open questions being collected by `apply_answers`.
+    @param candidates The candidate payloads by question key (updated).
+    @param donors The part's printed holes before the change (`_printed_hole_donors`).
+    @return True when handled: added pads, or the pads of a kept main layout,
+        lack a hole. False otherwise (nothing changed): a pad that had no
+        hole before an answer that does not keep it keeps today's rule (E1).
+    """
+    added = {_pad_number_text(n) for n in payload.get("add") or ()}
+    holeless = _pads_without_holes(target)
+    keep = payload.get("kind") == _KEEP_MAIN
+    if not holeless or not (keep or (added and set(holeless) <= added)):
+        return False
+    scratch = {"_answers": {}, "_candidates": {}, "_questions": []}
+    asked_notes: list = []
+    _ask_pad_holes(scratch, target, asked_notes, donors)
+    for question in scratch["_questions"]:
+        if not any(isinstance(q, dict) and q.get("key") == question["key"] for q in remaining):
+            remaining.append(question)
+    candidates.update(scratch["_candidates"])
+    exchange = payload.get("exchange_body")
+    if isinstance(exchange, dict):
+        # The target's sizes were exchanged with the candidate's layout: the
+        # result's fields follow (D2: the exchange was skipped here before).
+        _exchange_result_body(result, exchange, notes)
+    result.package_geometry = None
+    result.unread_pad_geometry = target
+    result.unread_pads = list(holeless)
+    block = tx("Foro dei pad {pads} non stampato e terminale non dichiarato: nessun footprint "
+               "finche' il foro non e' letto dal disegno o scelto nella domanda sui pad senza "
+               "foro.", pads=", ".join(holeless))
+    result.pin_map_conflict = block
+    _drop_pinout_pads(result, dropped, renumbered=bool(payload.get("convention")))
+    notes.extend(str(line) for line in payload.get("notes") or ())
+    notes.append(tx("Posizioni dei pad scelte dall'utente fra le letture ({source}); "
+                    "da verificare sul disegno.",
+                    source=_reading_source(payload.get("source") or "main")))
+    if not keep:
+        notes.append(tx("Pad {pads} aggiunti dalla disposizione scelta senza un foro stampato per "
+                        "loro: nessun foro preso dagli altri pad, il foro e' chiesto a parte.",
+                        pads=", ".join(holeless)))
+    return True
 
 
 #: Per-pad attributes a replaced pad list inherits from the main answer, only
@@ -5744,14 +6751,29 @@ def _replace_by_confirmed_reading(data, pins, main, reading, holes, factor, prog
     old = ", ".join(sorted(numbers, key=_pad_number_key)) or tx("nessuno")
     new = ", ".join(sorted(dedicated, key=_pad_number_key))
     uniform, differing = _uniform_pad_fields(pins)
-    if differing:
-        _block(data, tx("La lettura dedicata dei pad ({new}) e' confermata da un riscontro "
-                        "geometrico indipendente ({holes}) e la numerazione della risposta "
-                        "principale ({old}) {why}, ma i pad della risposta principale non hanno "
-                        "attributi uniformi ({fields}): non si sa quali valori dare ai pad letti.",
-                        new=new, holes=_hole_text(verdict), old=old, why=why,
-                        fields=", ".join(differing)) + remark, progress)
-        return True
+    # Under convention each read pad sits on a POSITION of the main answer:
+    # one consistent matching (`_inherited_positions`) gives every pad what
+    # its position carried, so pads with different holes no longer block
+    # (third re-audit, item 2). Only an ambiguous matching with differing
+    # attributes still blocks: which pad gets which values is then unknown.
+    by_position = (_inherited_positions(main, dedicated, pins, _reading_tolerance(factor))
+                   if convention and main else None)
+    # Fourth re-audit, H1: this path never blocks without a question.
+    # - Convention without one consistent matching and with attributes that
+    #   differ: which position each read pad is cannot be told, so the
+    #   whole-layout offer asks (`_offer_pad_set_change`, every printed hole
+    #   offered) -- not handled here.
+    # - Numbers read on both sides (an incomplete answer): the pads the
+    #   answer has keep THEIR own values; only the pads it lacks are added,
+    #   and they borrow no hole (`_change_pad_set`, C2): a printed callout
+    #   for them, or the pad-hole question. When their land cannot be given
+    #   (the shared land differs), the offer path names the reason.
+    shared = {"pad_type", "pad_length_mm", "pad_width_mm", "shape"}
+    added_here = sorted(set(dedicated) - numbers, key=_pad_number_key)
+    if convention and differing and not by_position:
+        return False
+    if not convention and added_here and shared & set(differing):
+        return False
     geometry = data["package_geometry"]
     # Names read beside the old pads stay with the numbers they were read
     # for (user, 2026-11-03): only names of numbers the reading does not
@@ -5760,9 +6782,35 @@ def _replace_by_confirmed_reading(data, pins, main, reading, holes, factor, prog
              if isinstance(pin, dict) and pin.get("name")}
     # A deep copy per pad: the unit conversion scales each pad's `lead` in
     # place, so a mapping shared by the pads would be scaled once per pad.
-    replaced = [dict(copy.deepcopy(uniform), number=number,
-                     **({"name": names[number]} if number in names else {}))
-                for number in sorted(dedicated, key=_pad_number_key)]
+    by_number = {_pad_number_text(pin.get("number")): pin for pin in pins if isinstance(pin, dict)}
+
+    def attributes(number):
+        """What pad `number` takes: its matched position's attributes, else the uniform ones."""
+        if by_position and by_position.get(number) in by_number:
+            source = by_number[by_position[number]]
+            return {key: copy.deepcopy(source[key]) for key in _POSITION_FIELDS if key in source}
+        return copy.deepcopy(uniform)
+
+    if convention:
+        replaced = [dict(attributes(number), number=number,
+                         **({"name": names[number]} if number in names else {}))
+                    for number in sorted(dedicated, key=_pad_number_key)]
+    else:
+        # Every pad the answer read keeps its own values (positions are the
+        # reading's); the added ones are built by the one writer of added
+        # pads, without any hole of another pad.
+        scratch = {"pins": [dict({key: copy.deepcopy(value) for key, value in by_number[number].items()
+                                  if key not in ("x_mm", "y_mm")}, number=number)
+                            for number in sorted(dedicated, key=_pad_number_key)
+                            if number in by_number]}
+        _change_pad_set(scratch, {"add": added_here})
+        data["_added_pads"] = list(added_here)
+        data["_added_lead_allowed"] = len({round(drill, 6) for pin in pins if isinstance(pin, dict)
+                                           and pin.get("pad_type", "smd") in _HOLED_PAD_TYPES
+                                           and (drill := _optional_number(pin.get("drill_mm"),
+                                                                          positive=True))
+                                           is not None}) <= 1
+        replaced = sorted(scratch["pins"], key=lambda pin: _pad_number_key(pin["number"]))
     spans = reading.get("spans") or {}
     _align_body_axes(data, holes, dedicated, progress)
     _write_chain_pads(data, replaced, {"pads": dedicated, "spans": spans,
@@ -5777,6 +6825,25 @@ def _replace_by_confirmed_reading(data, pins, main, reading, holes, factor, prog
         # The replaced list was the main reading's, refuted by the witness:
         # its declared side does not survive it (C3); the side is asked.
         _withdraw_view(data, tx("la vista dichiarata apparteneva all'elenco di pad sostituito"))
+    if not convention:
+        _settle(data, tx("Elenco dei pad sostituito dalla lettura dedicata ({new}): posizioni "
+                         "confermate da un riscontro geometrico indipendente ({holes}); la "
+                         "numerazione della risposta principale ({old}) {why}. I pad gia' letti "
+                         "tengono i loro valori; i pad aggiunti ({added}) non prendono il foro "
+                         "dagli altri pad. Il riscontro verifica le posizioni, non i numeri: "
+                         "controllare i numeri dei pad sul disegno.", new=new,
+                         holes=_hole_text(verdict), old=old, why=why,
+                         added=", ".join(added_here) or tx("nessuno")) + remark, progress)
+        return True
+    if by_position:
+        _settle(data, tx("Elenco dei pad sostituito dalla lettura dedicata ({new}): posizioni "
+                         "confermate da un riscontro geometrico indipendente ({holes}); la "
+                         "numerazione della risposta principale ({old}) {why}. Tipo, foro, "
+                         "piazzola e forma di ogni pad presi dalla posizione corrispondente della "
+                         "risposta principale. Il riscontro verifica le posizioni, non i numeri: "
+                         "controllare i numeri dei pad sul disegno.", new=new,
+                         holes=_hole_text(verdict), old=old, why=why) + remark, progress)
+        return True
     _settle(data, tx("Elenco dei pad sostituito dalla lettura dedicata ({new}): posizioni "
                      "confermate da un riscontro geometrico indipendente ({holes}); la numerazione "
                      "della risposta principale ({old}) {why}. Tipo, foro, piazzola e forma dei pad "
@@ -6308,10 +7375,14 @@ DEFAULT_SINGLE_SYSTEM_PROMPT = (
     "Use grid ONLY if ALL the "
     "terminals lie on a grid at constant pitch and you declare it: rows and cols are the "
     "positions of the whole grid, empty ones included, and populated_pins lists the occupied "
-    "ones. Distances between terminals that are not multiples of one single pitch mean "
-    "that the grid does NOT exist: use pads. NUMBERING: only the numbers printed next to the "
-    "terminals; do not extend it by convention (pin header, DIP) and do not invent numbers for "
-    "positions without a number. HOLES AND TERMINALS, pad by pad: transcribe only what is "
+    "ones; every pin_map entry must lie inside rows x cols and every number of populated_pins "
+    "must be at a position of the grid. Distances between terminals that are not multiples of "
+    "one single pitch mean that the grid does NOT exist: use pads with pad_chains. NUMBERING: "
+    "only the numbers printed next to the terminals; do not extend it by convention (pin header, "
+    "DIP) and do not invent numbers for positions without a number. A letter or number printed "
+    "on the case or in its marking (a contact form such as \"C\", a type code, a date) is NOT a "
+    "terminal: a pad number must label a terminal drawn in the pinout or in the dimensioned "
+    "drawing. HOLES AND TERMINALS, pad by pad: transcribe only what is "
     "PRINTED. If the drawing prints the hole (a callout such as \"3-Ø1.2\" on the PCB layout) "
     "report it in drill_mm, copy the callout into hole_callout and declare drill_mm \"read\" "
     "in the value_sources of the pad; a slot only if printed: drill_mm is its side along X and "
@@ -6411,6 +7482,12 @@ SUPERSEDED_SINGLE_PROMPT_DIGESTS = frozenset({
     # 2026-11-12: the first English translation, before «ref:» stops were
     # worded «a reference point or line (datum)» (a database may store it).
     "222bffb5d87f5bc2aed6d2ddb1fab4bc8f792a7fdb2be115398352a36b16b4da",
+    # 2026-11-13 (user-approved plan P6): a grid could put a pin_map entry
+    # outside its own rows x cols (TEL converter), and a contact-form letter
+    # printed on the case became a sixth pad «C» (T7N relay). Now a grid
+    # must be self-consistent, else pads with pad_chains, and a marking is
+    # never a terminal.
+    "bf708c59329d60d496b67f1a0c82d7651c9c59a3c0c3ba658e00edbd7dc4aca5",
 })
 #: Digests of former pin-numbering defaults.
 SUPERSEDED_NUMBERING_PROMPT_DIGESTS = frozenset({
@@ -6534,7 +7611,9 @@ def single_answer_to_data(answer: dict) -> dict:
         the footprint through an unchecked grid.
     @throws AnswerShapeError When the answer has neither pads nor grid, or
         both, or is not an object: nothing to build a footprint from, and
-        the same request may come back well formed.
+        the same request may come back well formed. Also when a declared
+        grid contradicts itself (`_GridContradiction`); that error carries
+        a `fallback` (`_contradicting_grid_fallback`) for a broken retry.
     @note Through-hole pads with one size are circular: pad_length = pad_width
         = the diameter the model gave, shape circle unless it said otherwise.
     @note An unknown view is written as source_view "top" only as a frame:
@@ -6574,7 +7653,20 @@ def single_answer_to_data(answer: dict) -> dict:
         # it becomes the pads it describes, so the dedicated pad reading and
         # the drawn-hole check confirm it or block it (user, 2026-10-31, T7N
         # relay: a 2x2 grid hid a fifth, off-grid pin and skipped every check).
-        pins, origin, note, convention = _grid_as_pads(grid, answer)
+        try:
+            pins, origin, note, convention = _grid_as_pads(grid, answer)
+        except _GridContradiction as exc:
+            # A grid that contradicts itself (a pin_map entry outside its own
+            # rows x cols, a printed populated pin no position carries) is a
+            # broken SHAPE: it earns the one corrective retry (2026-11-13,
+            # TEL converter: pins 8/9 at column 2 of a 2-column grid, then
+            # every printed number but «1» silently filtered out). The
+            # fallback keeps every printed number WITHOUT a position (never
+            # the grid's coordinates, never convention numbers): the caller
+            # uses it only when the retry is broken too.
+            raise AnswerShapeError(str(exc), raw=answer,
+                                   fallback=_contradicting_grid_fallback(grid, answer, str(exc))
+                                   ) from exc
         data["notes"] = (str(data.get("notes") or "") + "\n" + note).strip()
         if convention:
             # Numbers the drawing never printed: a confirmed reading of the
@@ -6592,6 +7684,13 @@ def single_answer_to_data(answer: dict) -> dict:
         for key in ("body_length_mm", "body_width_mm", "body_height_mm"):
             if answer.get(key) is not None:
                 data["package_geometry"][key] = answer[key]
+        if not convention and not missing:
+            # The grid's coordinates are the model's claim like explicit
+            # coordinates: the dimension chains it transcribed beside them
+            # check them the same way (2026-11-13). A grid numbered by
+            # convention has no printed number for the chains to name, and
+            # one lacking a spacing has no coordinate to compare.
+            _place_pins_from_chains(data, answer.get("pad_chains"), answer.get("pad_midpoints"))
         return data
     unnumbered = [index for index, entry in enumerate(pads, 1)
                   if isinstance(entry, dict) and not _pad_number_text(entry.get("number"))]
@@ -6642,13 +7741,67 @@ def single_answer_to_data(answer: dict) -> dict:
     return data
 
 
+def _contradicting_grid_fallback(grid: dict, answer: dict, reason: str) -> Optional[dict]:
+    """The answer kept from a self-contradicting grid: every printed number, no position.
+
+    Used only when the corrective retry is broken too: the paid answer is not
+    lost, and nothing of the contradicting grid becomes a coordinate. The
+    pads are the numbers the grid printed (its pin_map labels, then its
+    populated_pins), each without x/y, with the grid's land and hole; the
+    answer's own dimension chains may place them (`_place_pins_from_chains`
+    runs as for explicit pads), else the dedicated reading or the user does.
+
+    @param grid The declared grid.
+    @param answer The whole tool answer.
+    @param reason The contradiction, for the note.
+    @return The answer in the main shape (`single_answer_to_data`), or None
+        when the grid printed no number at all.
+    """
+    labels = []
+    pin_map = grid.get("pin_map")
+    for entry in pin_map if isinstance(pin_map, (list, tuple)) else ():
+        label = _pin_label(entry.get("pin")) if isinstance(entry, dict) else None
+        if label is not None:
+            labels.append(_pin_text(label))
+    populated = grid.get("populated_pins")
+    for value in populated if isinstance(populated, (list, tuple)) else ():
+        if isinstance(value, (str, int)) and not isinstance(value, bool) and str(value).strip():
+            labels.append(str(value).strip())
+    numbers = sorted(dict.fromkeys(labels), key=_pad_number_key)
+    if not numbers:
+        return None
+    pad = _optional_number(grid.get("pad_diameter_mm"), positive=True)
+    drill = _optional_number(grid.get("drill_mm"), positive=True)
+    pads = []
+    for number in numbers:
+        entry = {"number": number, "x_mm": None, "y_mm": None, "pad_type": "thru_hole",
+                 "pad_length_mm": pad, "pad_width_mm": pad, "shape": "circle"}
+        if drill is not None:
+            entry["drill_mm"] = drill
+        pads.append(entry)
+    rebuilt = {key: value for key, value in answer.items() if key != "grid"}
+    rebuilt["pads"] = pads
+    rebuilt["pads_origin"] = answer.get("pads_origin") or "custom"
+    data = single_answer_to_data(rebuilt)
+    note = tx("Griglia della risposta principale scartata perche' si contraddice ({reason}): "
+              "tenuti i numeri stampati dei pad ({numbers}) senza le posizioni della griglia; le "
+              "posizioni vengono dalle catene di quote o dalla lettura dedicata.",
+              reason=reason, numbers=", ".join(numbers))
+    data["notes"] = (str(data.get("notes") or "") + "\n" + note).strip()
+    return data
+
+
 def _grid_as_pads(grid: dict, answer: dict) -> tuple:
     """The pads a declared grid of `report_single_component` describes, in drawing units and view.
 
     Same contract as the former matrix footprint (_footprint_matrix): column
     `col` at col * pitch along X, row `row` at row * row_spacing along Y,
     numbers from the grid's pin_map as read (drawing view) or column by
-    column (a convention, said in the note), filtered by populated_pins. The
+    column (a convention, said in the note), filtered by populated_pins
+    (positions of THIS grid). A pin_map entry outside rows x cols, or a
+    populated pin that no position carries, raises `_GridContradiction`
+    (2026-11-13): never a convention numbering filtered by printed numbers,
+    which dropped terminals silently. The
     pitch is never reused as the row spacing: a missing value needed by the
     grid leaves the coordinate empty (`_grid_missing_spacings` names it), and
     the validation downstream drops the pads naming that value and blocks
@@ -6674,9 +7827,14 @@ def _grid_as_pads(grid: dict, answer: dict) -> tuple:
         try:
             mapped = _pin_map_seen_from_top(grid.get("pin_map"), cols, "top", rows)
         except ExtractionError as exc:
-            remarks.append(tx("pin_map della griglia scartata ({exc}): numerazione colonna per "
-                              "colonna, da verificare.", exc=exc))
-            mapped = None
+            # The map is the model's own reading of the printed numbers: one
+            # entry outside its own matrix means the grid does not describe
+            # the drawing. Numbering by convention in its place would throw
+            # the printed numbers away (2026-11-13, TEL converter).
+            raise _GridContradiction(tx(
+                "La griglia dichiarata si contraddice ({exc}): se le distanze fra i terminali non "
+                "sono tutte multiple di un passo costante, descriverli uno per uno in pads con le "
+                "catene di quote in pad_chains.", exc=exc)) from exc
         if not mapped:
             remarks.append(tx("Numerazione colonna per colonna per convenzione, non letta dal "
                               "disegno: da verificare."))
@@ -6685,6 +7843,18 @@ def _grid_as_pads(grid: dict, answer: dict) -> tuple:
         populated = grid.get("populated_pins")
         if isinstance(populated, (list, tuple)) and populated:
             keep = {str(p).strip() for p in populated}
+            # populated_pins name OCCUPIED positions of this grid: a number no
+            # position carries is a printed terminal the grid cannot place.
+            # Filtering it out would drop a terminal silently (the symbol
+            # loses the pin); it is a contradiction of the answer instead.
+            carried = {str(p[0]).strip() for p in positions}
+            stray = sorted(keep - carried, key=_pad_number_key)
+            if stray:
+                raise _GridContradiction(tx(
+                    "La griglia dichiarata si contraddice: i pin occupati {pins} non hanno una "
+                    "posizione nella griglia {rows}x{cols}. Se le distanze fra i terminali non sono "
+                    "tutte multiple di un passo costante, descriverli uno per uno in pads con le "
+                    "catene di quote in pad_chains.", pins=", ".join(stray), rows=rows, cols=cols))
             positions = [p for p in positions if str(p[0]) in keep]
     off_x = _optional_number(grid.get("body_offset_x_mm"))
     off_y = _optional_number(grid.get("body_offset_y_mm"))
@@ -6887,6 +8057,16 @@ def apply_answers(params: ExtractedParams, answers: dict) -> ExtractedParams:
             if not isinstance(payload, dict):
                 remaining.append(question)
                 continue
+            # The question about pads without a hole (`_ask_pad_holes`)
+            # shares this field (the window asks every "pad_layout" question
+            # before writing a footprint); its payload names its kind.
+            hole_kind = payload.get("kind") == PAD_HOLE_KIND
+            if hole_kind and payload.get("block"):
+                notes.append(tx("Pad {pads}: lasciati bloccati per scelta dell'utente; il foro "
+                                "resta da leggere sul disegno.",
+                                pads=", ".join(str(n) for n in payload.get("pads") or ())))
+                candidates.pop(key, None)
+                continue
             # Pads dropped for unread positions (M3) are filled on a copy:
             # they become the footprint again only when every pad is placed
             # and the geometry validates.
@@ -6905,22 +8085,31 @@ def apply_answers(params: ExtractedParams, answers: dict) -> ExtractedParams:
                     result.pin_map_conflict = (line if not result.pin_map_conflict
                                                else result.pin_map_conflict + "\n" + line)
 
-            positions = {str(p.get("number")): (p.get("x_mm"), p.get("y_mm"))
-                         for p in payload.get("pins") or () if isinstance(p, dict)}
-            # A coordinate the candidate estimated from the drawing's pixels
-            # keeps that provenance on its pad (`_write_candidate` does the same).
-            measured = {str(p.get("number")): p["source"] for p in payload.get("pins") or ()
-                        if isinstance(p, dict) and isinstance(p.get("source"), str)}
-            for pin in target.get("pins") or ():
-                number = _pad_number_text(pin.get("number")) if isinstance(pin, dict) else ""
-                if number in positions and None not in positions[number]:
-                    pin["x_mm"], pin["y_mm"] = positions[number]
-                    if number in measured:
-                        pin["source"] = measured[number]
-            target["origin"] = payload.get("origin") or "custom"
+            # Pads a whole-layout candidate removes or adds (`_offer_pad_set_change`),
+            # or a hole chosen for pads that had none (`_ask_pad_holes`):
+            # changed on the copy, committed only if the geometry validates.
+            # The part's printed holes BEFORE any removal: removing a pad does
+            # not unprint its hole (D1).
+            donors = _printed_hole_donors(target.get("pins"))
+            dropped = (_apply_pad_hole_choice(target, payload, notes) if hole_kind
+                       else _change_pad_set(target, payload, _part_lead_of_result(result), notes))
+            if not hole_kind:
+                positions = {str(p.get("number")): (p.get("x_mm"), p.get("y_mm"))
+                             for p in payload.get("pins") or () if isinstance(p, dict)}
+                # A coordinate the candidate estimated from the drawing's pixels
+                # keeps that provenance on its pad (`_write_candidate` does the same).
+                measured = {str(p.get("number")): p["source"] for p in payload.get("pins") or ()
+                            if isinstance(p, dict) and isinstance(p.get("source"), str)}
+                for pin in target.get("pins") or ():
+                    number = _pad_number_text(pin.get("number")) if isinstance(pin, dict) else ""
+                    if number in positions and None not in positions[number]:
+                        pin["x_mm"], pin["y_mm"] = positions[number]
+                        if number in measured:
+                            pin["source"] = measured[number]
+                target["origin"] = payload.get("origin") or "custom"
+                if payload.get("view") in ("top", "bottom"):
+                    target["source_view"] = payload["view"]
             target["needs_review"] = True
-            if payload.get("view") in ("top", "bottom"):
-                target["source_view"] = payload["view"]
             exchange = payload.get("exchange_body")
             exchange = exchange if isinstance(exchange, dict) else None
             if exchange:
@@ -6931,6 +8120,15 @@ def apply_answers(params: ExtractedParams, answers: dict) -> ExtractedParams:
                     target["body_length_mm"] = width
                 if length is not None:
                     target["body_width_mm"] = length
+            if (not hole_kind and not _pads_without_positions(target)
+                    and _hold_holeless_pads(result, target, payload, dropped, notes, remaining,
+                                            candidates, donors)):
+                # Every pad placed, some (added ones, or those of a kept main
+                # layout) without a printed hole: the layout is applied as
+                # dropped geometry and the pad-hole question is asked about
+                # them (audits C2, D2), never a borrowed hole, never a loop.
+                candidates.pop(key, None)
+                continue
             if restoring:
                 # A chosen layout gives positions, never a hole (E1): pads
                 # dropped for an unread hole stay dropped.
@@ -6945,6 +8143,9 @@ def apply_answers(params: ExtractedParams, answers: dict) -> ExtractedParams:
                 # could never be applied). The invariant holds here too.
                 record = target.pop(_DERIVED_LANDS_KEY, None)
                 unsettled = target.pop("unsettled_pads", None)
+                # Information about the dropped pads only, never a footprint key.
+                target.pop("unquoted_pads", None)
+                target.pop("self_quoted_pads", None)
                 pins = [pin for pin in target.get("pins") or () if isinstance(pin, dict)]
                 if not isinstance(record, list) and unsettled:
                     # A dropped geometry without the record (an older
@@ -6981,35 +8182,27 @@ def apply_answers(params: ExtractedParams, answers: dict) -> ExtractedParams:
             else:
                 # A footprint that validated with the positions it had must
                 # validate with the chosen ones too: pads the layout puts on
-                # each other are not written (the invariant, V1-4).
-                clash = _cross_pad_problem(target)
+                # each other are not written (the invariant, V1-4); nor a
+                # holed pad without a hole (D2).
+                holeless = _pads_without_holes(target)
+                clash = (tx("pad {pads} senza foro", pads=", ".join(holeless)) if holeless
+                         else _cross_pad_problem(target))
                 if clash:
                     not_applicable([clash])
                     remaining.append(question)
                     continue
                 result.package_geometry = geometry = target
             if exchange:
-                result.body_length_mm, result.body_width_mm = (result.body_width_mm,
-                                                               result.body_length_mm)
-                sources = dict(result.value_sources or {})
-                length, width = sources.pop("body_length_mm", None), sources.pop("body_width_mm", None)
-                if width is not None:
-                    sources["body_length_mm"] = width
-                if length is not None:
-                    sources["body_width_mm"] = length
-                result.value_sources = sources
-                measured = exchange.get("measured_mm") or (0.0, 0.0)
-                notes.append(tx(
-                    "Lunghezza e larghezza del corpo scambiate rispetto alla risposta principale: il "
-                    "contorno disegnato attorno ai fori misura {x:.2f} mm lungo X e {y:.2f} mm lungo Y "
-                    "({holes}). Nessuna quota in pianta fissa l'orientamento del corpo: da verificare "
-                    "sul disegno.", x=measured[0], y=measured[1], holes=exchange.get("evidence") or ""))
+                _exchange_result_body(result, exchange, notes)
             result.pin_map_conflict = None
-            # What the one writer said while placing the body (`_candidate_payload`).
-            notes.extend(str(line) for line in payload.get("notes") or ())
-            notes.append(tx("Posizioni dei pad scelte dall'utente fra le letture ({source}); da "
-                            "verificare sul disegno.",
-                            source=_reading_source(payload.get("source") or "main")))
+            # The removed pads leave the pinout, hence the symbol, too.
+            _drop_pinout_pads(result, dropped, renumbered=bool(payload.get("convention")))
+            if not hole_kind:
+                # What the one writer said while placing the body (`_candidate_payload`).
+                notes.extend(str(line) for line in payload.get("notes") or ())
+                notes.append(tx("Posizioni dei pad scelte dall'utente fra le letture ({source}); "
+                                "da verificare sul disegno.",
+                                source=_reading_source(payload.get("source") or "main")))
         elif field_name == "height_equals_plan":
             if value == "clear":
                 result.body_height_mm = None
@@ -7861,18 +9054,27 @@ class AnswerShapeError(ExtractionError):
         numbers is not this error and is never retried blindly.
     """
 
-    def __init__(self, message: str, *, raw=None):
+    def __init__(self, message: str, *, raw=None, fallback: Optional[dict] = None):
         """@brief Build the error, keeping the unusable arguments for the log.
 
         @param message Translated diagnostic text.
         @param raw The arguments as the model sent them (any JSON value).
+        @param fallback The part of the answer that is still usable, in the
+            main shape, or None: used only when the corrective retry is
+            broken too, so a paid answer is not lost (a self-contradicting
+            grid keeps its printed numbers without positions).
         """
         super().__init__(message)
+        self.fallback = fallback
         import json
         try:
             self.raw = json.dumps(raw, ensure_ascii=False, sort_keys=True, default=repr)
         except (TypeError, ValueError):
             self.raw = repr(raw)
+
+
+class _GridContradiction(ExtractionError):
+    """A declared grid of `report_single_component` that contradicts itself (`_grid_as_pads`)."""
 
 
 #: Text appended to the retried request after an AnswerShapeError: it restates
@@ -7883,8 +9085,11 @@ _SHAPE_CORRECTION = (
     "the tool again with ALL the fields: pads is a LIST with one object for each terminal "
     "(number, x_mm, y_mm, pad_type, pad_length_mm, pad_width_mm, drill_mm if through-hole), never "
     "the fields of a single pad at the top level; every pad with its PRINTED number (a hole "
-    "without a printed number must not be included); grid only if the terminals lie on a grid "
-    "at constant pitch, and never together with pads.")
+    "without a printed number must not be included); grid only if EVERY terminal lies on a grid "
+    "at constant pitch -- every pin_map entry inside rows x cols, every number of populated_pins "
+    "at a position of the grid -- and never together with pads; when the distances between the "
+    "terminals are not all multiples of one pitch, list the terminals in pads and transcribe the "
+    "dimension chains in pad_chains.")
 
 
 #: Bound of the rejected main answer written to the log, in characters: the
@@ -9858,12 +11063,26 @@ def extract_pin_header_params(
                        exc=second)) from second
             except AnswerShapeError as second:
                 _log_unreadable_arguments(second, progress, 2)
-                raise ExtractionError(
-                    tx("Anche il nuovo tentativo ha restituito una risposta senza la forma "
-                       "richiesta; il testo delle due risposte e' nel log AI (righe "
-                       "AI_RESPONSE_UNREADABLE). {exc}", exc=second)) from second
-            if progress:
-                progress(tx("Analisi dei documenti: il nuovo tentativo e' leggibile; si usa quello."))
+                # Two broken shapes: the usable part of the answer (a
+                # self-contradicting grid keeps its printed numbers without
+                # positions), the retry's first, else the first answer's.
+                fallback = (second.fallback if isinstance(second.fallback, dict) else
+                            exc.fallback if isinstance(exc, AnswerShapeError)
+                            and isinstance(exc.fallback, dict) else None)
+                if fallback is None:
+                    raise ExtractionError(
+                        tx("Anche il nuovo tentativo ha restituito una risposta senza la forma "
+                           "richiesta; il testo delle due risposte e' nel log AI (righe "
+                           "AI_RESPONSE_UNREADABLE). {exc}", exc=second)) from second
+                data = fallback
+                if progress:
+                    progress(tx("Analisi dei documenti: anche il nuovo tentativo si contraddice "
+                                "({exc}); si tengono i numeri stampati dei pad senza le posizioni "
+                                "della griglia.", exc=second))
+            else:
+                if progress:
+                    progress(tx("Analisi dei documenti: il nuovo tentativo e' leggibile; si usa "
+                                "quello."))
     except OpenRouterError as exc:
         raise ExtractionError(str(exc)) from exc
 
@@ -12733,6 +13952,13 @@ def _params_from_tool_arguments(data: dict, *, trusted_components: bool = False)
     # NOTHING changes a pad after this call (invariant of round 4).
     package_geometry, pad_problems = _resolve_pad_terminals(
         package_geometry, data, notes, lift=layout != "castellated")
+    if layout != "castellated":
+        # Placed pads without a hole: a question instead of a dead end
+        # (plan P4); a saved answer changes those pads here, and steps 3
+        # and 4 of the pad rules judge them again.
+        refit = _ask_pad_holes(data, package_geometry, notes)
+        if refit is not None:
+            pad_problems = refit
     unread_positions = _pads_without_positions(package_geometry)
     # Holed pads left without a hole: no printed hole and no terminal, so no
     # value the program may derive (review E1). Unread geometry like an
@@ -12779,6 +14005,18 @@ def _params_from_tool_arguments(data: dict, *, trusted_components: bool = False)
             # hold its hole, no room at the pitch): `apply_answers` must not
             # turn them back into a footprint.
             unread_geometry["unsettled_pads"] = [number for number, _reason in pad_problems]
+        if isinstance(data.get("_unquoted_pads"), list):
+            # Pads that no independent witness of the dedicated pad reading
+            # names (`apply_dedicated_pads`), among the dropped ones; absent
+            # when no dedicated reading was usable (nothing can be said).
+            present = {_pad_number_text(pin.get("number"))
+                       for pin in unread_geometry.get("pins") or () if isinstance(pin, dict)}
+            unread_geometry["unquoted_pads"] = [number for number in data["_unquoted_pads"]
+                                                if number in present]
+            # Named only by the main answer's own chain sums: not «quoted in
+            # the drawing» for the window (coordinator round 3).
+            unread_geometry["self_quoted_pads"] = [
+                number for number in data.get("_self_quoted_pads") or () if number in present]
         package_geometry = None
     elif mapping is not None:
         # The LAST validation: the pads are valid alone and together (the
@@ -12854,9 +14092,17 @@ def _params_from_tool_arguments(data: dict, *, trusted_components: bool = False)
     if pads_footprint_dropped and unread_holes:
         # No reading of the positions can supply a hole: the block names it,
         # beside any block of the positions (review E1).
-        hole_block = tx("Foro dei pad {pads} non stampato e terminale non dichiarato: nessun "
-                        "footprint finche' il foro non e' letto dal disegno.",
-                        pads=", ".join(unread_holes))
+        pending = _pads_offered_for_removal(data)
+        if set(unread_holes) <= pending:
+            # The open whole-layout question already proposes to remove
+            # these pads: the block names that way out (plan P4/P3).
+            hole_block = tx("Foro dei pad {pads} non stampato e terminale non dichiarato; la "
+                            "domanda sulla disposizione dei pad propone di toglierli: nessun "
+                            "footprint finche' non ha risposta.", pads=", ".join(unread_holes))
+        else:
+            hole_block = tx("Foro dei pad {pads} non stampato e terminale non dichiarato: nessun "
+                            "footprint finche' il foro non e' letto dal disegno o scelto nella "
+                            "domanda sui pad senza foro.", pads=", ".join(unread_holes))
         pin_map_conflict = hole_block if not pin_map_conflict else pin_map_conflict + "\n" + hole_block
     if pads_footprint_dropped and unread_positions and not pin_map_conflict:
         # The dedicated pad reading normally blocks unconfirmed positions
@@ -13480,6 +14726,7 @@ def _resolve_pad_terminals(package_geometry, data: dict, notes: list, *, lift: b
     printed = [hole for hole in (dedicated or {}).values()
                if isinstance(hole, dict) and hole.get("drill_mm") is not None]
     part_lead = _part_lead(data)
+    added_pads = {_pad_number_text(n) for n in data.get("_added_pads") or ()}
     found = {name: [] for name in (
         "smd_drill", "lead_dropped", "slot_dropped", "only_main", "only_dedicated", "disagree",
         "unfounded", "withheld", "part_lead", "lead_withheld", "slot_unoriented", "loose_blade",
@@ -13501,7 +14748,14 @@ def _resolve_pad_terminals(package_geometry, data: dict, notes: list, *, lift: b
                 drill_word = None
                 found["withheld"].append(_pad_number_text(pin.get("number")) or "?")
         fallback = {"drill_mm": drill_word, "pad_size": _pad_word(top, "pad_diameter_mm")}
-        _resolve_one_pad(pin, fallback, dedicated, found, part_lead, uniform, derived,
+        # A pad a chosen layout ADDED (`_change_pad_set`) takes the part-level
+        # terminal only when the holed pads share one drill: with different
+        # holes the part's one terminal cannot say which is its own (D3;
+        # `apply_answers` applies the same rule through `drills_uniform`).
+        added_pad = _pad_number_text(pin.get("number")) in added_pads
+        lead_allowed = uniform and bool(data.get("_added_lead_allowed", True))
+        _resolve_one_pad(pin, fallback, dedicated, found,
+                         None if added_pad and not lead_allowed else part_lead, uniform, derived,
                          dedicated_leads)
     if lift:
         _judge_holes_against_leads(pins, part_lead, _part_lead_word(data, part_lead), found, derived)

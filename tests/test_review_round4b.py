@@ -144,14 +144,22 @@ def test_the_unfit_pads_are_saved_and_a_reopened_project_says_the_same_without_t
 
 @pytest.mark.parametrize("kind, own, other", [
     ("position", "le posizioni dei pad 5 non sono state lette", "i fori dei pad"),
-    ("hole", "i fori dei pad 5 non sono stati letti", "le posizioni dei pad")])
+    # CONTRACT CHANGED 2026-11-13: pads 1-4 of `_dropped_for("hole")` carry a
+    # hole, so pad 5 is named as a hole missing beside read holes.
+    ("hole", "il foro dei pad 5 non è stato letto", "le posizioni dei pad")])
 def test_pads_that_lack_a_position_or_a_hole_keep_their_own_wording(window, monkeypatch, tmp_path,  # noqa: F811
                                                                     kind, own, other):
-    _analysed(window, monkeypatch, tmp_path, _dropped_for(kind))
+    params = _dropped_for(kind)
+    _analysed(window, monkeypatch, tmp_path, params)
     assert window._unread_pads == ["5"] and window._unread_pad_unfit is None
     block = window._unread_pads_block()
     assert own in block and other not in block
-    assert UNFIT not in block and DETAIL not in block
+    assert UNFIT not in block
+    # CONTRACT CHANGED 2026-11-13: the extractor's account is the cause and is
+    # shown for every reason a pad is dropped, not only for unfit values (it
+    # used to be hidden here, and a real analysis showed only the hole
+    # sentence while the positions of every pad were unconfirmed).
+    assert f"{DETAIL} {params.pin_map_conflict.strip()}" in block
     assert "unread_pad_unfit" not in window._project_state()
 
 

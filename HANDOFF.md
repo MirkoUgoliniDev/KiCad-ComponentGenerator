@@ -1,5 +1,249 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## STATO 13/11/2026 POMERIGGIO — giro «pannello + vicoli ciechi dei pad» COMMITTATO su FOOTPRINT-ADVANCE (hash nel commit docs successivo), pushato e mergiato in main (utente: «committa tutto pusha, poi mergia in main pusha»; pacchetto MSI ANNULLATO dall'utente). Suite completa VERDE sul codice fermo: prima meta' 8528 passati / 9 saltati / 19 sottotest (rilanciata da sola: il riepilogo della corsa doppia era perso dietro un `| tail`), seconda meta' 5435 / 4 = 13963 passati, 13 saltati, 19 sottotest. Prossimo giro APPROVATO: punti 1-6 qui sotto (modelli AI, «modello predefinito», coerenza lati/pinout, verifica componente, nomi corti dei pin, riga riassuntiva); piano dei punti 3-4 in docs/pinout-coherence-plan.md.
+
+## (FATTO) 13/11/2026 — pannello laterale della scheda Footprint (utente, con screenshot)
+
+Richiesto: (1) «perche' non rimuovi questo sfondo viola?» — e' l'evidenziazione della riga selezionata di
+«Controlli» (theme.py QListWidget::item:selected = BLUE): la lista diventa NoSelection come klc_list; clic e
+Invio da tastiera (itemActivated) restano (il focus NON si toglie). (2) «se Controlli non e' vuoto lo apri
+altrimenti tutti collassati»: Layer, Disegno, Proprieta' partono chiusi; Controlli parte chiuso e si apre da solo
+quando passa da vuoto (nessun footprint / «Nessun problema trovato») ad avere almeno un problema. Interpretazione
+mia (detta all'utente): mai richiuso in automatico, mai riaperto se l'utente lo chiude mentre ha gia' problemi.
+(3) «anche qua tutti collassati di default» (palette del simbolo: Collegamenti, Disegno e categorie): gruppi
+chiusi all'avvio (symbol_tab.rebuild default False). FATTO (1)(2)(3): fp_checks_group, _fp_checks_had_findings
+(azzerato anche al cambio progetto); test nuovi in test_footprint_side_panel.py (4: chiusi all'avvio, apertura
+solo con problemi, chiuso dall'utente resta chiuso, niente evidenziazione); contratti aggiornati in
+test_collapsible_group.py e test_symbol_palette_gui.py («CONTRACT CHANGED 2026-11-13»). 90 test mirati verdi;
+corsa allargata footprint/symbol/canvas in corso. Mancano: revisione read-only (canvas-parity), suite completa.
+(4) «metti un pulsante per assegnare il valore tilde» (utente: «ok»): FATTO action_datasheet_none dentro il
+campo Datasheet (assets/datasheet-none.svg), selectAll+insert «~» (Ctrl+Z riporta l'URL), spenta col campo a «~»,
+tooltip in 4 lingue; test in test_footprint_side_panel.py.
+(5) «espandilo se contiene testo» (riga di Controlli tagliata a 2 righe): FATTO _fit_footprint_checks_height
+misura il testo a capo alla larghezza vera del viewport (solo se visibile: nascosto ha 640 px finti) e imposta
+sizeHint per riga; _ResizeWatcher sul viewport rifà il calcolo all'apertura del gruppo. Test positivo/negativo.
+REVISIONE read-only (canvas-parity-reviewer) di (1)-(5): nessun bloccante. Corretti D1 (un footprint non
+costruito azzerava il flag e riapriva un gruppo chiuso dall'utente: il ramo None ora conserva lo stato, come
+_note_metadata_block), D2 (righe misurate da nascosto: refit su toggled del gruppo), D3 (costanti di misura
+mie sostituite dal layout della vista stessa: visualItemRect dopo doItemsLayout; sizeHintForRow ignora la
+larghezza di a capo, 12 px contro 144 reali), D4 (test della tilde con la precondizione «Datasheet vuoto»
+presente). 19 test del pannello verdi. Prova larga precedente (footprint/symbol/canvas/metadata, prima di
+tilde e righe): 2771 verdi. DA DECIDERE con l'utente (asimmetrie A1-A3): «Proprieta'» del simbolo non e' un
+gruppo richiudibile (nel footprint ora parte chiuso); armare uno strumento da tastiera lascia chiuso «Disegno»
+con le sue opzioni (entrambe le schede); al cambio progetto i gruppi non si richiudono. TRAPPOLA: `sed -i` ha tolto
+TUTTI i CR di main_window.py (ripristinati a byte): mai sed -i sui file del progetto.
+(6) SEGNALATO dall'utente con screenshot: due finestre «Generazione automatica non avviata», entrambe del
+13/11 mattina (codice attuale: __version__ resta "1.0.8" anche 14 commit dopo il tag; mia frase «stai usando la
+1.0.8 installata» era SBAGLIATA, corretta all'utente):
+  A) generated/TEL 87-2411WI (docs quote.png + webp), 08:05: posizioni dei pad non confermate — risposta
+     principale e lettura dedicata hanno meno di due pad in comune (1,10,16,7,8,9), la dedicata non coincide coi
+     fori disegnati di quote.png; pad 1 foro stimato dal terminale dichiarato Ø0.50.
+  B) generated/T7NS5D4-12 (docs Pinout.png + s-l1600.webp), 08:13: foro del pad «C» non letto (nessun foro
+     stampato ne' terminale) -> blocco senza rimedio manuale per quel pad.
+RICHIESTA UTENTE (13/11): «dobbiamo fare in modo che non si verifichino questi problemi ... il software deve
+essere intelligente ... scatena degli agenti esperti». PIANO: due agenti read-only in parallelo, uno per caso,
+diagnosi della catena di cause SOLO con replay offline (analisi-ai.log, cache; nessuna chiamata a pagamento),
+ciascuno propone correzioni GENERALI (regola CLAUDE.md «generalizzare»); poi sintesi all'utente e OK prima di
+toccare il codice dell'estrazione.
+DIAGNOSI B (agente, replay offline verificato, script scratchpad/t7ns/replay.py e holes2.py): il pad «C» NON
+ESISTE. Pinout.png mostra 5 terminali (A1, A2, 11, 12, 14) con richiamo fori Ø1,3 +0,1; la «C» e' la marcatura
+del contatto (Form C) sulla foto, presa per pin dalla risposta principale (claude-opus-4.1), che sbaglia anche
+tutte le coordinate. La lettura dedicata (gpt-5.6-sol) ha i 5 pad giusti, confermati dai fori disegnati
+(errore 0.114 mm). Ma tre filtri prendono l'insieme di pad della risposta principale come riferimento e scartano
+l'unica disposizione giusta perche' «manca C»: _settle_by_holes (datasheet_extractor.py:4461), _block_or_ask
+(:4299), _replace_by_confirmed_reading (:5724, «mai togliere un terminale») -> blocco senza domande; poi C senza
+foro -> unread_holes=["C"] e la GUI mostra solo il sintomo (foro di C) con un rimedio inutile («aggiungi un
+documento»), nascondendo la causa. Proposte: F1 domanda pad_layout «disposizione confermata dai fori senza i pad
+che nessun testimone vede» (mai adozione silenziosa; negativi: pad citato in catene/richiamo/unplaced, lettura
+non confermata); F2 messaggio con la causa vera; F3 domanda per un pad senza foro («stesso foro dei pad X» dai
+valori stampati, «rimuovi il pad», «lascia bloccato»); F4 campi Pad Ø/Foro Ø vecchi (1.55 avanzato da prima) da
+spegnere quando i pad sono espliciti; F5 prompt: una marcatura del case non e' un terminale (schema profilo).
+DIAGNOSI A (agente, replay offline verificato, script scratchpad/tel/replay.py, replay2.py, holes.py, dots.py):
+la lettura DEDICATA era GIUSTA (quote.png: righe 1,7,8 / 16,10,9; colonne 3.0 + 15.24 + 2.54 dal bordo; righe a
+10.16; terminale Ø0.5; nessun foro stampato). Tre cause: (a) la risposta principale (DeepSeek flash) usa `grid`
+2x2 ma mette i pin 8/9 in colonna 2 (fuori matrice): _pin_map_seen_from_top solleva (:8745), _grid_as_pads
+(:6674-6688) ripiega sulla numerazione per convenzione 1..4 e la FILTRA con i numeri stampati -> resta solo
+il pad «1», in silenzio (il ramo grid esce a :6595 prima di _place_pins_from_chains, catene ignorate);
+(b) il testimone dei fori dice falsamente «no_match»: i pin sono cerchi di ~5 px (sotto R_MIN_PX 2.5), ne trova
+1 su 6, ma 8 cerchi «da foro» di ALTRE viste della pagina bastano per contraddire (_check_image :2832); (c)
+_block_or_ask (:4288-4336) offre solo disposizioni con gli stessi numeri della principale ({1}) -> nessuna
+domanda. Messaggio contraddittorio (:5465: {read} elenca i numeri della dedicata, ordinati come stringhe). Le
+coordinate (-8.90,-6.85...) della finestra NON sono nel log di questa corsa: forse una corsa precedente; da
+verificare.
+PIANO UNICO — APPROVATO dall'utente («ok», 13/11), compreso il cambio di regola P3. IN CORSO con tre agenti
+su file disgiunti: A = datasheet_extractor.py + prompt_catalog/analysis_profiles (P1, P3, P4, P5 testo, P6);
+B = drawing_holes.py (P2); C = main_window.py fuori dal pannello laterale (P5 GUI, campi Pad Ø/Foro Ø, origine
+delle coordinate -8.90/-6.85). Il coordinatore integra, replay, generality-auditor, suite. Il giro del pannello
+(1)-(5) e' ancora NON committato nello stesso albero.
+ P1 una risposta a griglia che contraddice se stessa (pin fuori matrice, numeri stampati senza posizione) non
+    si riduce mai: errore di forma -> il ritentativo correttivo gia' esistente; catene usate anche per la griglia.
+ P2 testimone dei fori: «non verificabile» (non «non coincidono») quando i cerchi della vista in pianta sono
+    troppo pochi; cerchi di altre viste non contraddicono; incroci delle linee d'asse tratto-punto come prova
+    dei centri (NON abbassare R_MIN_PX: soglia tarata, vietata).
+ P3 DECISIONE DI PRODOTTO: quando c'e' UNA sola lettura completa e coerente con le quote (l'altra incompleta, o
+    con pad che nessuna quota/richiamo/foro vede) -> UNA domanda «usa questa disposizione (pad X tolti/aggiunti)»
+    invece del blocco. Mai adozione silenziosa.
+ P4 pad senza foro letto -> domanda: «stesso foro dei pad X (valore stampato)», «togli il pad», «lascia bloccato».
+ P5 messaggi con la causa vera, entrambi gli insiemi, numeri in ordine naturale; campi Pad Ø/Foro Ø spenti
+    quando il footprint usa pad espliciti.
+ P6 prompt (schema profilo +1): una scritta sul corpo non e' un terminale; grid solo a passo costante.
+ ESITO B (agente drawing_holes, consegnato): _crossing_marks (incroci di linee d'asse interrotte con inchiostro
+    sull'incrocio come centri di foro), _view_anchored (no_match resta solo se una similitudine ancora la
+    maggioranza stretta dei pad su cerchi da foro), _outlined_view_holds (oppure un rettangolo disegnato
+    contiene almeno tanti cerchi da foro quanti i pad); altrimenti too_few_circles. TEL vera: confirmed (0.065 mm);
+    TEL sbagliata: too_few_circles; T7N invariato (5 pad confirmed 0.114, con C no_match). Test nuovi
+    tests/test_drawing_holes_witness_view.py (13) + 162 + 250 dei file vicini verdi. FRAGILE (da dire all'utente):
+    margine di un pad nel test lato lettura; su pagine affollate letture da <=5 pad tengono il comportamento
+    vecchio; il test lato pagina dipende da _outline_rects (anche una cella di tabella conta); body_check TEL
+    resta unverifiable (_line_bands fonde le bande a destra di x=140).
+ ESITO C (agente GUI, consegnato): _unread_pads_account / _unread_pad_detail (la causa del pin_map_conflict
+    mostrata per ogni blocco, «Dettaglio dell'analisi: …»), _holes_read_elsewhere (se altri pad hanno il foro
+    non dice piu' «nessun foro stampato»: «i pad X potrebbero non esistere ...»), _pad_layout_question_remedy,
+    _explicit_pads_are_footprint + _sync_single_tht_pad_controls (Pad Ø/Foro Ø spenti con «—» e etichetta
+    «Non usati: ...»). 12 test nuovi in tests/test_pad_block_messages_gui.py, 247 verdi; 4 contratti aggiornati
+    (review_round3_gui, round4_gui, round4b). Coordinate -8.90/-6.85: NON difetto GUI, erano della PRIMA delle tre
+    analisi TEL delle 08:02-08:04 (log riga 1451/1483). Non fatto: matrice THT con pad/foro None tiene il valore
+    precedente (serve decisione). RISCHIO: con la domanda nuova per un pad senza foro, test GUI che fanno
+    estrazioni senza stub di _ask_extraction_question possono restare appesi in _run_modal (watchdog 300 s):
+    controllare nella suite completa. Chiede all'estrattore un campo strutturale unread_pad_geometry["unquoted_pads"].
+ ESITO A (agente estrattore, consegnato): P1 _GridContradiction -> AnswerShapeError(fallback=) + retry,
+    _place_pins_from_chains anche sulle griglie; P3 _independently_named_pads, _layout_refuted,
+    _offer_pad_set_change, _change_pad_set, _drop_pinout_pads (domanda unica, mai adozione silenziosa); P4
+    PAD_HOLE_KIND, _ask_pad_holes (campo pad_layout con payload kind "pad_hole"); P5 ordine naturale e i due
+    insiemi nel messaggio; P6 DEFAULT_SINGLE_SYSTEM_PROMPT (digest vecchio in SUPERSEDED_SINGLE_PROMPT_DIGESTS,
+    nessun SCHEMA_VERSION); data["_unquoted_pads"] -> unread_pad_geometry["unquoted_pads"]. 25 voci i18n.
+    tests/test_pad_layout_dead_ends.py (29). Contratti cambiati: test_single_component_prompt (pin fuori griglia:
+    ora domanda), test_unread_pad_positions (ora domanda), digest in test_review_round7.
+    I «14 rossi con il drawing_holes in corso» dell'agente A erano una versione INTERMEDIA di B: sul codice
+    finale combinato 393 verdi (12 file estrattore+fori).
+ REPLAY COMBINATO (coordinatore, scratchpad/fixA/accept_*.py, zero costi): T7N -> una domanda «lettura dedicata
+    5 pad», dopo la risposta 5 pad Ø1.3 e pinout senza C, rianalisi identica; TEL 08:04 -> footprint a 6 pad
+    giusto (colonne -8.9/6.34/8.88, righe ±5.08) senza domande, testimone reale. DB profili da rinfrescare e
+    committare (prompt e catalogo cambiati) al commit.
+ GENERALITY-AUDITOR (13/11): C1 alta (riprodotta) — _outlined_view_holds conta QUALSIASI rettangolo: una
+    cornice di pagina riporta il conteggio a tutta pagina (falso no_match di nuovo); C2 media — _change_pad_set
+    da' ai pad AGGIUNTI il foro della risposta principale con provenienza «read» (stima spacciata per misura);
+    C3 media — con numerazione per convenzione P3 puo' togliere pad senza le guardie (annulla audit H1); S1
+    _crossing_marks conta le interruzioni, non l'alternanza tratto-punto (linee tratteggiate e assi del corpo);
+    S2 la GUI dice «potrebbero non esistere» senza usare unquoted_pads; S3 rischio modali nei test. Rimandati
+    agli stessi agenti (B: C1+S1; A: C2+C3+unquoted_pads sempre presente; C: S2+S3). Suite completa FERMATA
+    (codice in modifica): da rilanciare dopo.
+ B FATTO C1+S1: _encloses_empty_rect (un rettangolo che contiene un altro rettangolo chiuso senza fori non e'
+    una vista: cornice di pagina esclusa), _is_chain (alternanza: un tratto interno lungo al piu' meta' dei
+    vicini, fattore 2 dichiarato euristico, ISO 128 >= 4), _Circle.marked + _refutes (i segni sugli incroci
+    confermano ma non smentiscono mai). 18 test witness_view, 162 + 250 vicini verdi; pagine reali invariate.
+    FRAGILE: pagine con soli segni d'incrocio non possono mai smentire; margine di un pad di _view_anchored;
+    scala TEL non verificata (_line_bands). Messaggio no_round_holes da riformulare (passato ad A).
+ A FATTO C2+C3: pad aggiunti con soli tipo/piazzola/forma «estimated», foro solo da un richiamo che li nomina
+    (added_holes), _hold_holeless_pads -> domanda del foro; con convenzione lost>0 solo se i fori CONFERMANO, il
+    testo nomina le posizioni perse; unquoted_pads sempre presente (anche vuoto) se la lettura dedicata e' girata;
+    no_round_holes riformulato. 37 test dead_ends; 1623 verdi. Divergenza accettata dall'agente: con
+    lead_diameter del componente il percorso a risposta salvata ricava il foro del pad aggiunto («estimated»),
+    apply_answers fresco chiede. C FATTO S2 (_unread_hole_sentences con unquoted_pads), S3 nessun test a rischio.
+ REPLAY FINALE (codice fermo): T7N domanda -> 5 pad Ø1.3, senza C, rianalisi identica. TEL: 08:04 e 08:03 ->
+    6 pad giusti senza domande (testimone reale); 08:02 (risposta principale sbagliata, righe a 13.7) -> domanda
+    a DUE opzioni anche se i fori confermano la dedicata (la principale ora e' too_few_circles, non no_match):
+    nessun blocco, ma la domanda non dice quale confermano i fori — DA PROPORRE all'utente.
+ SECONDA VERIFICA DI GENERALITA' (13/11): D1 alta — con numerazione per convenzione accettare la domanda
+    cancella tutti i fori stampati (vicolo cieco nuovo); D2 alta — percorso exchange_body scrive un pad passante
+    senza foro, nessuna domanda; D3 risposta salvata e fresca divergono (lead del componente); D4 regola sui nomi:
+    references (etichette di riferimento A, B, C) contate come pad -> il pad «C» inventato risulta «testimoniato»;
+    D5 _is_chain accetta un tratteggio uniforme con un granello nell'interruzione; D6 la guardia C3 si fida di
+    «confirmed» anche con fori in piu' nella vista o solo segni d'incrocio. Inoltre: domanda di rimozione a UNA
+    sola opzione (manca «tieni la disposizione principale»), soppressioni silenziose, wording «quotati» per pad
+    nominati solo dalle catene della principale. Suite FERMATA di nuovo. Giro 3 rimandato agli agenti
+    (B: D5 + LayoutCheck.marks_used/unassigned_refuting; A: D1-D4, D6, opzione «tieni», motivi espliciti,
+    self_quoted_pads; C: wording self_quoted_pads). B GIRO 3 FATTO: _is_chain con alternanza RIPETUTA (lungo-corto-lungo-corto-lungo) e tratti <= tratto
+    scartati; LayoutCheck.marks_used e .unassigned_refuting (default 0). CONSEGUENZA ONESTA: la disposizione vera
+    del TEL torna «unverifiable / too_few_circles» (non piu' confirmed: la colonna dei pin 1/16 mostra
+    l'alternanza una volta sola); non smentita -> col piano P3 diventa UNA domanda «usa la lettura dedicata
+    (6 pad)», non un blocco. T7N invariato. 26 test witness_view + 162 + 250 verdi. NON tarato per recuperare TEL.
+ A interrotto da errore API 403 durante il giro 3, ripreso con SendMessage. C GIRO 3 FATTO (self_quoted_pads:
+    «nominati solo dalle catene della risposta principale», 21 test, 186 verdi).
+ APPROVATO dall'utente (13/11, «ok, procedi», su mia raccomandazione): ogni opzione delle domande pad_layout
+    riporta l'esito dei fori (confermata / non verificabile / smentita; «solo segni sulle linee d'asse» se e'
+    cosi'), opzioni ordinate per esito, chiavi delle risposte stabili. Affidato ad A dopo il giro 3.
+ A interrotto UNA SECONDA VOLTA (403) quasi alla fine; il coordinatore ha fermato la sua corsa orfana
+    (fixA-run25) e verificato: sintassi ok, 332 test mirati verdi (dead_ends 45 test, witness_view, prompt,
+    unread_pad_positions, round7, body_axes, geometry_witnesses, pad_positions_by_drawn_holes,
+    pad_block_messages_gui, documentation, i18n). Replay: T7N domanda a 2 opzioni (dedicata 5 pad prima, «tieni
+    la principale») -> 5 pad Ø1.3 senza C; TEL 08:03/08:04 una domanda «lettura dedicata (6 pad)» con l'esito dei
+    fori nell'etichetta -> 6 pad giusti; TEL 08:02 due opzioni etichettate (entrambe non verificabili).
+    Rapporto finale di A sul giro 3 NON ricevuto: la terza verifica di generalita' controlla D1-D4, D6, «tieni»,
+    motivi espliciti, etichette. L'utente puo' provare il programma ora (analisi reali = costo).
+ PACCHETTO MSI ANNULLATO dall'utente (13/11 ~13:00, «lasciamo stare il pacchetto MSI»): restano solo commit,
+    push, merge in main e push dopo la suite verde.
+ AUTORIZZAZIONE UTENTE (13/11): «committa tutto pusha, poi mergia in main pusha e rifai pacchetto». Data
+    mentre l'agente A era ancora nel giro 4: si esegue DOPO la fine di A, replay, test mirati e suite completa
+    verde; se la suite e' rossa ci si ferma e si riferisce. Pacchetto = MSI locale (skill build-installer), NON
+    pubblicazione della release (non chiesta). B GIRO 4 FATTO (unassigned_refuting allargato di un passo,
+    _is_chain con filtro ceil(stroke)+1 e trattini centrati, campi None se non calcolati; 29 test witness_view).
+    C GIRO 4 FATTO (self_quoted: anche «verifica che il pad esista»).
+ A GIRO 3+4 FATTO (1484 verdi; etichette con esito fori; «tieni» ovunque; posizioni per convenzione). QUARTA
+    VERIFICA: H1 ALTA — lettura completa confermata dai fori + pad principali con fori diversi (bobina/contatti
+    di un rele') -> blocco SENZA domanda in _replace_by_confirmed_reading (vecchio, stessa classe); H2 ALTA —
+    convenzione + abbinamento ambiguo: il terminale del componente sostituisce in silenzio i fori stampati
+    (stima su dato stampato); H3 regione di unassigned_refuting non vede una fila lontana (DIP-8 a una fila);
+    M1 nomi di campo grezzi nei testi; M2 nota di rimozione con posizioni rinominate; M3 opzione «rimuovi tutti
+    i pad». Suite FERMATA (terza volta). GIRO 5: A (H1, H2, M1-M3, testo H3), B (H3 regione per asse).
+    Commit/merge/pacchetto autorizzati: solo dopo giro 5, test mirati, replay e suite verde.
+ GIRO 5 FATTO: A (H1 niente blocco senza domanda, pad gia' letti tengono il loro foro, solo i mancanti chiesti;
+    H2 drills_uniform su tutte le posizioni, mai terminale del componente sopra fori stampati; M1-M3; testo H3)
+    1485 verdi; B (_axis_spacing: regione per asse con la spaziatura piu' larga; una sola fila -> None) 30 test
+    witness_view verdi. Sonde del revisore rilanciate dal coordinatore: tutte col risultato atteso. Replay T7N/TEL
+    come prima. Limite noto (A): nota «nessun terminale dichiarato» imprecisa quando il terminale c'e' ma e'
+    trattenuto perche' i fori stampati differiscono. SUITE COMPLETA lanciata (.venv/claude-full-1113e).
+ PROSSIMO GIRO APPROVATO dall'utente (13/11, «ok» all'ordine): 1) riga «Modelli AI ... Modifica…» al posto della
+    tendina di sessione; 2) «modello unico» -> «modello predefinito»; 3) ESP32-S3-DEVKIT-NXRX (deepseek-flash
+    12:27): la risposta numera i lati 1-22 e 44-65 mentre il suo pinout dice 1-22 e 23-44, e i pin_names dei lati
+    contraddicono i nomi del pinout -> il programma ha scartato in silenzio le voci 23-43 (solo WARNING nel log
+    «Pinout entries without a footprint pad») e i nomi della fila di sotto possono essere sulla fila SBAGLIATA:
+    controllo di coerenza lati/pinout (numeri e nomi serigrafati), ritentativo correttivo, poi domanda, mai voci
+    scartate in silenzio; 4) «Verifica componente per KiCad» diceva «utilizzabile con riserve»: voci del pinout
+    scartate / nomi dei lati in contraddizione -> ERRORE, pin senza nome che il documento nomina -> AVVISO.
+    Punto 4 ALLARGATO e approvato («procedi»): «Verifica componente per KiCad» 4a confronto col pinout del
+    documento (voci scartate, nomi dei lati in contraddizione, pin senza nome che il documento nomina = ERRORI,
+    verdetto «NON USARE» con la causa in cima); 4b «utilizzabile con riserve» solo per verifiche finali (tipi
+    elettrici, ERC/DRC); 4c avvisi elencati raggruppati per importanza, non solo contati («68 warnings»);
+    4d un rimedio per problema quando esiste (es. «Rileggi solo il pinout»).
+    Punto 5 APPROVATO («ok aggiungi opzione»): nome del pin = solo nome principale (testo prima della
+    parentesi, es. «GPIO4»), le funzioni tra parentesi («ADC1_3, TOUCH4, RTC») scritte come funzioni
+    ALTERNATIVE del pin KiCad (alternate nel .kicad_sym); opzione nella scheda «Simbolo elettrico»: «Nomi dei
+    pin: solo nome principale (funzioni alternative in KiCad) / nome completo», predefinito «solo nome
+    principale», ricordata; regola strutturale (nome + elenco tra parentesi), mai su nomi di marche/sigle.
+    POSIZIONE CORRETTA dall'utente (screenshot, «forse una spunta qui»): la spunta va nella finestra «Pinout
+    <componente>» (tabella Pin/Funzione, aperta dall'anteprima footprint) e vale per simbolo E etichette dei pad
+    nel footprint; la tabella continua a mostrare il testo completo.
+    Punto 6 APPROVATO («ok»): sotto il simbolo, gli avvisi «Pin N: nome «…» scritto come «…_…», come farebbe
+    KiCad al caricamento (gli spazi diventano «_»)» ripetuti per ogni pin -> UNA riga riassuntiva (quanti pin,
+    quali numeri, un esempio); il dettaglio per pin resta nel registro. Con «solo nome principale» quasi sparisce.
+    PIANO dei punti 3-4 (agente Plan, sola lettura, durante la suite): docs/pinout-coherence-plan.md —
+    modulo nuovo pinout_coherence.py, domanda side_numbering, Check con category/importance/remedy, verdetto
+    per categoria. DECISO dall'utente: verdetto NUOVO «DA RIVEDERE PRIMA DELL'USO». Da dire ancora: una
+    chiamata pagata in più quando la prima risposta e' incoerente (gia' detto all'utente, nessuna obiezione).
+ (vecchia nota) PROSSIMO GIRO (dopo commit/merge/pacchetto), DECISO dall'utente 13/11 («io la rimuoverei oppure mettiamo un
+    link alla modale che definisce i modelli»): in «Strumenti AI» di TUTTE le tipologie togliere la tendina
+    «Modello AI (questa sessione)» e mettere una riga di sola lettura col modello predefinito (e quanti passi
+    hanno un modello proprio) + link/pulsante che apre Configurazione → «Modello AI...»; restano rilevatori
+    locali (foto, YOLO, rete SMD, impostazioni YOLO) e la riga del credito. Insieme: «modello unico» ->
+    «modello predefinito» in tutto il catalogo e nelle guide (domanda di inizio sessione: l'utente aveva
+    proposto «modello default», io «predefinito»; NON ancora confermato quale).
+ TERZA VERIFICA DI GENERALITA' (13/11): D2, D3, D4, opzione «tieni» fuori convenzione, etichette e chiavi
+    stabili PULITI. Nuovi: 1 ALTA — con numerazione per convenzione, pad dedicati con numeri che coincidono con
+    quelli inventati prendono il foro del pin con lo stesso NUMERO (altra colonna) come «read», in silenzio;
+    2 media — rinumerazione completa 8->8 ancora bloccata senza domanda (_replace_by_confirmed_reading);
+    3 media — rimozioni per convenzione a una sola opzione (manca «tieni»); 4 unassigned_refuting non vede una
+    riga/colonna di testa persa (inviluppo dei soli pad abbinati); 5 _is_chain: tratteggio con due incroci
+    consecutivi passa; minori (ordine no_match_unobservable, codici interni nei testi, motivi mancanti, campi 0
+    invece di None). Suite FERMATA di nuovo. GIRO 4 rimandato ad A (1-3 + minori), B (4, 5, None), C (rimedio
+    «verifica che il pad esista» anche per self_quoted).
+ (era) NON in scope, da chiedere all'utente: etichettare/ordinare le
+    opzioni della domanda 08:02 TEL con l'esito dei fori.
+ Verifica: test positivo+negativo per ogni regola, replay offline dei due progetti (TEL -> domanda o footprint
+ a 6 pad; T7NS5D4-12 -> domanda «togli C» e footprint a 5 pad), generality-auditor, suite completa. Il giro pannello/«~» (1-5) resta da verificare (revisione + suite) e committare.
+In sospeso, domanda separata: «modello unico» -> «modello predefinito» (proposta) o «modello default» (utente).
+Non committare senza OK.
+
 ## STATO 13/11/2026 — COMMITTATO su FOOTPRINT-ADVANCE come `b0e94fa` e pushato (utente: «Ok»), NON mergiato in main. Suite wb23: A 8397/9/19, B 5434/4 + 1 rosso corretto e rilanciato da solo.
 
 ## (era IN CORSO 12/11/2026 notte) PC appena installato (utente: «cosa succede se dopo il setup non trovo kicad, freecad o una key? devi simularlo», poi «Ok» alla proposta)

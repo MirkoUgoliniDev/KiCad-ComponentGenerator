@@ -149,6 +149,13 @@ def test_the_palette_is_a_vertical_panel_with_collapsible_groups(qapp):
         # (was <= 160 for the palette alone).
         assert tab.palette.width() == PANEL_COLUMN_WIDTH == 200, 'narrow column beside the canvas'
         first = groups[0][0]
+        # CONTRACT CHANGED 2026-11-13 (user: «anche qua tutti collassati di
+        # default», here too all collapsed by default): every group, tools
+        # included, starts closed (was open).
+        keys = list(tab.palette._groups)
+        assert {'tools', 'drawing', first} <= set(keys)
+        assert not any(tab.palette.group_is_open(key) for key in keys)
+        tab.palette.set_group_open(first, True)
         assert tab.palette.group_is_open(first)
         buttons_of_first = [action for action in tab.palette_actions()
                             if action.data() in {glyph.key for glyph in groups[0][2]}]
@@ -156,9 +163,10 @@ def test_the_palette_is_a_vertical_panel_with_collapsible_groups(qapp):
         tab.palette.set_group_open(first, False)
         assert not tab.palette.group_is_open(first)
         tab.palette.set_group_open('nope', True)      # unknown key: ignored
+        tab.palette.set_group_open(groups[1][0], True)
         tab.retranslate()
         assert not tab.palette.group_is_open(first), 'a rebuild keeps the open/closed state'
-        assert tab.palette.group_is_open(groups[1][0])
+        assert tab.palette.group_is_open(groups[1][0]), 'an opened group stays open too'
     finally:
         tab.deleteLater()
 
@@ -270,7 +278,7 @@ def test_the_palette_sits_on_the_right_of_the_canvas(qapp):
 def test_the_wire_tool_lives_in_the_palette_too(qapp):
     tab = _tab()
     try:
-        assert 'tools' in tab.palette._groups and tab.palette.group_is_open('tools')
+        assert 'tools' in tab.palette._groups
         wire = tab.palette._tool_actions['wire']
         assert wire.data() == 'wire' and not wire.isChecked()
         wire.trigger()

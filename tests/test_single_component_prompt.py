@@ -476,7 +476,16 @@ def test_end_to_end_a_correct_grid_that_leaves_out_an_off_grid_pin_is_blocked(
         offline, monkeypatch, tmp_path):
     """Generality audit D1: the four grid pins are right and numbered right,
     but the drawing has a fifth pin off the grid. Pads the main answer has
-    cannot confirm a terminal it left out."""
+    cannot confirm a terminal it left out.
+
+    CONTRACT CHANGED 2026-11-13 (plan P3, rule change approved by the user:
+    «unconfirmed asks instead of blocking»): the main answer is a strict
+    subset of a complete, coherent dedicated reading that the drawn holes do
+    not refute (a blank page: not checkable), so the 5-pad layout is OFFERED
+    in one question instead of a hard block. It is still never adopted: the
+    four grid pads stay until the user answers, and the pad left out is
+    named in the question.
+    """
     main = _grid_answer(2, 2, 12.2, 12.0)
     second = {"drawing_unit": "mm", "contacts_view": "bottom", "chains": [
         {"axis": "x", "stops": ["5", "1,2", "3,4"], "values": [2.0, 12.2]},
@@ -485,7 +494,29 @@ def test_end_to_end_a_correct_grid_that_leaves_out_an_off_grid_pin_is_blocked(
     monkeypatch.setattr(ext, "call_tool", call)
     params = ext.extract_pin_header_params([_drawing(tmp_path)], component_family="single_tht",
                                            document_roles={"quote.png": ["pinout"]})
-    assert params.pin_map_conflict and "non ha (5)" in params.pin_map_conflict
+    layout = [q for q in params.questions if q["field"] == "pad_layout"]
+    assert len(layout) == 1 and "non ha (5)" in layout[0]["text"]
+    payload = next(iter(params.candidates[layout[0]["key"]].values()))
+    # CONTRACT CHANGED 2026-11-13 (third re-audit, item 1): the grid's
+    # numbers are a convention, so EVERY grid pad is replaced and every read
+    # pad takes what its matched POSITION carried -- here 1-4 on the four
+    # grid positions -- never what a grid pad with the same invented number
+    # carried; pad 5 has no position and takes nothing from the grid.
+    assert payload["add"] == ["1", "2", "3", "4", "5"]
+    assert payload["remove"] == ["1", "2", "3", "4"]
+    assert set(payload["inherit"]) == {"1", "2", "3", "4"}
+    assert sorted(p["number"] for p in params.package_geometry["pins"]) == ["1", "2", "3", "4"]
+    # Answered: the fifth pad never borrows the grid pads' hole (generality
+    # audit 2026-11-13, C2). CONTRACT CHANGED again the same day (audit D3):
+    # the one pad rule runs on it on both answer paths, and here the holed
+    # pads share one drill, so the part-level terminal (0.5 mm, declared
+    # without provenance) stands for pad 5 as it does for the others: its
+    # hole is DERIVED from that terminal and marked estimated, never «read».
+    applied = ext.apply_answers(params, {layout[0]["key"]: layout[0]["options"][0]["value"]})
+    pins = {p["number"]: p for p in applied.package_geometry["pins"]}
+    assert sorted(pins) == ["1", "2", "3", "4", "5"]
+    assert pins["5"]["drill_mm"] == pytest.approx(pins["1"]["drill_mm"])
+    assert pins["5"]["sources"]["drill_mm"] == "estimated"
 
 
 def test_end_to_end_a_grid_the_dedicated_reading_confirms_is_generated(offline, monkeypatch,

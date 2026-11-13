@@ -577,18 +577,18 @@ class PalettePanel(QWidget):
         from ..generators.symbol_glyphs import Glyph, Primitive
         wire_glyph = Glyph('wire', 'Filo', (Primitive('polyline', ((0, 0), (2.54, 0), (2.54, 2.54), (5.08, 2.54)),
                                                       0.0, 'none', 0.254),), (), 'tool')
-        self._add_section('tools', 'Collegamenti', [wire_glyph], open_state.get('tools', True), tool=True)
+        self._add_section('tools', 'Collegamenti', [wire_glyph], open_state.get('tools', False), tool=True)
         # Free drawing (user, 2026-10-12: «tracciare disegni, linee curve»,
         # draw drawings, curved lines): the shared tool grid with the Select
         # arrow first (plan docs/footprint-drawing-kicad-plan.md, A1).
         from ..generators.symbol_glyphs import shape_tool_glyphs
-        self._add_tool_grid('drawing', 'Disegno', shape_tool_glyphs(), open_state.get('drawing', True))
+        self._add_tool_grid('drawing', 'Disegno', shape_tool_glyphs(), open_state.get('drawing', False))
         if active_tool:
             self.tool_grid.set_active(active_tool)
         elif outside:
             self.tool_grid.set_active(OUTSIDE_KEY)
         for key, label, glyphs in grouped_catalogue():
-            self._add_section(key, label, glyphs, open_state.get(key, True))
+            self._add_section(key, label, glyphs, open_state.get(key, False))
         self._content_layout.addStretch(1)
 
     def _new_section(self, key, label, is_open):

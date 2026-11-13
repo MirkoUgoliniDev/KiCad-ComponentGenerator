@@ -165,8 +165,11 @@ def test_an_unread_hole_is_never_sent_to_a_reread(window, monkeypatch, tmp_path)
     # hole the drawing does not print, not because the entry is greyed out.
     assert window._reread_block_reason("pad_layout") == ""
     block = window._unread_pads_block()
-    assert "i fori dei pad 5" in block and REMEDY not in block
-    assert "un documento che quoti i fori o i terminali" in block
+    # CONTRACT CHANGED 2026-11-13: pads 1-4 carry a hole, so the wording is
+    # the one of a hole missing beside read holes (the remedy is still a
+    # document that dimensions the hole, never the re-read).
+    assert "il foro dei pad 5" in block and REMEDY not in block
+    assert "un documento che ne quoti il foro o il terminale" in block
 
 
 # ── F2-4: a question is answered or open, never neither ────────────────────

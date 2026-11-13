@@ -1484,6 +1484,35 @@ def _layer_swatch(color: str) -> QIcon:
     return QIcon(pixmap)
 
 
+class _ResizeWatcher(QObject):
+    """@brief Event filter that calls back whenever its watched widget is resized.
+
+    @note Used by the footprint «Controlli» list: its rows are fitted to
+        their wrapped text at the viewport's real width, known only once the
+        collapsible group showing it is open.
+    """
+
+    def __init__(self, callback, parent: QObject | None = None):
+        """@brief Keep the callback to run after a resize.
+
+        @param callback Called with no argument after each Resize event.
+        @param parent Qt owner of the filter (the watched widget).
+        """
+        super().__init__(parent)
+        self._callback = callback
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802 - Qt override
+        """@brief Run the callback after a Resize; never consume the event.
+
+        @param watched The widget the filter is installed on.
+        @param event The event being delivered.
+        @return Always False, so the widget handles the event as usual.
+        """
+        if event.type() == QEvent.Type.Resize:
+            self._callback()
+        return False
+
+
 class _ClickableLabel(QLabel):
     """@brief A label that reports a left click: the name of a drawable layer in the «Layer» group.
 
@@ -1974,11 +2003,36 @@ class MainWindow(QMainWindow):
         #: a hole with no room at the pitch, overlapping copper): the third
         #: wording of the block. Saved with the project.
         self._unread_pad_unfit: list[str] | None = None
-        #: The extractor's own already-translated account of those pads
-        #: (`pin_map_conflict` of the extraction that dropped them), shown
-        #: under the third wording. Session only: never saved, because it is
-        #: text in the language of the moment, not data.
-        self._unread_pad_unfit_detail: str | None = None
+        #: True when, beside the pads of `_unread_pad_holes`, other holed
+        #: pads of the same dropped geometry DO carry a hole (read or derived
+        #: from their terminal): the drawing then does give holes, and the
+        #: block must not say that none is printed. Saved with the project.
+        self._unread_pad_holes_elsewhere: bool = False
+        #: The dropped pads that no independent witness names (the
+        #: extractor's `unread_pad_geometry["unquoted_pads"]`: no chain stop,
+        #: no hole or terminal callout, no reference of the dedicated pad
+        #: reading). None when the extraction did not say (no usable
+        #: dedicated reading): the block then names both possibilities. A
+        #: list, possibly empty, when it did: a pad with an unread hole is
+        #: «possibly non-existent» only when listed here, otherwise it is a
+        #: quoted pad whose hole alone is not quoted. Saved with the project.
+        self._unread_pad_unquoted: list[str] | None = None
+        #: The dropped pads named ONLY by the main answer's own dimension
+        #: chains (the extractor's `unread_pad_geometry["self_quoted_pads"]`):
+        #: no independent witness, yet not unnamed either. None when the
+        #: extraction did not say; then a pad absent from
+        #: `_unread_pad_unquoted` is worded as quoted, as before the key
+        #: existed. A list, possibly empty, otherwise. Saved with the project.
+        self._unread_pad_self_quoted: list[str] | None = None
+        #: The extractor's own already-translated account of the dropped
+        #: pads (`pin_map_conflict` of the extraction that dropped them):
+        #: the CAUSE (two readings that disagree, a layout the drawn holes
+        #: contradict, values in conflict), shown under the block whatever
+        #: the reason the pads were dropped (2026-11-13: the hole sentence
+        #: alone hid that the positions of every pad were unconfirmed).
+        #: Session only: never saved, because it is text in the language of
+        #: the moment, not data.
+        self._unread_pad_detail: str | None = None
         #: Timestamp (same format as the evidence files) of the last
         #: extraction started: the saved proposals are valid only if they
         #: came from that one: the project's photo-cache folder also keeps the
@@ -4742,6 +4796,15 @@ class MainWindow(QMainWindow):
         single_tht_layout.addWidget(self.spin_single_tht_pad)
         single_tht_layout.addWidget(QLabel("Foro Ø:"))
         single_tht_layout.addWidget(self.spin_single_tht_drill)
+        # Shown only while the explicit pads are the footprint (2026-11-13):
+        # the two diameters above are then not used, and say so.
+        self.label_single_tht_pads_unused = QLabel(
+            "Non usati: il footprint sono i pad letti dal disegno.")
+        self.label_single_tht_pads_unused.setToolTip(
+            "Questo componente ha pad espliciti, ognuno con il suo foro e la sua piazzola: "
+            "Pad Ø e Foro Ø valgono solo per un componente a griglia, e qui non sono usati.")
+        self.label_single_tht_pads_unused.hide()
+        single_tht_layout.addWidget(self.label_single_tht_pads_unused)
         single_tht_layout.addStretch(1)
         self.btn_regenerate_single_tht = QPushButton("Rigenera footprint")
         self.btn_regenerate_single_tht.setToolTip(
@@ -5555,15 +5618,45 @@ class MainWindow(QMainWindow):
             self._ai_form.setRowVisible(self._row_pcb_thickness, board is True)
         self._refresh_pcb_thickness_row()
 
+    def _explicit_pads_are_footprint(self) -> bool:
+        """@brief Whether the footprint is made of explicit pads, not of the matrix pad/drill.
+
+        @return True when a validated explicit package is the footprint
+            (`package_geometry`) or the last extraction dropped explicit pads
+            that were the footprint (`_unread_pads`): in both cases no pad
+            takes its diameter or hole from the matrix fields.
+        """
+        return (getattr(self, "package_geometry", None) is not None
+                or bool(getattr(self, "_unread_pads", None)))
+
     def _sync_single_tht_pad_controls(self) -> None:
-        """Mirror extracted/current THT land sizes without firing edit handlers."""
+        """@brief Mirror the matrix land sizes in the «Piazzole» box, or show them unused.
+
+        @note Signals are blocked: showing a value is not the user typing it.
+        @note 2026-11-13: with explicit pads as the footprint
+            (`_explicit_pads_are_footprint`) the two spin boxes are disabled
+            and show «—» instead of a number, with a line that says why. An
+            extraction with explicit pads leaves `pad_diameter_mm`/`drill_mm`
+            None and the matrix fields keep what they held, which may be a
+            previous analysis' values: shown as current, they read as this
+            component's hole. The fields themselves are NOT changed (a later
+            grid analysis or a hand edit still writes them), only their view.
+        """
         if not hasattr(self, "spin_single_tht_pad"):
             return
+        unused = self._explicit_pads_are_footprint()
         for spin, field in ((self.spin_single_tht_pad, self.field_pad),
                             (self.spin_single_tht_drill, self.field_drill)):
             blocked = spin.blockSignals(True)
-            spin.setValue(field.value())
+            # The special text shows only at the minimum: the spin is set
+            # there while unused, back to the field's value otherwise.
+            spin.setSpecialValueText("—" if unused else "")
+            spin.setValue(spin.minimum() if unused else field.value())
+            spin.setEnabled(not unused)
             spin.blockSignals(blocked)
+        label = getattr(self, "label_single_tht_pads_unused", None)
+        if label is not None:
+            label.setVisible(unused)
 
     def _set_single_tht_footprint_value(self, field_name: str, value: float) -> None:
         """@brief Apply a reviewed THT pad/drill value to the shared footprint parameters.
@@ -9422,6 +9515,18 @@ class MainWindow(QMainWindow):
             state["unread_pads"] = list(self._unread_pads)
             if getattr(self, "_unread_pad_holes", None):
                 state["unread_pad_holes"] = list(self._unread_pad_holes)
+                if getattr(self, "_unread_pad_holes_elsewhere", False):
+                    # Data, not prose: a reopened project words the hole
+                    # sentence the same way (never «no printed hole» when
+                    # other pads of the part had one).
+                    state["unread_pad_holes_elsewhere"] = True
+            if getattr(self, "_unread_pad_unquoted", None) is not None:
+                # Saved even when empty: «every dropped pad is quoted» is
+                # information, its absence is not.
+                state["unread_pad_unquoted"] = list(self._unread_pad_unquoted)
+            if getattr(self, "_unread_pad_self_quoted", None) is not None:
+                # Same rule: an empty list is information.
+                state["unread_pad_self_quoted"] = list(self._unread_pad_self_quoted)
             if getattr(self, "_unread_pad_unfit", None):
                 # The third reason, saved exactly as the holes are.
                 state["unread_pad_unfit"] = list(self._unread_pad_unfit)
@@ -9627,7 +9732,18 @@ class MainWindow(QMainWindow):
         unfit = self._valid_unread_pads(state.get("unread_pad_unfit")) or ()
         self._unread_pad_unfit = [pad for pad in unfit if pad in (self._unread_pads or ())
                                   and pad not in (self._unread_pad_holes or ())] or None
-        self._unread_pad_unfit_detail = None
+        # Whether other pads of the part had a hole: only meaningful beside
+        # unread holes, and a strict boolean (a hand-edited file decides nothing).
+        self._unread_pad_holes_elsewhere = bool(
+            self._unread_pad_holes and state.get("unread_pad_holes_elsewhere") is True)
+        # Same rule as the extractor's key: a list (possibly empty) of unread
+        # pads, None when absent or malformed (nothing can then be said).
+        self._unread_pad_unquoted = self._unquoted_unread_pads(
+            {"unquoted_pads": state.get("unread_pad_unquoted")}, self._unread_pads)
+        self._unread_pad_self_quoted = self._unquoted_unread_pads(
+            {"self_quoted_pads": state.get("unread_pad_self_quoted")}, self._unread_pads,
+            "self_quoted_pads")
+        self._unread_pad_detail = None
         saved_main = state.get("main_answer")
         self._stored_main_answer = dict(saved_main) if isinstance(saved_main, dict) and saved_main else None
         saved_analysis = state.get("analysis_pin_names")
@@ -9738,6 +9854,9 @@ class MainWindow(QMainWindow):
             symbol_tab.clear_measures()
         self._refresh_type_effect()
         self.package_geometry = package_geometry
+        # After the package and the unread pads: the «Piazzole» fields say
+        # whether they are this project's footprint.
+        self._sync_single_tht_pad_controls()
         # After the package: the designator proposal reads its family.
         self._restore_metadata_state(state.get("metadata"))
         self._set_regen_busy(False)
@@ -9903,6 +10022,8 @@ class MainWindow(QMainWindow):
         # The «Controlli» list of the closed project must not survive a
         # redraw that fails before reaching it.
         self._fp_checks_pending = None
+        # The next project's first findings are a new passage: «Controlli» opens.
+        self._fp_checks_had_findings = False
         timer = getattr(self, "_fp_checks_timer", None)
         if timer is not None:
             timer.stop()
@@ -9923,7 +10044,10 @@ class MainWindow(QMainWindow):
         self._unread_pads = None
         self._unread_pad_holes = None
         self._unread_pad_unfit = None
-        self._unread_pad_unfit_detail = None
+        self._unread_pad_holes_elsewhere = False
+        self._unread_pad_unquoted = None
+        self._unread_pad_self_quoted = None
+        self._unread_pad_detail = None
         self._photo_png = None
         self._photo_body_fields = None
         self._photo_overlay_png = None
@@ -11772,9 +11896,15 @@ class MainWindow(QMainWindow):
         self._unread_pads = self._dropped_footprint_pads(updated)
         self._unread_pad_holes = self._pads_with_unread_holes(updated, self._unread_pads)
         self._unread_pad_unfit = self._pads_with_unfit_values(updated, self._unread_pads)
-        detail = getattr(updated, "pin_map_conflict", None)
-        self._unread_pad_unfit_detail = (detail.strip() if self._unread_pad_unfit
-                                         and isinstance(detail, str) and detail.strip() else None)
+        self._unread_pad_holes_elsewhere = self._holes_read_elsewhere(
+            updated, self._unread_pad_holes)
+        self._unread_pad_unquoted = self._unquoted_unread_pads(
+            getattr(updated, "unread_pad_geometry", None), self._unread_pads)
+        self._unread_pad_self_quoted = self._unquoted_unread_pads(
+            getattr(updated, "unread_pad_geometry", None), self._unread_pads, "self_quoted_pads")
+        self._unread_pad_detail = self._unread_pads_account(updated, self._unread_pads)
+        # The «Piazzole» fields follow what is now the footprint.
+        self._sync_single_tht_pad_controls()
         label = next((o["label"] for o in question["options"] if o["value"] == answer), str(answer))
         self._append_log(tx("Risposta dell'utente: {text} -> {label}",
                             text=question["text"], label=label))
@@ -12590,12 +12720,17 @@ class MainWindow(QMainWindow):
             self._unread_pads = self._dropped_footprint_pads(params)
             self._unread_pad_holes = self._pads_with_unread_holes(params, self._unread_pads)
             self._unread_pad_unfit = self._pads_with_unfit_values(params, self._unread_pads)
+            self._unread_pad_holes_elsewhere = self._holes_read_elsewhere(
+                params, self._unread_pad_holes)
+            self._unread_pad_unquoted = self._unquoted_unread_pads(
+                getattr(params, "unread_pad_geometry", None), self._unread_pads)
+            self._unread_pad_self_quoted = self._unquoted_unread_pads(
+                getattr(params, "unread_pad_geometry", None), self._unread_pads,
+                "self_quoted_pads")
             # The extractor's account of THIS result, kept beside the pads it
             # is about, so that the block never reads it from an extraction
             # object that may be the previous one.
-            detail = getattr(params, "pin_map_conflict", None)
-            self._unread_pad_unfit_detail = (detail.strip() if self._unread_pad_unfit
-                                             and isinstance(detail, str) and detail.strip() else None)
+            self._unread_pad_detail = self._unread_pads_account(params, self._unread_pads)
             log_unread_pads = bool(self._unread_pads)
         validated_package_geometry = None
         if self._selected_family() == "single_smd" and params.package_geometry:
@@ -14169,6 +14304,16 @@ class MainWindow(QMainWindow):
             "URL o percorso del documento, senza spazi: proprietà Datasheet di "
             "simbolo e footprint.")
         self.field_datasheet.setPlaceholderText(DATASHEET_HINT)
+        # «~» inside the field (user, 2026-11-13: «metti un pulsante per
+        # assegnare il valore tilde», put a button to assign the tilde value):
+        # KiCad's «no datasheet», which the placeholder already names, in one
+        # click; placed like the eye of the key field in «Account AI».
+        self.action_datasheet_none = self.field_datasheet.addAction(
+            QIcon(str(Path(__file__).resolve().parent / "assets" / "datasheet-none.svg")),
+            QLineEdit.ActionPosition.TrailingPosition)
+        self.action_datasheet_none.triggered.connect(self._set_datasheet_none)
+        self.field_datasheet.textChanged.connect(lambda _text: self._refresh_datasheet_none_action())
+        self._refresh_datasheet_none_action()
         self.field_datasheet.textChanged.connect(lambda _text: self._refresh_klc_findings())
         form.addRow("Datasheet (URL o file):", self._metadata_field_row(self.field_datasheet, "datasheet"))
         self.field_fp_filters = QLineEdit()
@@ -14733,6 +14878,33 @@ class MainWindow(QMainWindow):
             severity, messages = grouped.get(key, ("", []))
             self._set_field_finding(key, field, severity, messages)
         self.field_datasheet.setPlaceholderText(self.i18n.text(DATASHEET_HINT))
+        self._refresh_datasheet_none_action()
+
+    #: Tooltip of the «~» action of the Datasheet field (Italian source).
+    DATASHEET_NONE_TIP = "Nessun datasheet: scrive ~, il valore che KiCad usa quando il documento non c'è."
+
+    def _set_datasheet_none(self) -> None:
+        """@brief Write «~» (KiCad's «no datasheet») in the Datasheet field, as typed.
+
+        @note Select-all + `insert` rather than `setText`: a URL replaced by a
+            mistaken click comes back with Ctrl+Z, since `setText` would wipe
+            the field's undo history. `textChanged` follows, so the KLC
+            findings, the border and the «not applied yet» state behave
+            exactly as for typing; the value reaches the files only with
+            «Applica ai file», as any edit.
+        """
+        field = self.field_datasheet
+        field.setFocus(Qt.FocusReason.OtherFocusReason)
+        field.selectAll()
+        field.insert("~")
+
+    def _refresh_datasheet_none_action(self) -> None:
+        """@brief Tooltip in the current language; off while the field already holds «~»."""
+        action = getattr(self, "action_datasheet_none", None)
+        if action is None:
+            return
+        action.setToolTip(self.i18n.text(self.DATASHEET_NONE_TIP))
+        action.setEnabled(self.field_datasheet.text().strip() != "~")
 
     def _set_field_finding(self, key: str, field, severity: str, messages) -> None:
         """@brief Border one field with `severity` and put the reasons in its tooltip.
@@ -17096,6 +17268,105 @@ class MainWindow(QMainWindow):
         return [pad for pad in unread if pad in unfit] or None
 
     @staticmethod
+    def _holes_read_elsewhere(params, holes) -> bool:
+        """@brief Whether other holed pads of the dropped geometry carry a hole.
+
+        @param params The extraction result whose `unread_pad_geometry`
+            holds the dropped pads as the extractor kept them.
+        @param holes The pads whose hole was not read (`_pads_with_unread_holes`).
+        @return True when at least one holed pad («thru_hole»,
+            «np_thru_hole») NOT among `holes` has a `drill_mm`: the documents
+            did give holes (printed or derived from a terminal), so «no
+            printed hole» is not a fact about the drawing, only about the
+            pads in `holes`. False without unread holes or geometry.
+        @note Structural, read from the dropped geometry; it does not tell
+            whether the pads without a hole exist at all (a pad read from a
+            photo marking, for one): the extractor does not expose that, so
+            the block words both possibilities.
+        """
+        geometry = getattr(params, "unread_pad_geometry", None)
+        pins = geometry.get("pins") if isinstance(geometry, dict) else None
+        if not holes or not isinstance(pins, (list, tuple)):
+            return False
+        lacking = set(holes)
+        for pin in pins:
+            if not isinstance(pin, dict):
+                continue
+            number = str(pin.get("number") if pin.get("number") is not None else "").strip()
+            if (number and number not in lacking and pin.get("drill_mm") is not None
+                    and pin.get("pad_type", "smd") in ("thru_hole", "np_thru_hole")):
+                return True
+        return False
+
+    @staticmethod
+    def _unquoted_unread_pads(geometry, unread, key: str = "unquoted_pads") -> list[str] | None:
+        """@brief The dropped pads a witness list of the extraction names, None when it did not say.
+
+        @param geometry The extraction's `unread_pad_geometry` (or a mapping
+            with the same key, as saved with a project).
+        @param unread The pads the extraction dropped.
+        @param key The list to read: «unquoted_pads» (pads no independent
+            witness names) or «self_quoted_pads» (pads named only by the
+            main answer's own dimension chains).
+        @return The numbers of the list that are among `unread`, in its
+            order -- possibly an empty list, which is information («none
+            of the dropped pads is in this case»). None when there are no
+            unread pads or the key is absent or malformed: no usable
+            dedicated reading, so nothing can be said.
+        """
+        raw = geometry.get(key) if isinstance(geometry, dict) else None
+        if not unread or not isinstance(raw, (list, tuple)):
+            return None
+        if not all(isinstance(pad, (str, int)) and not isinstance(pad, bool) for pad in raw):
+            return None
+        wanted = set(unread)
+        unquoted = []
+        for pad in raw:
+            number = str(pad).strip()
+            if number in wanted and number not in unquoted:
+                unquoted.append(number)
+        return unquoted
+
+    @staticmethod
+    def _unread_pads_account(params, unread) -> str | None:
+        """@brief The extractor's account of why the pads were dropped, None without one.
+
+        @param params The extraction result.
+        @param unread The pads it dropped (`_dropped_footprint_pads`).
+        @return `params.pin_map_conflict` stripped, when pads were dropped
+            and the text is not empty; None otherwise.
+        @note Kept for every reason a pad is dropped, not only for unfit
+            values (2026-11-13): the extractor writes there the cause -- two
+            readings of the positions that disagree, the layout the drawn
+            holes confirm or contradict -- which the window's own sentences
+            (built from pad numbers only) cannot say.
+        """
+        detail = getattr(params, "pin_map_conflict", None)
+        if not unread or not isinstance(detail, str) or not detail.strip():
+            return None
+        return detail.strip()
+
+    def _pad_layout_question_remedy(self) -> str:
+        """@brief The sentence naming the open pad-layout question, '' when it cannot be answered now.
+
+        @return Translated sentence when a pad-layout question is open AND
+            the settled extraction of this session can still apply its
+            answer (`_extraction_holds_question`): «Rigenera footprint» and
+            «Applica ai file» ask it before the unread-pad block
+            (`_generate`). '' otherwise: in a reopened project the answer
+            cannot be applied, and naming the question there would send the
+            user to a remedy that refuses (rule of `_unread_pads_block`).
+        """
+        question = self._stored_pad_layout_question()
+        if question is None:
+            return ""
+        if not self._extraction_holds_question(self._settled_extraction(), question.get("key")):
+            return ""
+        return self.i18n.text(
+            "Una domanda sulle posizioni dei pad è rimasta aperta: «Rigenera footprint» o "
+            "«Applica ai file» la ripropone prima di scrivere il footprint.")
+
+    @staticmethod
     def _valid_unread_pads(raw) -> list[str] | None:
         """@brief The saved `unread_pads` of a project, None when absent or malformed.
 
@@ -17108,6 +17379,98 @@ class MainWindow(QMainWindow):
             return None
         pads = [pad.strip() for pad in raw if isinstance(pad, str) and pad.strip()]
         return pads or None
+
+    def _unread_hole_sentences(self, holes) -> tuple[list[str], list[str]]:
+        """@brief What the block says about pads whose hole was not read, and their remedies.
+
+        @param holes The unread pads whose position was read but whose hole
+            was not (`_unread_pad_holes`, already filtered to the unread pads).
+        @return (statements, remedies), translated; both empty without holes.
+        @note Three cases (generality audit S2, 2026-11-13), from data only:
+            - the extraction said which dropped pads no independent witness
+              names (`_unread_pad_unquoted` is a list): a listed pad may not
+              exist at all (read from a photo marking, for one); a pad that
+              only the main answer's own chains name (`_unread_pad_self_quoted`)
+              is said to be named only by them, never «quoted in the
+              drawing»; any other pad IS quoted, and only its hole is not --
+              never called possibly non-existent;
+            - it did not say (None) but other pads of the part have a hole
+              (`_unread_pad_holes_elsewhere`): both possibilities are named;
+            - neither: no pad of the part has a hole, the wording of
+              «no printed hole and no terminal».
+            No re-read is offered for a hole (F2-3): reading the same
+            drawing again cannot find a hole it does not print. Typing the
+            hole in the pad dialog is not offered either: the pads were
+            dropped, so no pad is drawn to open the dialog on. An open
+            question about these pads is named by `_pad_layout_question_remedy`.
+        """
+        if not holes:
+            return [], []
+        statements, remedies = [], []
+        unquoted_info = getattr(self, "_unread_pad_unquoted", None)
+        if unquoted_info is not None:
+            ghosts = [pad for pad in holes if pad in unquoted_info]
+            # Named only by the main answer's own chains (re-audit, round 3):
+            # no independent witness, so never «quotati nel disegno». Without
+            # the extractor's list, today's split stands (absent = unknown).
+            self_named = getattr(self, "_unread_pad_self_quoted", None) or ()
+            own_chains = [pad for pad in holes if pad in self_named and pad not in ghosts]
+            quoted = [pad for pad in holes if pad not in ghosts and pad not in own_chains]
+            if ghosts:
+                statements.append(self.i18n.text(
+                    "Nessun footprint: i pad {pads} non compaiono in nessuna quota del disegno né "
+                    "in un'altra lettura indipendente, e il loro foro non è stato letto: potrebbero "
+                    "non esistere sul componente. I campi della matrice non sono il footprint di "
+                    "questo componente.").format(pads=", ".join(ghosts)))
+                remedies.append(self.i18n.text(
+                    "Verifica sul disegno se i pad {pads} esistono davvero: se esistono, ripeti "
+                    "l'analisi aggiungendo un documento che ne quoti il foro o il terminale.").format(
+                    pads=", ".join(ghosts)))
+            if own_chains:
+                statements.append(self.i18n.text(
+                    "Nessun footprint: i pad {pads} sono nominati solo dalle catene di quote della "
+                    "risposta principale, senza un'altra lettura che li confermi, e il loro foro non è "
+                    "quotato. I campi della matrice non sono il footprint di questo componente.").format(
+                    pads=", ".join(own_chains)))
+                # The main answer's own chains are no witness (re-audit, round
+                # 4): such a pad can be invented like an unnamed one, so the
+                # remedy first asks to check that it exists, then for the hole.
+                remedies.append(self.i18n.text(
+                    "Verifica sul disegno se i pad {pads} esistono davvero: se esistono, ripeti "
+                    "l'analisi aggiungendo un documento che ne quoti il foro o il terminale.").format(
+                    pads=", ".join(own_chains)))
+            if quoted:
+                statements.append(self.i18n.text(
+                    "Nessun footprint: i pad {pads} sono quotati nel disegno, ma il loro foro non è "
+                    "quotato e nessun terminale permette di ricavarlo. I campi della matrice non "
+                    "sono il footprint di questo componente.").format(pads=", ".join(quoted)))
+                remedies.append(self.i18n.text(
+                    "Per il foro dei pad {pads} ripeti l'analisi aggiungendo un documento che quoti "
+                    "il foro o il terminale: rileggere lo stesso disegno non lo troverebbe.").format(
+                    pads=", ".join(quoted)))
+        elif getattr(self, "_unread_pad_holes_elsewhere", False):
+            # Other pads of the same part DO have a hole: «no printed hole»
+            # is no fact about the drawing, and whether these pads are
+            # quoted is unknown, so both possibilities are named.
+            statements.append(self.i18n.text(
+                "Nessun footprint: il foro dei pad {pads} non è stato letto, mentre altri pad dello "
+                "stesso componente hanno un foro letto o ricavato dal terminale: i pad {pads} "
+                "potrebbero non esistere sul componente, oppure il loro foro non è quotato. I campi "
+                "della matrice non sono il footprint di questo componente.").format(
+                pads=", ".join(holes)))
+            remedies.append(self.i18n.text(
+                "Verifica sul disegno se i pad {pads} esistono davvero: se esistono, ripeti "
+                "l'analisi aggiungendo un documento che ne quoti il foro o il terminale.").format(
+                pads=", ".join(holes)))
+        else:
+            statements.append(self.i18n.text(
+                "Nessun footprint: i fori dei pad {pads} non sono stati letti dai documenti (nessun "
+                "foro stampato e nessun terminale da cui ricavarli), e i campi della matrice non sono "
+                "il footprint di questo componente.").format(pads=", ".join(holes)))
+            remedies.append(self.i18n.text(
+                "Per i fori ripeti l'analisi aggiungendo un documento che quoti i fori o i terminali "
+                "dei pad: il disegno letto non li riporta, quindi rileggerlo non li troverebbe."))
+        return statements, remedies
 
     def _unread_pads_block(self) -> str:
         """@brief Why no footprint may be built now, with the remedy; '' when it may.
@@ -17147,11 +17510,8 @@ class MainWindow(QMainWindow):
                 "Nessun footprint: le posizioni dei pad {pads} non sono state lette dai documenti, e "
                 "i campi della matrice non sono il footprint di questo componente.").format(
                 pads=", ".join(positions)))
-        if holes:
-            parts.append(self.i18n.text(
-                "Nessun footprint: i fori dei pad {pads} non sono stati letti dai documenti (nessun "
-                "foro stampato e nessun terminale da cui ricavarli), e i campi della matrice non sono "
-                "il footprint di questo componente.").format(pads=", ".join(holes)))
+        hole_statements, hole_remedies = self._unread_hole_sentences(holes)
+        parts.extend(hole_statements)
         if positions:
             # A block names only a remedy that is enabled in this state
             # (review 2026-11-11, F2-3): the pad re-read is refused, for
@@ -17169,16 +17529,7 @@ class MainWindow(QMainWindow):
                     "l'analisi la propone, oppure ripeti l'analisi con un disegno quotato dei pad.").format(
                     menu=self.i18n.tr("app.tools").replace("&", ""),
                     action=self.i18n.text("Rileggi solo le posizioni dei pad")))
-        if holes:
-            # No re-read is offered for a hole (F2-3): these pads have no
-            # printed hole and no terminal to derive one from, so reading
-            # the same drawing again cannot find it. What helps is a
-            # document that dimensions the holes or the terminals. Typing
-            # the hole in the pad dialog is not offered either: the pads
-            # were dropped, so no pad is drawn to open the dialog on.
-            parts.append(self.i18n.text(
-                "Per i fori ripeti l'analisi aggiungendo un documento che quoti i fori o i terminali "
-                "dei pad: il disegno letto non li riporta, quindi rileggerlo non li troverebbe."))
+        parts.extend(hole_remedies)
         if unfit:
             # After the remedies of the other two cases, so that their
             # sentences stay exactly as they were. No re-read is named: the
@@ -17195,11 +17546,19 @@ class MainWindow(QMainWindow):
                 "Per i pad incompatibili verifica sul disegno foro, terminale, piazzola e posizioni, "
                 "poi ripeti l'analisi, meglio se aggiungendo un documento che riporti il land pattern "
                 "PCB consigliato."))
-            detail = getattr(self, "_unread_pad_unfit_detail", None)
-            if detail:
-                # The extractor names each pad with the values in conflict;
-                # its text is already translated and is shown as it is.
-                parts.append(self.i18n.text("Dettaglio dell'analisi: {detail}").format(detail=detail))
+        question = self._pad_layout_question_remedy()
+        if question:
+            # An open pad-layout question is a remedy of every reason above
+            # (a chosen layout restores or replaces the dropped pads); named
+            # only while its answer can be applied.
+            parts.append(question)
+        detail = getattr(self, "_unread_pad_detail", None)
+        if detail:
+            # The extractor's account is the CAUSE (readings that disagree,
+            # the layout the drawn holes confirm, the values in conflict):
+            # shown for every reason (2026-11-13), last, after the window's
+            # own sentences. Already translated, shown as it is.
+            parts.append(self.i18n.text("Dettaglio dell'analisi: {detail}").format(detail=detail))
         return " ".join(parts)
 
     def _current_params(self) -> PinHeaderParams:
@@ -19254,7 +19613,7 @@ class MainWindow(QMainWindow):
         column = QVBoxLayout(panel)
         column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(4)
-        layers = CollapsibleGroupBox("Layer", expanded=True)
+        layers = CollapsibleGroupBox("Layer", expanded=False)
         layers.setToolTip("Mostra o nascondi i layer dell'anteprima: non cambia il footprint scritto. "
                           "Clic sul nome di un layer disegnabile: diventa il layer attivo del disegno.")
         layers_column = QVBoxLayout(layers.body)
@@ -19296,7 +19655,7 @@ class MainWindow(QMainWindow):
         self.btn_fp_reference.clicked.connect(self._edit_reference_image)
         layers_column.addWidget(self.btn_fp_reference)
         column.addWidget(layers)
-        drawing = CollapsibleGroupBox("Disegno", expanded=True)
+        drawing = CollapsibleGroupBox("Disegno", expanded=False)
         drawing_column = QVBoxLayout(drawing.body)
         drawing_column.setContentsMargins(0, 4, 0, 0)
         drawing_column.addWidget(self._build_footprint_palette())
@@ -19305,7 +19664,7 @@ class MainWindow(QMainWindow):
         # widget the symbol editor uses (`canvas_properties`), filled by
         # `_refresh_fp_properties` and committed by `_fp_property_committed`.
         from .canvas_properties import EMPTY_TEXT, MIXED_PLACEHOLDER, PropertiesPanel
-        self.fp_properties_group = CollapsibleGroupBox("Proprietà", expanded=True)
+        self.fp_properties_group = CollapsibleGroupBox("Proprietà", expanded=False)
         self.fp_properties_body = QVBoxLayout(self.fp_properties_group.body)
         self.fp_properties_body.setContentsMargins(0, 4, 0, 0)
         # «(vari)» in the interface language; `_on_language_changed` updates it (review M11).
@@ -19318,7 +19677,16 @@ class MainWindow(QMainWindow):
         self.fp_properties_body.addWidget(self.fp_properties_panel)
         self.fp_properties_body.addStretch(1)
         column.addWidget(self.fp_properties_group, 1)
-        checks = CollapsibleGroupBox("Controlli", expanded=True)
+        # Every group starts collapsed (user, 2026-11-13: «se Controlli non è
+        # vuoto lo apri altrimenti tutti collassati», open Controlli when it is
+        # not empty, otherwise all collapsed): «Controlli» opens by itself in
+        # `_refresh_footprint_checks_now` when findings appear.
+        checks = CollapsibleGroupBox("Controlli", expanded=False)
+        self.fp_checks_group = checks
+        #: True while the last refresh listed findings: the group opens only on
+        #: the passage from no findings to some, so a group the user closed
+        #: while it already had findings is not reopened at every refresh.
+        self._fp_checks_had_findings = False
         checks.setToolTip("Controlli geometrici sul footprint in bozza (KLC): clic su una riga per "
                           "selezionare gli elementi coinvolti nel disegno e leggere il testo completo "
                           "con il rimedio.")
@@ -19327,12 +19695,26 @@ class MainWindow(QMainWindow):
         self.fp_checks_list = QListWidget()
         # Findings are messages computed at run time, not catalogue sources.
         self.fp_checks_list.setProperty("i18n_skip", True)
-        self.fp_checks_list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
+        # No selection (user, 2026-11-13: «perché non rimuovi questo sfondo
+        # viola», why not remove this purple background): a selected row kept
+        # the theme's highlight, yet the click already selects the elements in
+        # the preview and opens the details. Same as the KLC list of the KiCad
+        # tab; the focus stays, so arrows + Enter (itemActivated) still work.
+        self.fp_checks_list.setSelectionMode(QListWidget.SelectionMode.NoSelection)
         self.fp_checks_list.setWordWrap(True)
         self.fp_checks_list.itemClicked.connect(self._on_footprint_check_clicked)
         # Enter/Space on the current row, for keyboard users.
         self.fp_checks_list.itemActivated.connect(self._on_footprint_check_clicked)
         checks_column.addWidget(self.fp_checks_list)
+        # Rows are fitted to their wrapped text at the viewport's real width,
+        # known only once the group is open: refit on every viewport resize.
+        self._fp_checks_resize_watcher = _ResizeWatcher(self._fit_footprint_checks_height,
+                                                        self.fp_checks_list.viewport())
+        self.fp_checks_list.viewport().installEventFilter(self._fp_checks_resize_watcher)
+        # Opening the group may not resize the viewport (same provisional
+        # height): refit once the layout has shown the list.
+        checks.toggled.connect(
+            lambda opened: opened and QTimer.singleShot(0, self._fit_footprint_checks_height))
         column.addWidget(checks)
         # Stretch 0: while «Proprietà» (stretch 1) is open it takes the free
         # height; once it is collapsed (fixed at its title) the free height
@@ -19367,12 +19749,28 @@ class MainWindow(QMainWindow):
         lst = getattr(self, "fp_checks_list", None)
         if lst is None:
             return
-        rows = [max(lst.sizeHintForRow(i), lst.fontMetrics().height() + 4)
-                for i in range(min(lst.count(), self._FP_CHECKS_MAX_ROWS))]
+        # Every row as tall as its WRAPPED text (user, 2026-11-13: «espandilo
+        # se contiene testo», expand it when it holds text). `sizeHintForRow`
+        # ignores the wrap width and gave one line, so a long finding was cut;
+        # the view's own layout, once it is on screen, wraps each row at the
+        # viewport's real width and `visualItemRect` reports it -- the delegate
+        # decides, no text metrics of ours. While the list is hidden (collapsed
+        # group) there is no real width yet: a provisional height, redone when
+        # the group opens (`toggled`) or the viewport is resized (`_ResizeWatcher`).
+        line = lst.fontMetrics().height() + 4
+        shown = min(lst.count(), self._FP_CHECKS_MAX_ROWS)
+        if lst.isVisible():
+            lst.doItemsLayout()
+            rows = [max(lst.visualItemRect(lst.item(i)).height(), line) for i in range(shown)]
+        else:
+            rows = [max(lst.sizeHintForRow(i), line) for i in range(shown)]
         if not rows:
-            rows = [lst.fontMetrics().height() + 4]
-        height = sum(rows) + 2 * lst.frameWidth() + 4
-        lst.setFixedHeight(int(height))
+            rows = [line]
+        height = int(sum(rows) + 2 * lst.frameWidth() + 4)
+        # Only a real change: the resulting Resize calls this again, which
+        # then finds the same height and stops.
+        if lst.height() != height or lst.maximumHeight() != height:
+            lst.setFixedHeight(height)
 
     def _activate_fp_draw_layer(self, layer: str) -> None:
         """@brief A drawable layer's name was clicked: make it the active drawing layer (plan B5).
@@ -20012,6 +20410,11 @@ class MainWindow(QMainWindow):
         self._fp_checks_built = built
         if built is None:
             self._fp_last_checks = []
+            # `_fp_checks_had_findings` is NOT reset here: None also means «this
+            # redraw did not build», and a reset would let the same findings,
+            # back on the next build, reopen a group the user closed. As the
+            # metadata box (`_note_metadata_block`): the last known state is
+            # kept; a project switch resets it (`_reset_project_runtime_state`).
             lst.addItem(self.i18n.text("Nessun footprint da controllare."))
             self._fit_footprint_checks_height()
             return
@@ -20030,9 +20433,16 @@ class MainWindow(QMainWindow):
         findings = check_footprint_geometry(replace(built, graphics=list(built.graphics) + extra))
         self._fp_last_checks = findings
         if not findings:
+            self._fp_checks_had_findings = False
             lst.addItem(self.i18n.text("Nessun problema trovato"))
             self._fit_footprint_checks_height()
             return
+        # Open «Controlli» on the passage from no findings to some (user,
+        # 2026-11-13); never closed by the program.
+        group = getattr(self, "fp_checks_group", None)
+        if group is not None and not self._fp_checks_had_findings:
+            group.setExpanded(True)
+        self._fp_checks_had_findings = True
         for finding in findings:
             prefix = "⛔ " if finding.severity == "error" else "⚠ "
             item = QListWidgetItem(prefix + finding.message)
