@@ -223,14 +223,12 @@ files together.
   «Check for updates...», «Licenses», «About KiCadGen», «Keyboard
   shortcuts...».
 
-### Workflow bar and tabs
+### Tabs and language
 
-Above the tabs, a bar shows the phases of the work — **Documents › AI analysis
-› Body review › STEP model › KiCad** — with the completed ones ticked, the
-current one highlighted. A phase that does not apply is not shown: a single
-component has no body review, so its bar has four phases numbered 1-4. Clicking a phase goes to its tab. On the right, the
-language selector: Italian, English, French, German (the texts come from the
-same SQLite catalogue; missing entries fall back to English).
+Above the tabs, on the right, the language selector: Italian, English, French,
+German (the texts come from the same SQLite catalogue; missing entries fall
+back to English). The Project tab guides the work on two pages, «1 · Documents»
+and «2 · Mounting and analysis»; an opened project starts on the first one.
 
 The tabs are **Project** (Ctrl+1), **Footprint preview** (Ctrl+2),
 **Electrical symbol** (Ctrl+3), **STEP model** (Ctrl+4), **KiCad** (Ctrl+5)

@@ -228,16 +228,13 @@ progetto…** (F2) rinomina insieme cartella e file.
   cartella dei log», «Segnala un problema…», «Controlla aggiornamenti…»,
   «Licenze», «Informazioni su KiCadGen», «Scorciatoie da tastiera…».
 
-### Barra del flusso e schede
+### Schede e lingua
 
-Sopra le schede una barra mostra le fasi del lavoro — **Documenti › Analisi
-AI › Revisione corpi › Modello STEP › KiCad** — con quelle concluse spuntate,
-quella corrente evidenziata. Una fase che non si applica non compare: un
-componente singolo non ha la revisione dei corpi e la sua barra ha quattro
-fasi numerate da 1 a 4. Un clic su una fase porta
-alla sua scheda. A destra, il selettore della lingua: italiano, inglese,
+Sopra le schede, a destra, il selettore della lingua: italiano, inglese,
 francese, tedesco (i testi vengono dallo stesso catalogo SQLite; le voci
-mancanti ricadono sull'inglese).
+mancanti ricadono sull'inglese). La scheda Progetto guida il lavoro in due
+pagine, «1 · Documenti» e «2 · Montaggio e analisi»; un progetto aperto parte
+dalla prima.
 
 Le schede sono **Progetto** (Ctrl+1), **Anteprima footprint** (Ctrl+2),
 **Simbolo elettrico** (Ctrl+3), **Modello STEP** (Ctrl+4), **KiCad** (Ctrl+5) ed

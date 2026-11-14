@@ -7,8 +7,8 @@ from time import monotonic
 from ..services.messages import WARNING, kind_of
 
 from PyQt6.QtCore import QEvent, QPointF, QRect, QRectF, QSize, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import (QColor, QFont, QFontMetricsF, QPainter, QPainterPath, QPalette,
-                         QPen, QTextDocument)
+from PyQt6.QtGui import (QColor, QFont, QFontMetrics, QFontMetricsF, QPainter, QPainterPath,
+                         QPalette, QPen, QTextDocument)
 from PyQt6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QProgressBar, QPushButton,
                              QVBoxLayout, QWidget)
 
@@ -956,6 +956,8 @@ class AnalysisOverlay(QWidget):
             QFrame#analysisCard { background: #1e1e2e; border: 1px solid #585b70;
                                  border-radius: 16px; }
             QLabel { background: transparent; border: none; color: #cdd6f4; }
+            QLabel[outcome="done"] { color: #a6e3a1; font-weight: 600; }
+            QLabel[outcome="partial"] { color: #f9e2af; font-weight: 600; }
             QProgressBar { background: #313244; border: none; border-radius: 5px;
                            height: 10px; text-align: center; color: transparent; }
             QProgressBar::chunk { background: #89b4fa; border-radius: 5px; }
@@ -1196,6 +1198,8 @@ class AnalysisOverlay(QWidget):
                        "Interrompi l'operazione in corso: verrà chiesta conferma.", tr)
         if getattr(self, "phases", None) is not None:
             self._render_phases()
+        if getattr(self, "_outcome", None) is not None and self.is_holding_completed():
+            self._render_outcome()
 
     def _available_card_width(self):
         """@brief Widest card the hosting window can show without clipping.
@@ -1310,7 +1314,7 @@ class AnalysisOverlay(QWidget):
         # (application style sheet), and measuring with the old font would
         # give lines and widths of another text.
         self.card.ensurePolished()
-        metrics = self.status.fontMetrics()
+        metrics = self._running_status_metrics()
         # One line of margin: `averageCharWidth` is an average, and with a
         # sentence of wide letters the truncated text would overflow onto the
         # next line, making the card grow. Sizing the width on two lines
@@ -1421,6 +1425,8 @@ class AnalysisOverlay(QWidget):
         self._size_the_card()
         if getattr(self, "_status_source", ""):
             self._render_status()
+        if getattr(self, "_outcome", None) is not None:
+            self._fit_outcome()
 
     def eventFilter(self, watched, event):
         """@brief Keep the overlay covering its parent and sized on its metrics.
@@ -1493,6 +1499,10 @@ class AnalysisOverlay(QWidget):
         self._status_extra = 0
         self._status_source = ""
         self.status.clear()
+        # The highlighted outcome of a finished job (`show_completed`) does not
+        # carry over to the running lines of the next operation.
+        self._outcome = None
+        self._set_outcome_look("")
         self._size_the_card()
         self.set_status(status)
         self.setGeometry(self.parentWidget().rect())
@@ -1589,13 +1599,25 @@ class AnalysisOverlay(QWidget):
         self._step_current = int(index)
         self._render_steps()
 
-    def show_completed(self, message):
+    def show_completed(self, message, partial=False, source=None):
         """@brief Keep the card open on a finished job: every step ticked, «Chiudi» to leave.
 
         @param message Final outcome, already translated, shown as the status.
+        @param partial True when the job ended with something still to do
+            (e.g. the STEP model to complete): the outcome reads as a warning,
+            not as a success.
+        @param source Italian catalogue source of `message`, when it has one:
+            the outcome is composed again from it on a language change
+            (`refresh_command_texts`), since the marked text is not a key.
         @note The clock and the animation stop (nothing is running any more)
             and the abort command goes away; the card closes only through
             «Chiudi», which emits `closed`.
+        @note The outcome stands out from the running lines (user, 2026-11-14:
+            «metti in evidenza Completato»): bold, green with a tick, or amber
+            with a warning sign when partial, and larger only while it still
+            fits the rows reserved for the status (a narrow card keeps the
+            running size: a cut outcome would be worse than a small one).
+            `start` puts the plain look back for the next operation.
         """
         self.timer.stop()
         self._end_phase()
@@ -1604,10 +1626,91 @@ class AnalysisOverlay(QWidget):
             self._render_steps()
         self.set_progress(None, None)
         self.set_abortable(False)
-        self.set_status(message)
+        self._outcome = (message, source, partial)
+        self._render_outcome()
         self.close_button.show()
         self.close_button.setFocus()
         self.operation_finished.emit()
+
+    #: Size of the highlighted outcome relative to the running status lines.
+    OUTCOME_SCALE = 1.25
+
+    def _render_outcome(self):
+        """Write the held outcome with its mark, in the current language, and fit its size."""
+        message, source, partial = self._outcome
+        if source and self.i18n is not None:
+            message = self.i18n.text(source)
+        self._set_outcome_look("partial" if partial else "done", larger=False)
+        self.set_status(f"{'⚠' if partial else '✓'} {message}")
+        self._fit_outcome()
+
+    def _fit_outcome(self):
+        """Larger outcome only while it fits the rows reserved for the status.
+
+        Measured with the larger font before applying it, so the label never
+        switches size back and forth; called again on every resize (`_refit`),
+        because a card that narrows after the decision would cut the text.
+        """
+        outcome = self.status.property("outcome")
+        running = getattr(self, "_status_running_pt", -1.0)
+        if not outcome or getattr(self, "_fitting_outcome", False):
+            return
+        larger = False
+        if running > 0:
+            font = QFont(self.status.font())
+            font.setPointSizeF(running * self.OUTCOME_SCALE)
+            font.setWeight(QFont.Weight.DemiBold)
+            needed = QFontMetrics(font).boundingRect(
+                QRect(0, 0, self._status_text_width(), 0), int(Qt.TextFlag.TextWordWrap),
+                self.status.text()).height()
+            larger = needed <= self.status.minimumHeight()
+        # A size change sends a font change, which comes back here through `_refit`.
+        self._fitting_outcome = True
+        try:
+            self._set_outcome_look(outcome, larger=larger)
+        finally:
+            self._fitting_outcome = False
+
+    def _running_status_metrics(self):
+        """Metrics of the status line's RUNNING font, also while an outcome is highlighted.
+
+        The card is sized on the running lines: a resize while the finished
+        card is held (a late cost line, a window resize) measured the larger
+        bold outcome and widened the card (826 -> 1052 px on the real window).
+        """
+        running = getattr(self, "_status_running_pt", -1.0)
+        if not self.status.property("outcome") or running <= 0:
+            return self.status.fontMetrics()
+        font = QFont(self.status.font())
+        font.setPointSizeF(running)
+        font.setWeight(QFont.Weight.Normal)
+        return QFontMetrics(font)
+
+    def _set_outcome_look(self, outcome, larger=False):
+        """Colour, weight (overlay style sheet, `outcome` property) and size of the status line.
+
+        `outcome` "" gives back the running look. The size goes through a
+        style sheet of the label because the application's style sheet fixes
+        the font size of every widget (theme.APP_QSS), so a font set in code
+        would be ignored; it is derived from the running size, never fixed.
+        """
+        # Already plain: nothing to give back (the common start of an operation).
+        if not outcome and not self.status.property("outcome") and not self.status.styleSheet():
+            return
+        if not self.status.styleSheet():
+            # The running size, read before anything of the outcome applies.
+            self._status_running_pt = self.status.font().pointSizeF()
+        running = getattr(self, "_status_running_pt", -1.0)
+        sheet = (f"font-size: {running * self.OUTCOME_SCALE:.1f}pt;"
+                 if outcome and larger and running > 0 else "")
+        # Only what changes is touched: every change re-polishes the label.
+        if sheet != self.status.styleSheet():
+            self.status.setStyleSheet(sheet)
+        if (self.status.property("outcome") or "") != outcome:
+            self.status.setProperty("outcome", outcome)
+            style = self.status.style()
+            style.unpolish(self.status)
+            style.polish(self.status)
 
     def is_holding_completed(self):
         """@brief Tell whether the card is open on a finished job, waiting for «Chiudi».

@@ -97,6 +97,10 @@ class ProjectCosts:
     run_calls_without_cost: int = 0
     #: provider -> (total_usd, calls, calls_without_cost) of the current analysis.
     run_by_provider: dict = None
+    #: model -> (total_usd, calls, calls_without_cost) of the current analysis:
+    #: what each model cost from the last «Estrai parametri con AI» (extract
+    #: parameters with AI), reruns included (user, 2026-11-14).
+    run_by_model: dict = None
 
     @property
     def run_complete(self) -> bool:
@@ -175,7 +179,8 @@ def _loaded_totals(path: Path, run: Optional[int]) -> Optional[ProjectCosts]:
                 cached = _LOADED[key] = (raw, {})
             cached[1][run] = totals
     return replace(totals, by_provider=dict(totals.by_provider),
-                   run_by_provider=dict(totals.run_by_provider))
+                   run_by_provider=dict(totals.run_by_provider),
+                   run_by_model=dict(totals.run_by_model))
 
 
 def _parse(path: Path, raw) -> dict:
@@ -275,6 +280,7 @@ def _totals(data: dict, run: Optional[int] = None) -> ProjectCosts:
         if isinstance(entry, dict) and entry.get("run") == run:
             started = str(entry.get("started") or "")
     current = _by_provider(data, run=run) if run else {}
+    models = _grouped(data, _model_of, run=run) if run else {}
     return ProjectCosts(total_usd=float(data["total_usd"]), calls=data["calls"],
                         calls_without_cost=data["calls_without_cost"],
                         since=data.get("since", ""), by_provider=_by_provider(data),
@@ -286,7 +292,7 @@ def _totals(data: dict, run: Optional[int] = None) -> ProjectCosts:
                         run_calls=sum(calls for _total, calls, _missing in current.values()),
                         run_calls_without_cost=sum(
                             missing for _total, _calls, missing in current.values()),
-                        run_by_provider=current)
+                        run_by_provider=current, run_by_model=models)
 
 
 def load_project_costs(project_dir: Path, run: Optional[int] = None) -> ProjectCosts:
@@ -306,7 +312,7 @@ def load_project_costs(project_dir: Path, run: Optional[int] = None) -> ProjectC
         alone), so a refresh does not re-parse and re-price the history.
     """
     totals = _loaded_totals(Path(project_dir) / COSTS_FILE, run)
-    return ProjectCosts(by_provider={}) if totals is None else totals
+    return ProjectCosts(by_provider={}, run_by_provider={}, run_by_model={}) if totals is None else totals
 
 
 def _by_provider(data: dict, run: Optional[int] = None) -> dict:
@@ -315,16 +321,29 @@ def _by_provider(data: dict, run: Optional[int] = None) -> dict:
     With `run`, only the entries recorded during that analysis.
     """
     from .providers import provider_of
+    return _grouped(data, lambda entry: provider_of(str(entry.get("model") or "")), run=run)
+
+
+def _model_of(entry: dict) -> str:
+    """Model that names an entry's row in the per-model split; «?» when the entry has none."""
+    return str(entry.get("model") or "") or "?"
+
+
+def _grouped(data: dict, key_of, run: Optional[int] = None) -> dict:
+    """Totals (total_usd, calls, calls_without_cost) per `key_of(entry)`; a damaged entry is skipped.
+
+    With `run`, only the entries recorded during that analysis.
+    """
     totals = {}
     for entry in data.get("entries") or ():
         if not isinstance(entry, dict):
             continue
         if run is not None and entry.get("run") != run:
             continue
-        provider = provider_of(str(entry.get("model") or ""))
-        total, calls, missing = totals.get(provider, (0.0, 0, 0))
+        key = key_of(entry)
+        total, calls, missing = totals.get(key, (0.0, 0, 0))
         cost = _entry_cost(entry)
-        totals[provider] = (total + (cost or 0.0), calls + 1, missing + (cost is None))
+        totals[key] = (total + (cost or 0.0), calls + 1, missing + (cost is None))
     return totals
 
 
