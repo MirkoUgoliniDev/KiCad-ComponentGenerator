@@ -2406,6 +2406,9 @@ class MainWindow(QMainWindow):
         self._applying_extraction = False
         self._extract_finish_pending = False
         self._automatic_generation_active = False
+        # (summary, per-model lines) of the last AI analysis of this run, shown on the
+        # finished card of the automatic generation (`_hold_completed_overlay`).
+        self._last_analysis_cost = None
         # 3D regeneration requested by an «Applica» (apply) and not started yet
         # (see `_run_pending_regen_3d`).
         self._regen_3d_pending = False
@@ -4537,6 +4540,17 @@ class MainWindow(QMainWindow):
             combo.setItemText(index, self.i18n.component_type(key, fallback))
         combo.blockSignals(blocked)
 
+    def _reveal_ai_tools(self) -> None:
+        """@brief Show «Strumenti AI» as a hint: page «2 · Montaggio e analisi», group expanded.
+
+        @note The group lives on the wizard's second page. Since every opened
+            project starts on «1 · Documenti» (user request 2026-11-14), expanding
+            it alone could open a group nobody sees (review 2026-11-14, L2).
+        """
+        if hasattr(self, "project_wizard"):
+            self.project_wizard.set_page(1)
+        self.group_ai_tools.setExpanded(True)
+
     def _set_acquisition_tabs_enabled(self, enabled: bool) -> None:
         """@brief Enable previews only after the first successful parameter acquisition.
 
@@ -5907,8 +5921,12 @@ class MainWindow(QMainWindow):
         try:
             self._refresh_status_bar(bool(self._component_name()))
             overlay = getattr(self, "analysis_overlay", None)
+            # Not on a held finished card: its total and per-model lines come
+            # from the analysis summary, and a late cost-file write would pair a
+            # project figure with lines of another tally (review 2026-11-14, 3).
             if (overlay is not None and overlay.isVisible()
-                    and not self._generation_phase_active()):
+                    and not self._generation_phase_active()
+                    and not overlay.is_holding_completed()):
                 overlay.set_cost(self.status_cost.text())
                 if self.status_cost.toolTip():
                     overlay.cost.setToolTip(self.status_cost.toolTip())
@@ -6581,7 +6599,7 @@ class MainWindow(QMainWindow):
             # tell the user that it will not run (test contract of 2026-10-02).
             photo_detector, yolo_model_path = "ai", None
         if photo_detector == "yolo_smd" and not smd_route_available():
-            self.group_ai_tools.setExpanded(True)
+            self._reveal_ai_tools()
             QMessageBox.warning(
                 self, self._photo_detector_text("error_title"),
                 self._photo_detector_text("smd_unavailable"),
@@ -6597,7 +6615,7 @@ class MainWindow(QMainWindow):
                     from ..services.smd_component_classifier import validate_smd_setup
                     validate_smd_setup(self._smd_model_option())
             except Exception as exc:
-                self.group_ai_tools.setExpanded(True)
+                self._reveal_ai_tools()
                 QMessageBox.warning(
                     self, self._photo_detector_text("error_title"),
                     self._photo_detector_text("error", error=str(exc)),
@@ -6620,13 +6638,13 @@ class MainWindow(QMainWindow):
             return
         # The detector actually used: a single component forces "ai".
         if not self._ensure_api_key(detector=photo_detector):
-            self.group_ai_tools.setExpanded(True)
+            self._reveal_ai_tools()
             return
 
         try:
             profile = self.profile_store.snapshot(self._profile_key())
         except (ProfileError, sqlite3.Error, OSError) as exc:
-            self.group_ai_tools.setExpanded(True)
+            self._reveal_ai_tools()
             QMessageBox.warning(
                 self, self.i18n.text('Profilo AI non disponibile'), str(exc))
             return
@@ -7381,6 +7399,15 @@ class MainWindow(QMainWindow):
         self._auto_generation_params = None
         self._extract_finish_pending = False
         self.analysis_overlay.clear_cost()
+        # A new analysis: the cost of the previous one is not this run's.
+        self._last_analysis_cost = None
+        # The run tally starts here, on the GUI thread before the worker, for
+        # every run that ends in `_show_ai_cost`: the full extraction resets it
+        # itself, but a partial re-read and the inventory relaunch did not, so
+        # their summary added the previous analysis and named its models
+        # (review 2026-11-14, finding 1).
+        from ..services.openrouter import reset_usage
+        reset_usage()
         # Every call of this run is charged to the current project, even
         # if another one is opened in the meantime (check of 25/09, D7). It is
         # released when the worker really finishes (_on_extract_finished).
@@ -8239,13 +8266,24 @@ class MainWindow(QMainWindow):
                          notes=f"{notes} {suffix}".strip())
         self._on_extracted(params)
 
-    def _hold_completed_overlay(self, message: str) -> None:
+    def _hold_completed_overlay(self, message: str, analysis_cost: bool = False) -> None:
         """@brief Leave the modal open on a finished generation, steps ticked, until «Chiudi».
 
         @param message Italian source of the final outcome.
+        @param analysis_cost True when the generation followed an AI analysis
+            in the same run (the automatic generation): the finished card then
+            shows that analysis' cost, total and one line per model.
         @note The window underneath is given back exactly as `_hide_analysis_overlay`
             does; only the card stays. Without steps (an operation of one
             phase) there is nothing to show ticked and the card simply closes.
+        @note The cost on the finished card (user, 2026-11-14: «nell'ultimo
+            step … il costo suddiviso per modello», in the last step the cost
+            split by model) narrows the decision of 2026-09-23 that kept it
+            off the generation card: while the generation RUNS there is still
+            no cost, so it cannot read as the price of FreeCAD; at the end the
+            line says «Costo ultima analisi», the analysis that started the run.
+            A generation started by hand, or a STEP regeneration, made no
+            call and shows none.
         """
         if not self.analysis_overlay._step_labels:
             self._hide_analysis_overlay()
@@ -8253,6 +8291,10 @@ class MainWindow(QMainWindow):
         if self._analysis_tabs_enabled is not None:
             self.tabs.setEnabled(self._analysis_tabs_enabled)
             self._analysis_tabs_enabled = None
+        summary = getattr(self, "_last_analysis_cost", None) if analysis_cost else None
+        if summary:
+            self.analysis_overlay.set_cost(summary[0])
+            self.analysis_overlay.set_cost_models(summary[1])
         self.analysis_overlay.show_completed(self.i18n.text(message))
 
     def _on_completed_overlay_closed(self) -> None:
@@ -8651,6 +8693,15 @@ class MainWindow(QMainWindow):
             if not totals.complete:
                 text = self.i18n.tr("analysis.cost.partial", summary=text,
                                     missing=totals.calls_without_cost)
+        # The cost of each model (user, 2026-11-14), the most expensive first:
+        # in the log under the total, and kept for the final card of an
+        # automatic generation (`_hold_completed_overlay`).
+        models = totals.model_lines() if totals.calls else []
+        self._last_analysis_cost = (text, models)
+        if models:
+            text_for_log = text + "\n" + "\n".join("  " + line for line in models)
+        else:
+            text_for_log = text
         # The label below the button has been removed (user, 2026-09-24): the
         # cost history stays in the AI log -- even after an interruption,
         # when it is the most useful information -- and the figure goes into the
@@ -8659,12 +8710,13 @@ class MainWindow(QMainWindow):
         # `_clear_cost_for_generation` (user decision, 2026-09-23).
         # The case really matters: in the automatic run the extraction's `finished`
         # arrives when the generation has already started.
-        self._append_log(text)
+        self._append_log(text_for_log)
         # The balance has changed: it is re-read (free, in the background).
         self.ai_account.refresh_balance()
         if self._generation_phase_active():
             return
         self.analysis_overlay.set_cost(text)
+        self.analysis_overlay.set_cost_models(models)
 
     def _generation_phase_active(self) -> bool:
         """@brief Tell whether the progress modal is currently the generation modal.
@@ -9996,7 +10048,10 @@ class MainWindow(QMainWindow):
         # The open tab shows the new project, not the closed one: without this,
         # the drawing of the previous one stayed and the 3D was not redrawn (audit
         # 25/09). The other tabs are redrawn on entry, as always.
-        self.project_wizard.set_page(1 if self._project_has_footprint() else 0)
+        # Every opened project starts on «1 · Documenti» (user request
+        # 2026-11-14), generated or not: the documents are what the user
+        # checks first. «Continua» and the workflow bar still reach page 2.
+        self.project_wizard.set_page(0)
         self.project_details.setExpanded(False)
         self.group_ai_tools.setExpanded(False)
         # Another project, another footprint: the camera follows it again.
@@ -12611,7 +12666,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, self.i18n.text("Rilettura parziale"), reason)
             return
         if not self._ensure_api_key("reread", field=field):
-            self.group_ai_tools.setExpanded(True)
+            self._reveal_ai_tools()
             return
         try:
             doc_paths, document_roles = self._selected_documents()
@@ -20007,7 +20062,7 @@ class MainWindow(QMainWindow):
         elif expected_3d:
             self._on_ai_progress(tx("Footprint e modello STEP generati. Verifica le anteprime prima "
                                     "dell’utilizzo."))
-            self._hold_completed_overlay("Completato: footprint e modello STEP generati.")
+            self._hold_completed_overlay("Completato: footprint e modello STEP generati.", analysis_cost=True)
         else:
             if getattr(self, "_automatic_3d_deferred_reason", ""):
                 # The same reason the log line gave (M16): a conflict is a
@@ -20022,12 +20077,13 @@ class MainWindow(QMainWindow):
                     message = tx("Footprint generato; modello STEP rinviato: mancano le quote del corpo ({fields}).",
                                  fields=labels or self._automatic_3d_deferred_reason)
                 self._on_ai_progress(message)
-                self._hold_completed_overlay("Footprint generato; modello STEP da completare.")
+                self._hold_completed_overlay("Footprint generato; modello STEP da completare.",
+                                             analysis_cost=True)
             else:
                 # Faithful final account: the 3D model was not requested.
                 self._on_ai_progress(tx("Footprint generato; modello STEP non richiesto. Verifica l’anteprima "
                                         "prima dell’utilizzo."))
-                self._hold_completed_overlay("Completato: footprint generato.")
+                self._hold_completed_overlay("Completato: footprint generato.", analysis_cost=True)
 
     def _on_generated(self, path: str) -> None:
         """@brief A footprint was written: keep the symbol rows in step and save the symbol.

@@ -260,3 +260,60 @@ def test_switching_tabs_without_opening_a_project_keeps_the_chosen_tab(window, t
     window.tabs.setCurrentIndex(PREVIEW)
     window._save_project_config()
     assert window.tabs.currentIndex() == PREVIEW
+
+
+def test_an_opened_project_shows_the_documents_page(window, tmp_path):  # noqa: F811
+    """@brief Positive (user, 2026-11-14): a project opens on «1 · Documenti», generated or not.
+
+    Before, a project holding its footprint opened on «2 · Montaggio e analisi»; the page the
+    previous project was left on must not carry over either.
+    """
+    window.field_library_root.setText(str(tmp_path))
+    _generated(tmp_path, "GENERATO")
+    (tmp_path / "NUOVO").mkdir()
+    wizard = window.project_wizard
+    for name in ("GENERATO", "NUOVO", "GENERATO"):
+        wizard.set_page(1)
+        _open(window, name)
+        assert window._project_has_footprint() == (name == "GENERATO")
+        assert wizard.stack.currentIndex() == 0, name
+        assert window.tabs.currentIndex() == gui.TAB_PROJECT
+
+
+def test_a_missing_key_on_a_reread_shows_the_ai_tools_on_their_page(window, monkeypatch):  # noqa: F811
+    """@brief Review 2026-11-14 L2: the hint opens page 2, where «Strumenti AI» lives, not a hidden group."""
+    wizard = window.project_wizard
+    wizard.set_page(0)
+    window.group_ai_tools.setExpanded(False)
+    monkeypatch.setattr(window, "_reread_block_reason", lambda _field: "")
+    monkeypatch.setattr(window, "_ensure_api_key", lambda *_a, **_k: False)
+    window._start_reread(next(iter(window.REREAD_FIELDS)))
+    assert wizard.stack.currentIndex() == 1
+    assert window.group_ai_tools.toggle.isChecked()
+
+
+def test_a_reread_with_its_key_does_not_move_the_page(window, monkeypatch):  # noqa: F811
+    """@brief Negative: a re-read refused for another reason leaves the page where the user put it."""
+    wizard = window.project_wizard
+    wizard.set_page(0)
+    monkeypatch.setattr(window, "_reread_block_reason", lambda _field: "blocked")
+    monkeypatch.setattr(gui.QMessageBox, "information", lambda *_a, **_k: None)
+    window._start_reread(next(iter(window.REREAD_FIELDS)))
+    assert wizard.stack.currentIndex() == 0
+
+
+def test_the_page_chosen_inside_a_session_stays(window, tmp_path):  # noqa: F811
+    """@brief Negative: without opening a project, «Continua», the workflow bar and a save keep page 2."""
+    window.field_library_root.setText(str(tmp_path))
+    _generated(tmp_path, "RESTA")
+    _open(window, "RESTA")
+    wizard = window.project_wizard
+    # Set, not asserted: this test guards the in-session pages only, apart from the open contract.
+    wizard.set_page(0)
+    wizard.next.click()
+    assert wizard.stack.currentIndex() == 1
+    window._save_project_config()
+    assert wizard.stack.currentIndex() == 1
+    wizard.set_page(0)
+    window._on_workflow_step_clicked("analysis")
+    assert wizard.stack.currentIndex() == 1

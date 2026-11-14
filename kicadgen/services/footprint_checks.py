@@ -778,16 +778,22 @@ def check_estimated_pads(footprint: Footprint) -> list:
     @param footprint The footprint checked.
     @return At most one warning selecting every pad whose `Pad.sources`
         marks "drill_mm", "pad_size" or "shape" as "derived" or "estimated"
-        (`core.tht_estimates.unverified_values`), naming for each pad which
-        of the three. Nothing when no pad carries such a mark: a pad
-        without provenance is not an estimate the program knows of.
+        (`core.tht_estimates.unverified_values`). The message has one line
+        per set of values: the pads sharing the same estimated values are
+        named together, runs compressed («• 1-5 — dimensione, forma»), so a
+        module with dozens of estimated pads reads in a few lines (user,
+        2026-11-14: one point per line). Nothing when no pad carries such a
+        mark: a pad without provenance is not an estimate the program knows of.
     @note A warning: the values may well be right, but nobody read them;
         they are checked against the drawing or the manufacturer's land
         pattern before the footprint is trusted.
     """
+    from ..generators.package import ESTIMATED_PADS_LISTED, pad_number_entries
     # Visible names of the three values, in the order of `unverified_values`.
     names = {'drill_mm': tx('foro'), 'pad_size': tx('dimensione'), 'shape': tx('forma')}
     marked = []
+    # Estimated values -> pad numbers, in order of first appearance.
+    groups: dict[tuple, list] = {}
     for index, pad in enumerate(footprint.pads):
         try:
             values = unverified_values(getattr(pad, 'sources', None))
@@ -795,13 +801,35 @@ def check_estimated_pads(footprint: Footprint) -> list:
             # Not a mapping (a hand-built pad out of contract): states nothing.
             values = ()
         if values:
-            marked.append((index, '{} ({})'.format(pad.number or '«»', ', '.join(names[key] for key in values))))
+            marked.append(index)
+            groups.setdefault(tuple(values), []).append(pad.number or '')
     if not marked:
         return []
-    return [_finding('estimated_pad', 'warning', tx(
-        'Pad con valori stimati o derivati dal programma, non letti dal disegno: {pads}. Da verificare sul '
-        'disegno quotato o sul land pattern del costruttore.', pads='; '.join(text for _index, text in marked)),
-        pads=[index for index, _text in marked])]
+    lines = [tx('Pad con valori stimati o derivati dal programma, non letti dal disegno:')]
+    def number_order(number: str) -> tuple:
+        """Integers by value first, then text numbers («A1», «EP») alphabetically.
+
+        Footprint order can be anything («1, 16, 7, 10»): sorted, the runs
+        compress («1, 7-10, 16»). ASCII digits only, the guard of
+        `pad_number_entries`.
+        """
+        text = str(number).strip()
+        return (0, int(text), '') if text.isascii() and text.isdigit() else (1, 0, text)
+
+    for values, numbers in groups.items():
+        entries, unnamed = pad_number_entries(sorted(numbers, key=number_order))
+        # Bounded like the file note: a grid of a hundred balls would fill the
+        # panel; the row's click still selects every pad (review 2026-11-14, 4).
+        words = [text for text, _count in entries[:ESTIMATED_PADS_LISTED]]
+        left = sum(count for _text, count in entries[ESTIMATED_PADS_LISTED:])
+        if left:
+            words.append(tx('altri {count}', count=left))
+        if unnamed:
+            # Mechanical holes have no number to cite, but they are counted.
+            words.append(tx('{count} senza numero', count=unnamed))
+        lines.append('• {} — {}'.format(', '.join(words), ', '.join(names[key] for key in values)))
+    lines.append(tx('Da verificare sul disegno quotato o sul land pattern del costruttore.'))
+    return [_finding('estimated_pad', 'warning', '\n'.join(lines), pads=marked)]
 
 
 def _point_copper_distance(point, copper: tuple) -> float:

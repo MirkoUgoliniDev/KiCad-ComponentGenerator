@@ -34,7 +34,7 @@ import time
 import urllib.error
 import uuid
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional, Sequence
@@ -596,6 +596,11 @@ class UsageTotals:
     cached_tokens: int = 0
     cost_usd: float = 0.0
     calls_without_cost: int = 0
+    #: Model -> [cost_usd, calls, calls_without_cost] of this run, so the
+    #: summary can say what each model cost (user, 2026-11-14). The key is
+    #: the model the program asked for, the one the user chose in «Modello
+    #: AI»; the name in the answer only when no request name is known.
+    by_model: dict = field(default_factory=dict)
 
     @property
     def complete(self) -> bool:
@@ -604,6 +609,25 @@ class UsageTotals:
         @return True when no call of the run lacks a cost.
         """
         return self.calls_without_cost == 0
+
+    def model_lines(self) -> list:
+        """@brief One line per model used in the run, the most expensive first.
+
+        @return Translated «model: amount USD (N calls)» lines; a model with
+            calls that reported no cost says its amount is a minimum. Empty
+            when no call was made.
+        """
+        lines = []
+        ordered = sorted(self.by_model.items(), key=lambda item: (-item[1][0], item[0]))
+        for model, (cost, calls, missing) in ordered:
+            amount = f"{cost:.4f}" if cost >= 0.01 else f"{cost:.6f}"
+            if missing:
+                lines.append(tx("{model}: almeno {amount} USD ({calls}, {missing} senza costo)",
+                                model=model, amount=amount, calls=_calls(calls), missing=missing))
+            else:
+                lines.append(tx("{model}: {amount} USD ({calls})", model=model, amount=amount,
+                                calls=_calls(calls)))
+        return lines
 
     def describe(self) -> str:
         """@brief Render the run total as one line for the AI log.
@@ -656,7 +680,10 @@ def usage_totals() -> UsageTotals:
         later updates.
     """
     with _usage_lock:
-        return UsageTotals(**vars(_usage_totals))
+        # The per-model lists are copied too: the snapshot must not move with later calls.
+        return UsageTotals(**{**vars(_usage_totals),
+                              "by_model": {key: list(value)
+                                           for key, value in _usage_totals.by_model.items()}})
 
 
 def _usage_int(container: Any, key: str) -> int:
@@ -928,12 +955,19 @@ def _record_usage(payload: Any, *, sent_at: Optional[datetime] = None,
     completion_delta = _usage_int(usage_dict, "completion_tokens")
     cached_delta = _cached_prompt_tokens(usage_dict)
     reasoning_delta = _usage_int(usage_dict.get("completion_tokens_details"), "reasoning_tokens")
+    # The model the program asked for names the row; the answer's own name only as a fallback.
+    answered = payload.get("model") if isinstance(payload, dict) else ""
+    model_key = str(model or answered or "") or "?"
     with _usage_lock:
         _usage_totals.calls += 1
+        entry = _usage_totals.by_model.setdefault(model_key, [0.0, 0, 0])
+        entry[1] += 1
         if cost is None:
             _usage_totals.calls_without_cost += 1
+            entry[2] += 1
         else:
             _usage_totals.cost_usd += cost
+            entry[0] += cost
         _usage_totals.prompt_tokens += prompt_delta
         _usage_totals.completion_tokens += completion_delta
         _usage_totals.cached_tokens += cached_delta

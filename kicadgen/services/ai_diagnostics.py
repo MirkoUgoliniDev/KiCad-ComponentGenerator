@@ -241,6 +241,10 @@ def _usage_delta(before):
     if before is None or after is None:
         return ""
     tokens_in, tokens_out, cost = (a - b for a, b in zip(after, before))
+    if tokens_in < 0 or tokens_out < 0 or cost < 0:
+        # The run tally was reset in between (a new run started while an
+        # abandoned call was still out): the difference means nothing.
+        return ""
     return f" tokens_in={tokens_in} tokens_out={tokens_out} cost_usd={cost:.4f}"
 
 

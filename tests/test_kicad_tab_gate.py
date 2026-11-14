@@ -54,6 +54,10 @@ def test_footprint_without_step_can_be_tried_without_a_model(window, tmp_path, m
     monkeypatch.setattr(QMessageBox, "question",
                         lambda *a, **k: asked.append(a[2]) or QMessageBox.StandardButton.No)
     monkeypatch.setattr(gui, "create_preview_project", lambda *a, **k: created.append(a))
+    # The GitHub runner has no KiCad (ci-green skill): the PCB Editor is faked, otherwise
+    # «KiCad non disponibile» stops the command before the question under test.
+    from types import SimpleNamespace
+    monkeypatch.setattr(gui, "detect_external_applications", lambda: SimpleNamespace(pcbnew="pcbnew"))
     window._test_in_kicad()
     assert len(asked) == 1 and "vista 3D" in asked[0] and created == []
 

@@ -1095,6 +1095,17 @@ class AnalysisOverlay(QWidget):
         # The cost stays close to the inventory status, where there is room,
         # instead of ending up below the elapsed time.
         content.insertWidget(content.indexOf(self.elapsed), self.cost)
+        # One line per model under the total (user, 2026-11-14: the cost split
+        # by model). Shown only when the analysis is over, so the card does not
+        # change height while the work is running; no space when hidden.
+        self.cost_models = QLabel()
+        self.cost_models.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.cost_models.setTextFormat(Qt.TextFormat.PlainText)
+        self.cost_models.setWordWrap(True)
+        self.cost_models.setStyleSheet("color: #a6e3a1;")
+        self.cost_models.setProperty('i18n_skip', True)
+        self.cost_models.hide()
+        content.insertWidget(content.indexOf(self.elapsed), self.cost_models)
         # The two commands are on the same row, in the order the user asked
         # for them: the log on the left, the stop right to its right. The
         # row stays centred as the log button alone was.
@@ -1852,6 +1863,7 @@ class AnalysisOverlay(QWidget):
         """
         self.cost.clear()
         self.cost.hide()
+        self.set_cost_models(())
 
     def set_cost(self, text):
         """@brief Show the AI analysis cost summary inside the overlay; an empty text hides it.
@@ -1867,6 +1879,16 @@ class AnalysisOverlay(QWidget):
         self.cost.setText(str(text or ""))
         self.cost.setToolTip(self.cost.text())
         self.cost.setVisible(bool(text))
+
+    def set_cost_models(self, lines):
+        """@brief Show the cost of each model of the analysis, one per line; no line hides the row.
+
+        @param lines Already translated «model: amount USD (calls)» lines
+            (`openrouter.UsageTotals.model_lines`).
+        """
+        lines = [str(line) for line in (lines or ()) if line]
+        self.cost_models.setText("\n".join(lines))
+        self.cost_models.setVisible(bool(lines))
 
     def set_status(self, message):
         """@brief Show one status written for a person, never a service line.

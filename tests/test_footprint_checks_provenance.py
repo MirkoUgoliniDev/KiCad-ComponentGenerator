@@ -90,9 +90,56 @@ def test_one_warning_lists_the_pads_with_derived_or_estimated_values_and_which()
     guessed = _tht("3", 10, drill=0.85, sources={"shape": "estimated"})
     findings = fc.check_estimated_pads(_fp(derived, read, guessed))
     assert [(f.code, f.severity, f.pads) for f in findings] == [("estimated_pad", "warning", (0, 2))]
-    message = findings[0].message
-    assert "1 (foro, dimensione)" in message and "3 (forma)" in message and "2 (" not in message
+    # CONTRACT CHANGED 2026-11-14 (user: «puoi andare a capo ad ogni punto?»): one line per
+    # set of estimated values instead of one sentence «1 (foro, dimensione); 3 (forma)».
+    lines = findings[0].message.split("\n")
+    assert lines[1:-1] == ["• 1 — foro, dimensione", "• 3 — forma"]
+    assert lines[0].endswith(":") and "land pattern" in lines[-1]
     assert findings[0].hint
+
+
+def test_pads_with_the_same_estimated_values_share_one_line_with_runs_compressed():
+    """@brief Positive (user, 2026-11-14): five pads estimated alike read as one line, not five."""
+    same = {"pad_size": "estimated", "shape": "estimated"}
+    pads = [_tht(str(n), 5 * n, drill=0.85, sources=dict(same)) for n in range(1, 6)]
+    findings = fc.check_estimated_pads(_fp(*pads))
+    assert findings[0].pads == (0, 1, 2, 3, 4)
+    assert findings[0].message.split("\n")[1:-1] == ["• 1-5 — dimensione, forma"]
+
+
+def test_a_long_line_names_the_first_entries_and_counts_the_rest():
+    """@brief Review 2026-11-14, 4: a grid of text numbers does not fill the panel; every pad stays selected."""
+    from kicadgen.generators.package import ESTIMATED_PADS_LISTED
+    same = {"pad_size": "estimated"}
+    names = [f"{row}{col}" for row in "ABC" for col in (1, 2, 3, 4)]
+    findings = fc.check_estimated_pads(_fp(*[_tht(n, 5 * i, drill=0.85, sources=dict(same))
+                                              for i, n in enumerate(names)]))
+    (line,) = findings[0].message.split("\n")[1:-1]
+    left = len(names) - ESTIMATED_PADS_LISTED
+    assert line == "• " + ", ".join(names[:ESTIMATED_PADS_LISTED]) + f", altri {left} — dimensione"
+    assert findings[0].pads == tuple(range(len(names)))
+
+
+def test_the_numbers_of_a_line_are_sorted_so_that_runs_compress():
+    """@brief Footprint order «1, 16, 7, 10, 8, 9» reads «1, 7-10, 16»; text numbers after the integers."""
+    same = {"drill_mm": "estimated"}
+    pads = [_tht(n, 5 * i, drill=0.85, sources=dict(same))
+            for i, n in enumerate(["1", "16", "7", "A2", "10", "8", "9", "A1"])]
+    findings = fc.check_estimated_pads(_fp(*pads))
+    assert findings[0].message.split("\n")[1:-1] == ["• 1, 7-10, 16, A1, A2 — foro"]
+    assert findings[0].pads == tuple(range(8)), "every pad stays selected, in footprint order"
+
+
+def test_pads_with_different_estimated_values_stay_on_separate_lines():
+    """@brief Negative: the group is the set of values, not the neighbourhood; text numbers stay listed."""
+    size = {"pad_size": "estimated"}
+    hole = {"drill_mm": "derived"}
+    pads = [_tht("1", 0, drill=0.85, sources=dict(size)), _tht("2", 5, drill=0.85, sources=dict(hole)),
+            _tht("A1", 10, drill=0.85, sources=dict(size)), _tht("", 15, drill=0.85, sources=dict(hole),
+                                                              pad_type="np_thru_hole")]
+    findings = fc.check_estimated_pads(_fp(*pads))
+    assert findings[0].pads == (0, 1, 2, 3)
+    assert findings[0].message.split("\n")[1:-1] == ["• 1, A1 — dimensione", "• 2, 1 senza numero — foro"]
 
 
 def test_the_estimated_pad_hint_names_both_ways_out_in_four_languages():
