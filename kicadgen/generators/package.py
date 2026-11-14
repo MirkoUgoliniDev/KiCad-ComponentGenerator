@@ -49,15 +49,38 @@ def estimated_pad_list(numbers) -> str:
     @param numbers Pad numbers in footprint order (text; several pads may
         share one number).
     @return "" when no pad is given; otherwise the comma-separated
-        entries: blank numbers are not listed as empty entries (a mechanical
-        hole without a number has no name to cite) but counted at the end
-        (ESTIMATED_PADS_UNNAMED), repeated numbers once, runs of three or more
-        consecutive integers written «first-last» (pads 1, 2, 3, 4 -> «1-4»),
-        textual numbers («A1», «EP») as they are. At most
+        entries of `pad_number_entries`: blank numbers are not listed as
+        empty entries (a mechanical hole without a number has no name to
+        cite) but counted at the end (ESTIMATED_PADS_UNNAMED). At most
         ESTIMATED_PADS_LISTED entries are written; the remaining pads are
         counted (ESTIMATED_PADS_MORE).
+    """
+    entries, unnamed = pad_number_entries(numbers)
+    listed = entries[:ESTIMATED_PADS_LISTED]
+    words = ", ".join(text for text, _count in listed)
+    left = sum(count for _text, count in entries[ESTIMATED_PADS_LISTED:])
+    if left:
+        words += " " + ESTIMATED_PADS_MORE.format(count=left)
+    if unnamed:
+        tail = ESTIMATED_PADS_UNNAMED.format(count=unnamed)
+        words = f"{words}, {tail}" if words else tail
+    return words
+
+
+def pad_number_entries(numbers) -> tuple[list[tuple[str, int]], int]:
+    """@brief Pad numbers as message entries: unique, runs of integers compressed.
+
+    @param numbers Pad numbers in footprint order (text; several pads may
+        share one number).
+    @return (entries, unnamed): `entries` lists (text, pads it names) in
+        order of first appearance -- repeated numbers once, runs of three or
+        more consecutive integers written «first-last» (pads 1, 2, 3, 4 ->
+        «1-4»), textual numbers («A1», «EP») as they are; `unnamed` counts
+        the blank numbers (mechanical holes), which are never an entry.
     @note Only integer numbers form ranges: «A1»-«A3» is not a well-defined
-        run (grid numbering skips letters), so text stays listed.
+        run (grid numbering skips letters), so text stays listed. Shared by
+        the file note (`estimated_pad_list`) and the footprint tab's checks
+        (`services.footprint_checks.check_estimated_pads`).
     """
     seen, unique, unnamed = set(), [], 0
     for number in numbers:
@@ -95,15 +118,7 @@ def estimated_pad_list(numbers) -> str:
         else:
             entries.extend((unique[i], 1) for i in range(index, end + 1))
         index = end + 1
-    listed = entries[:ESTIMATED_PADS_LISTED]
-    words = ", ".join(text for text, _count in listed)
-    left = sum(count for _text, count in entries[ESTIMATED_PADS_LISTED:])
-    if left:
-        words += " " + ESTIMATED_PADS_MORE.format(count=left)
-    if unnamed:
-        tail = ESTIMATED_PADS_UNNAMED.format(count=unnamed)
-        words = f"{words}, {tail}" if words else tail
-    return words
+    return entries, unnamed
 
 #: Courtyard clearance around body and pads, mm (KiCad Library Convention
 #: F5.3 default for ordinary SMD/THT parts).

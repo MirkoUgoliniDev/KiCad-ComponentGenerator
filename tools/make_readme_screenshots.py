@@ -154,6 +154,10 @@ def capture(project: Path, language: str, out_dir: Path, without_drawings: bool 
         )
         for index, name in screens:
             window.tabs.setCurrentIndex(index)
+            if index == gui.TAB_PROJECT:
+                # The README captions this image «Mounting and analysis»; an
+                # opened project starts on «Documents» (user request 2026-11-14).
+                window.project_wizard.set_page(1)
             # The 3D viewer is created lazily on first entry and loads the mesh
             # in the background: give it longer.
             _settle(app, 8000 if index == gui.TAB_MODEL_3D else SETTLE_MS)
