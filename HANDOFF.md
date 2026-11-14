@@ -1,5 +1,7 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## STATO 14/11/2026 — giro «verifica con DRC/ERC, liste dei modelli, domande invece di vicoli ciechi» COMMITTATO su FOOTPRINT-ADVANCE come `0902079`, pushato e mergiato in main (utente: «ok procedi, tralascia pubblicazione v1.0.9 e cancellazione delle release v1.0.8 e v1.0.7»). Suite completa VERDE sul codice fermo (1114h): meta' A 9195 passati / 9 saltati / 19 sottotest, meta' B 5737 / 4 = 14932 passati, 13 saltati, 19 sottotest. NESSUNA release v1.0.9, release v1.0.8/v1.0.7 NON cancellate. Spesa AI del giro ~5.71 USD sui 10 EUR concessi. Decisioni ancora aperte (una alla volta): primario stabile dei nomi pin ESP32; ritentativo a pagamento sulle risposte troncate; «Nessuna delle due» NC/NO + tabella Pinout = «user»; pasta su THT; domanda sui moduli corti; modalita' «Prova i modelli» (idea dell'utente, da discutere). Modelli: restare su gpt-5.6-sol (risposta del 14/11). Dettagli del giro nella sezione «IN CORSO 13/11/2026 sera» qui sotto.
+
 ## IN CORSO 13/11/2026 sera — l'utente ha provato l'ESP32 dal vero: «ha fatto un disastro»; «fixi una cosa ne rompi 2»
 
 Analisi VERA ESP32 18:32 (deepseek-flash): (1) l'AI dichiara i lati lunghi «half_hole» (sbagliato: fori passanti);
