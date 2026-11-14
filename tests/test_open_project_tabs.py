@@ -132,7 +132,11 @@ def test_switching_project_on_the_preview_tab_replaces_the_drawing(window, tmp_p
     # 25/09). Si cerca un dato comune a ogni QGraphicsItem.
     window.preview_scene.addSimpleText("x").setData(0, "DISEGNO_DEL_PRIMO")
     _open(window, "SECONDO")
-    assert window.tabs.currentIndex() == PREVIEW
+    # CONTRACT CHANGED 2026-11-14 (user: «quando apri un progetto deve aprirsi il
+    # primo tab»): the opened project lands on the first tab; the preview,
+    # entered again, shows the NEW project's drawing, never the closed one's.
+    assert window.tabs.currentIndex() == gui.TAB_PROJECT
+    window.tabs.setCurrentIndex(PREVIEW)
     assert all(item.data(0) != "DISEGNO_DEL_PRIMO" for item in window.preview_scene.items())
 
 
@@ -146,6 +150,10 @@ def test_switching_project_on_the_3d_tab_shows_the_new_saved_model(window, tmp_p
     rendered = []
     window.preview_3d.render_mesh = rendered.append
     _open(window, "SECONDO")
+    # CONTRACT CHANGED 2026-11-14: the opened project lands on the first tab;
+    # the 3D tab, entered again, renders the NEW project's saved model.
+    assert window.tabs.currentIndex() == gui.TAB_PROJECT
+    window.tabs.setCurrentIndex(MODEL_3D)
     _settle(window)
     assert rendered and rendered[-1] == second / "SECONDO.3dshapes" / "SECONDO.preview.json"
 
@@ -225,3 +233,30 @@ def test_after_a_real_extraction_the_previews_stay_open_on_tab_changes(window,  
     window.tabs.setCurrentIndex(0)
     window.tabs.setCurrentIndex(PREVIEW)
     assert window.tabs.isTabEnabled(PREVIEW) and window.tabs.isTabEnabled(MODEL_3D)
+
+def test_an_opened_project_shows_the_first_tab(window, tmp_path):  # noqa: F811
+    """@brief Positive (user, 2026-11-14): whatever tab the previous project was left on, the opened
+    project -- a switch, the start page -- lands on the first tab."""
+    window.field_library_root.setText(str(tmp_path))
+    _generated(tmp_path, "PRIMO")
+    _generated(tmp_path, "SECONDO")
+    _open(window, "PRIMO")
+    for tab in (PREVIEW, MODEL_3D, gui.TAB_SYMBOL):
+        window.tabs.setCurrentIndex(tab)
+        assert window.tabs.currentIndex() == tab, "inside a session the tabs still switch"
+        _open(window, "SECONDO")
+        assert window.tabs.currentIndex() == gui.TAB_PROJECT
+        _open(window, "PRIMO")
+    window.tabs.setCurrentIndex(PREVIEW)
+    _open(window, "")                       # back to the start page
+    assert window.tabs.currentIndex() == gui.TAB_PROJECT
+
+
+def test_switching_tabs_without_opening_a_project_keeps_the_chosen_tab(window, tmp_path):  # noqa: F811
+    """@brief Negative: no project opened -> the tab the user chose stays (and its content is drawn)."""
+    window.field_library_root.setText(str(tmp_path))
+    _generated(tmp_path, "RESTA")
+    _open(window, "RESTA")
+    window.tabs.setCurrentIndex(PREVIEW)
+    window._save_project_config()
+    assert window.tabs.currentIndex() == PREVIEW

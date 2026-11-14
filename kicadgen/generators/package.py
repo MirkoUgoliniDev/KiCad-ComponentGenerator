@@ -338,7 +338,7 @@ def build_package(geometry: PackageGeometry, name: str | None = None, *,
             roundrect_rratio=ROUNDRECT_RRATIO if pin.shape == "roundrect" else None,
             # Metadata for the checks and the preview, not written to the
             # file: the declared terminal and the provenance of the values.
-            lead=pin.lead, sources=pin.sources,
+            lead=pin.lead, sources=pin.sources, lead_fit=pin.lead_fit,
         ))
     # Decision D1 (user, 2026-10-14): Reference above and Value below the
     # envelope; a user-chosen position is applied afterwards (place_texts).

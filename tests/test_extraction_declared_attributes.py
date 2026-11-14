@@ -482,7 +482,7 @@ def test_reread_pad_positions_confronts_the_stored_pads_with_a_new_reading(offli
     # Negative twin: the same reading by the same model is one reading -> no confirmation.
     reread = ext.reread_pad_positions(stored, [_drawing(tmp_path)], model="vendor/main",
                                       call=Mock(return_value=agreeing), same_model=True)
-    assert reread.pin_map_conflict and "stesso modello" in reread.pin_map_conflict
+    _same_model_question(reread)
     with pytest.raises(ext.ExtractionError):
         ext.reread_pad_positions({"drawing_unit": "mm"}, [_drawing(tmp_path)], model="m", call=Mock())
     with pytest.raises(ext.ExtractionError):
@@ -596,3 +596,17 @@ def test_the_single_tool_with_the_pin_function_stays_strict_lossless():
     assert strict_tool(tool) is not None and strict_tool(ext._openai_tool()) is not None
     assert "pinout[].function" in ext.DEFAULT_SINGLE_SYSTEM_PROMPT and "pinout[].contact" in ext.DEFAULT_SINGLE_SYSTEM_PROMPT
     assert "contact" in item and "contact" not in tool["function"]["parameters"]["properties"]["pinout"]["items"]["required"]
+
+
+def _same_model_question(params):
+    """The pad-layout question of two agreeing readings of ONE model (round 8, real TEL run).
+
+    CONTRACT CHANGED 2026-11-13: such readings are one reading, still never
+    adopted, but they are ASKED as one recommended confirmation instead of a
+    hard block without a question.
+    """
+    assert not params.pin_map_conflict
+    (question,) = [q for q in params.questions or () if q["field"] == "pad_layout"]
+    assert "stesso modello" in question["text"]
+    assert len(question["options"]) == 1 and question["options"][0].get("recommended") is True
+    return question

@@ -385,7 +385,7 @@ def test_modal_does_not_echo_the_model_already_in_the_header(window):  # noqa: F
     un'etichetta da un evento richiederebbe di sapere se la testa contiene un
     verbo, cosa che nessuna regola ortografica fa senza tararsi sull'esemplare
     osservato; si scarta quindi solo l'eco esatta. Sulla riga vera che aveva
-    motivato la regola («Modello AI unico: <modello>.») non si perde nulla:
+    motivato la regola («Modello AI predefinito: <modello>.») non si perde nulla:
     viene scritta PRIMA di `analysis_overlay.start()`, che azzera
     l'intestazione, quindi il filtro non la vedeva comunque mai scattare.
     """
@@ -469,7 +469,7 @@ def test_the_header_detail_is_read_from_the_overlay_state_not_from_the_label(win
 def test_without_a_header_detail_nothing_is_suppressed(window):  # noqa: F811
     """@brief Negativo del filtro: senza dettaglio in intestazione ogni frase passa."""
     window._on_phase("kicad", "", 0, 0)
-    window._on_ai_progress("Modello AI unico: anthropic/claude-opus-5.")
+    window._on_ai_progress("Modello AI predefinito: anthropic/claude-opus-5.")
     assert "anthropic/claude-opus-5" in window.analysis_overlay.status.text()
 
 

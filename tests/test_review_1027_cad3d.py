@@ -419,7 +419,11 @@ def _generate(params, monkeypatch, tmp_path):
 
 def test_h7_a_single_contact_side_without_pitch_is_declared_in_the_notes(monkeypatch, tmp_path):
     """@brief Positive: the reference pitch is an estimate, so a note names the side and the value."""
-    notes = [n for n in _generate(_one_contact(0.0), monkeypatch, tmp_path)["notes"] if "2.54" in n]
+    # CONTRACT CHANGED 2026-11-13: the seating-lift note (STEP model lifted)
+    # also names the pitch, so the pitch-estimate note is picked by its own
+    # wording, not by "2.54" alone.
+    notes = [n for n in _generate(_one_contact(0.0), monkeypatch, tmp_path)["notes"]
+             if "2.54" in n and "passo di riferimento" in n]
     assert len(notes) == 1 and "left" in notes[0]
     assert step_generator.header_side_pitch(_one_contact(0.0).sides[0]) == (2.54, True)
 

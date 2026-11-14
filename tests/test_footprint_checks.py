@@ -44,8 +44,14 @@ def test_two_numbered_pads_sharing_copper_are_an_error_with_both_indices():
 
 
 def test_pads_with_the_same_number_or_apart_do_not_overlap():
-    assert fc.check_pads_overlap(_fp(_smd("1", 0, 0), _smd("1", 0.5, 0))) == []
+    # CONTRACT CHANGED 2026-11-14 (third review M2): two pieces of one pin
+    # overlap freely (here a 1 mm and a 2 mm land); two pads «1» of the SAME
+    # size with each centre inside the other are one pad read twice (GA9
+    # `_copies`) and are reported.
+    assert fc.check_pads_overlap(_fp(_smd("1", 0, 0), _smd("1", 0.5, 0, w=2.0))) == []
     assert fc.check_pads_overlap(_fp(_smd("1", 0, 0), _smd("2", 1.5, 0))) == []
+    copies = fc.check_pads_overlap(_fp(_smd("1", 0, 0), _smd("1", 0.1, 0)))
+    assert _codes(copies) == ["pads_overlap"] and "letto due volte" in copies[0].message
 
 
 # ── silk_clearance ─────────────────────────────────────────────────────────

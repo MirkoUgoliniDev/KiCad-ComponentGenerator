@@ -140,7 +140,11 @@ def test_without_step_yes_delivers_and_no_delivers_nothing(window, tmp_path, mon
     monkeypatch.setattr(window, "_install_kicad_library", lambda *a, **k: delivered.append("install"))
     monkeypatch.setattr(gui, "create_preview_project", lambda *a, **k: delivered.append("preview") or
                         __import__("types").SimpleNamespace(board_path=tmp_path / "b.kicad_pcb"))
-    monkeypatch.setattr(gui, "launch_preview", lambda *a, **k: None)
+    # CONTRACT CHANGED 2026-11-13 (point 8): the preview opens through
+    # `launch_preview_editors` and renders its 3D image off the GUI thread.
+    monkeypatch.setattr(gui, "launch_preview_editors", lambda *a, **k: __import__("types").SimpleNamespace(
+        schematic_skipped=None, schematic_error=None))
+    monkeypatch.setattr(gui.MainWindow, "_start_preview_render", lambda *a, **k: None)
     for answer, expected in ((QMessageBox.StandardButton.No, []),
                              (QMessageBox.StandardButton.Yes, ["install" if "install" in command else "preview"])):
         delivered.clear()

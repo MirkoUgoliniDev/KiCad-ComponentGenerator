@@ -55,22 +55,55 @@ def test_the_store_saves_step_models_globally_and_refuses_unknown_fields(tmp_pat
         store.save_step_models({"numbering_prompt": None})
 
 
-def test_an_unusable_step_model_falls_back_with_a_log_line(monkeypatch):
-    """@brief A text-only DeepSeek model cannot read images: the step falls back and says why."""
+def _catalog(monkeypatch, tmp_path, rows):
+    """A fresh cached OpenRouter catalogue with `rows` (no network)."""
+    import json
     from kicadgen.services import openrouter
-    monkeypatch.setattr(openrouter, "deepseek_declared_text_only", lambda model: True)
+    path = tmp_path / "models.json"
+    path.write_text(json.dumps(rows), encoding="utf-8")
+    monkeypatch.setattr(openrouter, "MODELS_CACHE_PATH", path)
+
+
+_ROWS = [{"id": "deepseek/text-only", "architecture": {"input_modalities": ["text"]}},
+         {"id": "deepseek/vision", "architecture": {"input_modalities": ["text", "image"]}},
+         {"id": "vendor/text-only", "architecture": {"input_modalities": ["text"]}},
+         {"id": "vendor/vision", "architecture": {"input_modalities": ["text", "image"]}}]
+
+
+def test_an_unusable_step_model_falls_back_with_a_log_line(monkeypatch, tmp_path):
+    """@brief A model declared text-only cannot read images: the step falls back and says why.
+
+    Same rule as the model picker (openrouter.image_capability): DeepSeek
+    direct borrows OpenRouter's declaration, an OpenRouter model has its own.
+    """
+    _catalog(monkeypatch, tmp_path, _ROWS)
     lines = []
     models = {"pad_positions_prompt": "deepseek-api/text-only"}
     assert pm.usable_model("pad_positions_prompt", models, "deepseek-api/main", lines.append) == "deepseek-api/main"
     assert lines and "deepseek-api/text-only" in lines[0]
     # Negative: a model that reads images, on the fallback's own provider, is used as chosen.
-    monkeypatch.setattr(openrouter, "deepseek_declared_text_only", lambda model: False)
     lines.clear()
     assert pm.usable_model("pin_type_prompt", {"pin_type_prompt": "deepseek-api/vision"},
                            "deepseek-api/main", lines.append) == "deepseek-api/vision"
     assert lines == []
     # Every step sends documents or photos (the pin-type step sends the datasheet).
     assert all(item.images for item in pm.STEPS)
+
+
+def test_an_openrouter_text_only_step_model_falls_back_and_an_unlisted_one_is_kept(monkeypatch,
+                                                                                   tmp_path):
+    """@brief Positive: an OpenRouter model declared text only falls back; negative: one not in
+    the catalogue (capability undeclared) is never refused."""
+    _catalog(monkeypatch, tmp_path, _ROWS)
+    lines = []
+    assert pm.usable_model("crop_prompt", {"crop_prompt": "vendor/text-only"},
+                           "vendor/main", lines.append) == "vendor/main"
+    assert lines and "vendor/text-only" in lines[0]
+    lines.clear()
+    for chosen in ("vendor/vision", "vendor/unlisted"):
+        assert pm.usable_model("crop_prompt", {"crop_prompt": chosen},
+                               "vendor/main", lines.append) == chosen
+    assert lines == []
 
 
 def test_save_models_writes_defaults_and_steps_in_one_transaction(tmp_path):

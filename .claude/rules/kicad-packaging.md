@@ -26,7 +26,10 @@ publishing.
   (`kicadgen/core/output_names.py`).
 - Generated KiCad output stays isolated until it has been reviewed in the
   KiCad tab.
-- **Preview never modifies `fp-lib-table`.** Project installation uses
+- **Preview never touches the user's library tables.** It writes only its own
+  one-row `${KIPRJMOD}` `fp-lib-table`/`sym-lib-table` inside `.kicad-preview`
+  (user decision 2026-11-13: the preview holds a schematic with the symbol too).
+  Project installation uses
   `${KIPRJMOD}`; global installation uses explicit absolute paths with
   overwrite confirmation.
 - Unrelated library entries are preserved and every packaging operation is

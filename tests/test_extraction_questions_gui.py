@@ -150,6 +150,8 @@ def test_the_real_dialog_offers_the_options_and_torna_indietro_as_escape(window,
         seen["buttons"] = [b.text() for b in box.buttons()]
         seen["tooltips"] = [b.toolTip() for b in box.buttons()]
         seen["body"] = box.informativeText()
+        seen["text"] = box.text()
+        seen["format"] = box.textFormat()
         seen["escape"] = box.escapeButton().text()
         pixmap = box.iconPixmap()
         seen["pixmap"] = (pixmap.width(), pixmap.height())
@@ -171,13 +173,32 @@ def test_the_real_dialog_offers_the_options_and_torna_indietro_as_escape(window,
     # because a long description in a button was cut off unreadable.
     assert seen["buttons"][:2] == ["Opzione 1", "Opzione 2"]
     assert seen["tooltips"][:2] == ["18 mm", "23 mm"]
-    assert "Opzione 1: 18 mm" in seen["body"] and "Opzione 2: 23 mm" in seen["body"]
+    # CONTRACT CHANGED 2026-11-13 (user: «metti in evidenza le Opzioni»): each
+    # heading is bold rich text, followed by the option's description.
+    assert "Opzione 1:</b> 18 mm" in seen["body"] and "Opzione 2:</b> 23 mm" in seen["body"]
+    # The markup must be RENDERED, not shown (user report, 2026-11-13: the
+    # dialog showed «<html><body><p …>» literally because the box was in plain
+    # text format, which QMessageBox applies to both labels).
+    from PyQt6.QtCore import Qt as _Qt
+    from PyQt6.QtGui import QTextDocument
+    assert seen["format"] == _Qt.TextFormat.RichText
+    rendered = QTextDocument()
+    rendered.setHtml(seen["body"])
+    shown = rendered.toPlainText()
+    assert "Opzione 1: 18 mm" in shown and "<" not in shown and "style=" not in shown
     assert seen["escape"] == window.i18n.text("Torna indietro")
     assert seen["pixmap"] == (100, 50)                    # the crop, not the stock icon
     # Negative: no such document, the stock question icon and no failure.
     answer = window._ask_extraction_question(_question(
         "h:2", evidence={"document": "missing.png", "crop": [0, 0, 10, 10]}))
     assert answer is gui.QUESTION_BACK and seen["pixmap"] != (100, 50)
+    # Negative: markup-like characters in the question itself stay literal text.
+    tricky = _question("h:3")
+    tricky["text"] = "Pin <A&B>?\nseconda riga"
+    window._ask_extraction_question(tricky)
+    rendered = QTextDocument()
+    rendered.setHtml(seen["text"])
+    assert "Pin <A&B>?" in rendered.toPlainText() and "seconda riga" in rendered.toPlainText()
 
 
 def test_dimentica_le_risposte_clears_and_saves(window, monkeypatch, tmp_path):  # noqa: F811

@@ -144,7 +144,9 @@ def test_network_boundaries_never_leak_and_never_retry(monkeypatch, endpoint, fa
     assert "provider_code=" in str(caught.value) and "finish_reason=" in str(caught.value)
 
 
-def test_missing_args_response_is_counted_once_and_never_retried(monkeypatch):
+def test_missing_args_response_is_counted_once_by_a_direct_call(monkeypatch):
+    """A direct call makes one request and counts it once; the one larger-budget retry
+    belongs to the logged wrapper (model benchmark 2026-11-14, tests/test_bench_defects.py)."""
     monkeypatch.setenv(client.API_KEY_ENV, _KEY)
     calls, recorded = [], []
     payload = response(reason="length")
@@ -200,7 +202,8 @@ def test_other_finish_reason_keeps_existing_no_tool_diagnostic():
         client.tool_arguments({"choices": [{"finish_reason": "stop", "message": {}}]}, "report")
 
 
-def test_reasoning_exhausted_response_counts_usage_once_without_retry(monkeypatch):
+def test_reasoning_exhausted_response_counts_usage_once_per_direct_call(monkeypatch):
+    """A direct call counts its one paid attempt; the retry belongs to the logged wrapper."""
     monkeypatch.setenv(client.API_KEY_ENV, _KEY)
     calls = []
     payload = {"choices": [{"finish_reason": "length", "message": {"content": ""}}],

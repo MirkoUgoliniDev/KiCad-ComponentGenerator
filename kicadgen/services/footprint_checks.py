@@ -240,7 +240,14 @@ def geometry_hint(code: str) -> str:
 
 
 def _finding(code: str, severity: str, message: str, pads=(), graphics=()) -> GeometryFinding:
-    return GeometryFinding(code, severity, message, geometry_hint(code), tuple(pads), tuple(graphics))
+    """A geometric finding; pads and graphics by KEYWORD.
+
+    `klc_checks.Finding` gained `fix` and `fix_value` after `hint`
+    (2026-11-13): passed by position, the pad indices landed in `fix` and
+    every finding lost its pads (no selection, no highlight in the preview).
+    """
+    return GeometryFinding(code, severity, message, geometry_hint(code),
+                           pads=tuple(pads), graphics=tuple(graphics))
 
 
 # ── Pad copper ─────────────────────────────────────────────────────────────
@@ -484,20 +491,35 @@ def graphic_box(graphic) -> Optional[tuple]:
 # ── Rules ──────────────────────────────────────────────────────────────────
 
 def check_pads_overlap(footprint: Footprint) -> list:
-    """@brief Pads with different numbers whose copper overlaps or touches.
+    """@brief Pads with different numbers whose copper overlaps or touches ON THE SAME SIDE.
 
     @param footprint The footprint checked.
     @return One error per overlapping pair, in validation order.
     @note Pads sharing one non-empty number are one electrical pin and may
-        overlap (a split thermal pad), as `PackageGeometry.validate` allows.
+        overlap (a split thermal pad), as `PackageGeometry.validate` allows,
+        unless they are copies of one pad (same size, each centre inside the
+        other: a double reading), which is reported.
+        A pad without outer copper (a paste or mask aperture) is never
+        judged, and a front-only pad cannot touch a back-only one
+        (`pad_copper_sides`, review 2026-11-14).
     """
-    copper = [(index, pad) for index, pad in enumerate(footprint.pads) if has_copper(pad)]
+    # Only pads with copper on an outer side (a paste-only aperture has none),
+    # and only pairs that share a side: F.Cu and B.Cu copper never touch.
+    copper = [(index, pad) for index, pad in enumerate(footprint.pads)
+              if has_copper(pad) and pad_copper_sides(pad)]
     outlines = [(SimpleNamespace(number=str(pad.number)), pad_copper(pad)) for _index, pad in copper]
     findings = []
     for j, i in overlapping_pad_pairs(outlines):
         (ia, a), (ib, b) = copper[i], copper[j]
+        if not pad_copper_sides(a) & pad_copper_sides(b):
+            continue
         if str(a.number) and str(a.number) == str(b.number):
-            # One electrical pin in several pieces (a split thermal pad).
+            # `overlapping_pad_pairs` already lets the pieces of one pin
+            # overlap (a split thermal pad); a same-number pair it returns is
+            # one pad READ TWICE (GA9 `_copies`, review 2026-11-14): reported.
+            findings.append(_finding('pads_overlap', 'error', tx(
+                'Pad {a} letto due volte: due copie sovrapposte dello stesso pad.', a=a.number),
+                pads=(ia, ib)))
             continue
         findings.append(_finding('pads_overlap', 'error', tx(
             'Pad {a} e pad {b}: il rame si sovrappone.', a=a.number or '«»', b=b.number or '«»'),
@@ -732,7 +754,8 @@ def check_hole_vs_lead(footprint: Footprint) -> list:
     for index, pad in enumerate(footprint.pads):
         lead = getattr(pad, 'lead', None)
         hole = _hole_sides(pad)
-        if not lead or hole is None:
+        if not lead or hole is None or getattr(pad, 'lead_fit', None) == 'press_fit':
+            # A press-fit terminal is meant to be tighter than its hole.
             continue
         try:
             if lead_passes(lead, hole[0], hole[1]):

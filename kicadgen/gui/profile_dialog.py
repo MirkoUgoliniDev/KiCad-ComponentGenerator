@@ -30,7 +30,7 @@ HELP = (
     'dell’analisi; le istruzioni specifiche della tipologia vengono aggiunte al prompt '
     'del componente nel tab Progetto, dove puoi aggiungere note per la singola estrazione.',
     'Localizza gli ingombri nelle foto calibrate. Il modello di ogni chiamata si sceglie in '
-    'Configurazione → «Modello AI...» (il modello unico, oppure uno proprio per ogni passo); il '
+    'Configurazione → «Modello AI...» (il modello predefinito, oppure uno proprio per ogni passo); il '
     'profilo sceglie solo i prompt. Le istruzioni foto '
     'sono aggiunte ai prompt fotografici, inclusa la verifica, '
     'ma non al prompt Lettura dei ritagli: descrivono la scheda intera, non il singolo corpo. '
@@ -320,7 +320,7 @@ class ProfileEditor(QDialog):
             self._refresh_source(key)
 
     def _read_step_models(self):
-        """The single model and the step table, or (None, None) when the database cannot be read."""
+        """The default model and the step table, or (None, None) when the database cannot be read."""
         try:
             return self.defaults.get('model') or '', self.store.step_models()
         except (ProfileError, sqlite3.Error, OSError, AttributeError):
@@ -344,7 +344,7 @@ class ProfileEditor(QDialog):
         own = (steps or {}).get(owner, '')
         text = (tx("Modello: {model} — si cambia in Configurazione → «Modello AI...».", model=own)
                 if own else
-                tx("Modello: modello unico ({model}) — si cambia in Configurazione → «Modello AI...».",
+                tx("Modello: modello predefinito ({model}) — si cambia in Configurazione → «Modello AI...».",
                    model=single))
         label = QLabel(text)
         label.setObjectName(f'{key}_model')

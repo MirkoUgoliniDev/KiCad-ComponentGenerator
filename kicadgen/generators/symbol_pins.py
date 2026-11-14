@@ -62,6 +62,13 @@ def _entry_label(entry: dict) -> str:
     return ' '.join(part for part in (_key(entry.get('pin')), _name(entry)) if part)
 
 
+#: Template of the note «a pinout name refers to another pad» (its type
+#: identity): the window folds these notes into one log line by this
+#: template, never by the translated text (real run 2026-11-13).
+NAME_REFERS_TO_OTHER_PAD = ('Pin {number}: il nome «{name}» richiama il pad {other}; tenuto sul '
+                            'pad {number} come dice il numero. Verifica la piedinatura.')
+
+
 def pinout_on_pads(pinout: Iterable[dict] | None, pad_numbers: Iterable) -> PinoutOnPads:
     """@brief Build the symbol rows as exactly the footprint pads, named by the pinout table.
 
@@ -118,6 +125,8 @@ def pinout_on_pads(pinout: Iterable[dict] | None, pad_numbers: Iterable) -> Pino
             # Contradiction check: the name points at one other pad only.
             others = {token for token in name_tokens(_name(entry)) if token in pad_set} - {number}
             if len(others) == 1 and number not in name_tokens(_name(entry)):
+                # The literal template (the catalogue test reads it from here);
+                # equal to NAME_REFERS_TO_OTHER_PAD, which a test pins.
                 result.notes.append(_message(
                     'Pin {number}: il nome «{name}» richiama il pad {other}; tenuto sul pad {number} '
                     'come dice il numero. Verifica la piedinatura.',

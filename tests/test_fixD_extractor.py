@@ -244,14 +244,24 @@ def test_d2_repair_compares_normalized_sides(offline, monkeypatch):
 
 
 def test_d2_a_correction_that_changes_counts_is_still_rejected(offline, monkeypatch):
+    """CONTRACT CHANGED (model benchmark 2026-11-14, audit H1): rejected, never as an exception.
+
+    The correction that changes a count is not used: the answer's own sides
+    and counts stay, the numbering conflict is asked (side_numbering) and
+    the footprint is blocked until the answer; the question says why the
+    correction was refused.
+    """
     sides = [dict(edge="top", count=2, pitch_mm=2.54, first_pin=1),
              dict(edge="bottom", count=2, pitch_mm=2.54, first_pin=1)]
     corrected = [dict(edge="top", count=2, pitch_mm=2.54, first_pin=1),
                  dict(edge="bottom", count=3, pitch_mm=2.54, first_pin=3)]
     monkeypatch.setattr(ext, "call_tool", Mock(side_effect=[
-        dict(layout="castellated", castellated_sides=sides), dict(castellated_sides=corrected)]))
-    with pytest.raises(ExtractionError, match="conteggi"):
-        ext.extract_pin_header_params([offline])
+        dict(layout="castellated", castellated_sides=sides), dict(castellated_sides=corrected),
+        {"sides": []}]))
+    result = ext.extract_pin_header_params([offline])
+    assert [side["count"] for side in result.castellated_sides] == [2, 2]
+    (question,) = [q for q in result.questions if q["field"] == "side_numbering"]
+    assert "conteggi" in question["text"] and result.pin_map_conflict
 
 
 def test_rejected_main_answer_is_kept_in_the_log_and_the_error(offline, monkeypatch):

@@ -261,28 +261,9 @@ def test_photo_call_line_is_one_catalogue_template(window):
         "Chiamata sulla fotografia affidata a x/y"
 
 
-@pytest.mark.parametrize("language", ["en", "fr"])
-def test_session_model_picker_title_is_translated(window, monkeypatch, language):
-    """@brief Positive: the picker receives the catalogue title of the active language."""
-    seen = {}
-
-    def fake_pick_model(current, parent, **kwargs):
-        seen.update(kwargs)
-        return None
-
-    monkeypatch.setattr(gui, "pick_model", fake_pick_model)
-    _set_language(window, language)
-    window._pick_session_model()
-    assert seen["title"] == DEFAULT_TRANSLATIONS["ui:Modello solo per questa sessione"][language]
-
-
-def test_session_model_picker_title_in_italian(window, monkeypatch):
-    """@brief Negative: in Italian the title is the source text, unchanged."""
-    seen = {}
-    monkeypatch.setattr(gui, "pick_model", lambda current, parent, **kw: seen.update(kw))
-    _set_language(window, "it")
-    window._pick_session_model()
-    assert seen["title"] == "Modello solo per questa sessione"
+# CONTRACT CHANGED 2026-11-13: the per-session model picker whose title these two
+# tests checked was removed (user decision); the «Modelli AI» line that replaces
+# it is checked in tests/test_ai_models_line.py, in Italian and English.
 
 
 # ── A6: the proposal of the analysis never renames by itself ─────────────
@@ -362,7 +343,6 @@ def test_openrouter_crop_model_with_deepseek_main_model_asks_for_the_key(window,
                         lambda *args, **kwargs: questions.append(args) or QMessageBox.StandardButton.No)
     values = {"model": providers.DEEPSEEK_PREFIX + "deepseek-chat", "crop_model": "openai/gpt-4o"}
     monkeypatch.setattr(window, "_profile_values", lambda: dict(values))
-    window._session_model = None
     assert window._run_models() == (values["model"], values["model"], "openai/gpt-4o")
     assert window._ensure_api_key() is False
     assert len(questions) == 1
@@ -376,7 +356,6 @@ def test_all_deepseek_models_need_no_openrouter_key(window, monkeypatch):
                         lambda *args, **kwargs: questions.append(args) or QMessageBox.StandardButton.No)
     values = {"model": providers.DEEPSEEK_PREFIX + "deepseek-chat", "crop_model": ""}
     monkeypatch.setattr(window, "_profile_values", lambda: dict(values))
-    window._session_model = None
     assert window._run_models() == (values["model"], values["model"])
     assert window._ensure_api_key() is True
     assert questions == []

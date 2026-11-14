@@ -39,6 +39,11 @@ def test_timeout_does_not_hide_other_checks(tmp_path, monkeypatch):
     monkeypatch.setattr(check.subprocess, 'run', timeout)
     results = check.verify_component(art.component_dir, 'Demo', [{'pin': '1', 'name': 'GPIO1'}])
     assert sum(r.status == 'ERROR' for r in results) == 3
+    # CONTRACT CHANGED 2026-11-14 (automatic DRC/ERC): a kicad-cli that times
+    # out makes the DRC and the ERC SKIP («non eseguito»), never an ERROR, and
+    # the three file reads keep their ERRORs.
+    skipped = {r.code: r.detail for r in results if r.status == 'SKIP'}
+    assert skipped['drc'].startswith('DRC non eseguito') and skipped['erc'].startswith('ERC non eseguito')
     assert results[-1].title == 'Verifiche manuali'
 
 

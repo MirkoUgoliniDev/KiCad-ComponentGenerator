@@ -388,9 +388,11 @@ def test_a_subset_or_a_different_view_is_said():
     apply_dedicated_pads(data, _pad_reading({"1": RELAY["1"], "4": RELAY["4"], "2": RELAY["2"]}))
     # Since 2026-10-30 (user) a partial confirmation blocks: two pads unchecked.
     assert "solo 3 pad su 5" in unresolved(data)
+    # CONTRACT CHANGED (model benchmark 2026-11-14): the same geometry declared
+    # from two sides is said, and the side is asked instead of a block.
     data = _main_with_pads(RELAY, view="top")
     apply_dedicated_pads(data, _pad_reading(RELAY, view="bottom"))
-    assert "viste diverse" in unresolved(data)
+    assert "viste diverse" in data["notes"] and data["contacts_view"] not in ("top", "bottom")
     data = _main_with_pads(RELAY)
     apply_dedicated_pads(data, _pad_reading({"1": RELAY["1"]}))
     assert "meno di due" in unresolved(data)
@@ -547,7 +549,7 @@ def test_end_to_end_a_grid_the_dedicated_reading_confirms_is_generated(offline, 
     monkeypatch.setattr(ext, "call_tool", call)
     params = ext.extract_pin_header_params([_drawing(tmp_path)], component_family="single_tht",
                                            document_roles={"quote.png": ["pinout"]})
-    assert params.pin_map_conflict and "stesso modello" in params.pin_map_conflict
+    _same_model_question(params)
 
 
 #: Third dedicated call of a single part (user, 2026-11-03): the printed body quotes.
@@ -646,3 +648,17 @@ def test_the_pad_prompt_and_tool_carry_no_sample_data():
     from tests.test_extraction_prompts import _sample_tokens_in
     assert _sample_tokens_in(ext.DEFAULT_PAD_POSITIONS_PROMPT) == []
     assert _sample_tokens_in(json.dumps(ext._PAD_POSITIONS_TOOL, ensure_ascii=False)) == []
+
+
+def _same_model_question(params):
+    """The pad-layout question of two agreeing readings of ONE model (round 8, real TEL run).
+
+    CONTRACT CHANGED 2026-11-13: such readings are one reading, still never
+    adopted, but they are ASKED as one recommended confirmation instead of a
+    hard block without a question.
+    """
+    assert not params.pin_map_conflict
+    (question,) = [q for q in params.questions or () if q["field"] == "pad_layout"]
+    assert "stesso modello" in question["text"]
+    assert len(question["options"]) == 1 and question["options"][0].get("recommended") is True
+    return question

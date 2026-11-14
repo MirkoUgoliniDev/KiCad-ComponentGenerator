@@ -11,8 +11,12 @@ def test_verification_is_guarded_and_uses_applied_snapshot(window, monkeypatch):
     window.symbol_tab.table.item(0, 1).setText('Draft')
     captured = []
     class Dialog:
-        def __init__(self, args, parent, tx):
-            captured.append(args)
+        # CONTRACT CHANGED 2026-11-13: the check dialog also receives its fixes
+        # (`actions`, the symbol re-export); this stub only records `args`.
+        def __init__(self, args, parent, tx, actions=None):
+            # CONTRACT CHANGED 2026-11-14 (review P2): the window gives an args BUILDER,
+            # called by the dialog for every run; the stub calls it once.
+            captured.append(args() if callable(args) else args)
         def exec(self):
             assert window._background_work_running()
             assert not window._can_leave_project()
@@ -49,7 +53,8 @@ def test_ai_account_binding_only_during_analysis(window, monkeypatch, tmp_path):
     class Dialog(QObject):
         analysis_started = pyqtSignal()
         analysis_finished = pyqtSignal()
-        def __init__(self, args, parent, tx):
+        # CONTRACT CHANGED 2026-11-13: `actions` (the dialog's fixes) accepted, ignored.
+        def __init__(self, args, parent, tx, actions=None):
             super().__init__()
         def exec(self):
             assert events == []

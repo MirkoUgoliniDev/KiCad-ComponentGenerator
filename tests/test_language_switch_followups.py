@@ -129,8 +129,10 @@ def _switch(window, language):
 
 
 def _expected_summary(window):
+    # CONTRACT CHANGED 2026-11-13: the summary names the saved default model
+    # (the per-session combo it quoted was removed by the user's decision).
     return (f"{window.combo_photo_detector.currentText()} · "
-            f"{window.combo_model.currentText()}")
+            f"{window._default_model()}")
 
 
 def _standard_label(language):

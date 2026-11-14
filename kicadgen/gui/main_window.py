@@ -72,12 +72,13 @@ from ..services.datasheet_extractor import (
     extract_pin_header_params,
 )
 from ..services.system_dependencies import check_kicad_version, detect_external_applications
+from ..services.component_check import SCHEMATIC_SKIP_TEXTS
 from ..services.kicad_library import (
     KiCadLibraryError,
     create_preview_project,
     discover_component_artifacts,
     install_component_library,
-    launch_preview,
+    launch_preview_editors,
     MINIMUM_KICAD_VERSION,
     plan_component_install,
     resolve_global_fp_lib_table,
@@ -107,8 +108,6 @@ from .component_state import (BoundedValue, FlagValue, MAX_LENGTH_MM, MIN_HEIGHT
 from .analysis_overlay import AnalysisOverlay
 from .generation_options_dialog import GenerationOptionsDialog
 from .guided_documents import GuidedDocuments
-from .model_dialog import pick_model
-from ..services.openrouter import PHOTO_CAPABILITIES
 from .pinout_dialog import PinoutDialog, pin_sort_key
 from .photo_review_dialog import PhotoReviewDialog, PhotoTransform, ai_only_excluded
 from .preview_3d_pending import Preview3DPending
@@ -171,7 +170,8 @@ from .tooltips import install_tooltip_filter
 # (HANDOFF 130, T6/G5) and re-exported here, where callers and tests look for them.
 from .workers import (
     Cad3DWorker, ExtractWorker, GenerateWorker, ReconcileWorker, TerminalDetailWorker,
-    UpdateCheckWorker, YoloPretestWorker, _announce_freecad_measuring, _photo_scale_kwargs,
+    PreviewRenderWorker, UpdateCheckWorker, YoloPretestWorker, _announce_freecad_measuring,
+    _photo_scale_kwargs,
     accepted_kwargs, accepts_keyword, cancel_kwargs, freecad_progress, matching_cancel_kwargs,
     phase_kwargs,
 )
@@ -524,18 +524,6 @@ _PHOTO_DETECTOR_TRANSLATIONS = {
               "Sie hängt vom Modell ab: erhöhen, wenn der Vortest Rahmen auf Beschriftungen, "
               "Löchern oder Pads zeigt, senken, wenn Bauteile fehlen. Es ist Roboflows "
               "Regler „Confidence Threshold“. Rahmen unter der Schwelle bleiben im Audit."},
-    "vlm_model": {"it": "Modello di visione:", "en": "Vision model:",
-                  "fr": "Modèle de vision :", "de": "Sehmodell:"},
-    "vlm_pick": {"it": "Scegli modello…", "en": "Choose model…",
-                 "fr": "Choisir le modèle…", "de": "Modell wählen…"},
-    "vlm_help": {"it": "Modello che guarda la fotografia ed elenca i corpi. "
-                       "Vuoto: lo stesso modello AI dell'estrazione.",
-                 "en": "Model that looks at the photograph and lists the bodies. "
-                       "Empty: the same AI model as the extraction.",
-                 "fr": "Modèle qui regarde la photographie et liste les corps. "
-                       "Vide : le même modèle IA que l'extraction.",
-                 "de": "Modell, das das Foto ansieht und die Körper auflistet. "
-                       "Leer: dasselbe KI-Modell wie die Extraktion."},
     "browse": {"it": "Sfoglia…", "en": "Browse…",
                "fr": "Parcourir…", "de": "Durchsuchen…"},
     # .onnx with onnxruntime, .pt with PyTorch/Ultralytics (user, 2026-09-25).
@@ -713,17 +701,12 @@ def _side_pinout(side: dict) -> list[dict]:
     """Pin number -> silkscreen label, for one side of the module.
 
     The labels arrive in the order in which they are met along the edge,
-    the same convention with which the generator numbers the pads: it is
-    enough to pair them with the numbers, respecting any reversed numbering.
+    the same convention with which the generator numbers the pads. One rule
+    for the GUI, the extraction and the component check:
+    `pinout_coherence.side_pad_labels` (moved there on 2026-11-13).
     """
-    first = int(side.get("first_pin", 1))
-    numbers = list(range(first, first + int(side["count"])))
-    if side.get("reverse"):
-        numbers.reverse()
-    return [
-        {"pin": number, "name": name}
-        for number, name in zip(numbers, side.get("pin_names") or ())
-    ]
+    from ..services.pinout_coherence import side_pad_labels
+    return side_pad_labels(side)
 
 
 def renamed_symbol_text(text: str, old_name: str, new_name: str) -> str:
@@ -733,8 +716,10 @@ def renamed_symbol_text(text: str, old_name: str, new_name: str) -> str:
     @param old_name Project (component) name before the rename.
     @param new_name Project name after the rename.
     @return The text with `(symbol "OLD"` and its unit symbols `"OLD_<u>_<s>"`,
-        the Value property equal to the old name and a Footprint property
-        `<library>:OLD` all carrying the new name; everything else untouched.
+        the Value property equal to the old name, a Footprint property
+        `<library>:OLD` and the automatic filter token of `ki_fp_filters`
+        (`fp_filter_pattern`) all carrying the new name; everything else
+        untouched.
     @note Audit 2026-10-15, item 9: a rename left `OLD.kicad_sym` behind with
         «Footprint KiCadGen:OLD», breaking the rule that footprint, symbol
         and 3D model names stay consistent. Project names are folder names,
@@ -747,7 +732,30 @@ def renamed_symbol_text(text: str, old_name: str, new_name: str) -> str:
                   lambda match: f'{match.group(1)}"{new_name}"', text)
     text = re.sub(r'(\(property\s+"Footprint"\s+"[^":]*:)' + old + r'"',
                   lambda match: f'{match.group(1)}{new_name}"', text)
+    # The automatic footprint filter (`fp_filter_pattern`) follows the name;
+    # a filter the user typed is left as written (KiCad workflow review).
+    old_filter, new_filter = fp_filter_pattern(old_name), fp_filter_pattern(new_name)
+
+    def renamed_filters(match):
+        tokens = [new_filter if token == old_filter else token
+                  for token in match.group(2).split(" ")]
+        return match.group(1) + " ".join(tokens) + match.group(3)
+
+    text = re.sub(r'(\(property\s+"ki_fp_filters"\s+")([^"]*)(")', renamed_filters, text)
     return text
+
+
+def fp_filter_pattern(name: str) -> str:
+    """@brief The automatic footprint filter of a component: ONE token matching its footprint.
+
+    @param name The component (footprint) name.
+    @return ``<name>*`` with every blank replaced by KiCad's single-character
+        wildcard «?»: KiCad splits ``ki_fp_filters`` at spaces, so a name with
+        spaces would otherwise become several unrelated filters; '' for an
+        empty name.
+    """
+    name = str(name or "").strip()
+    return (re.sub(r"\s", "?", name) + "*") if name else ""
 
 
 #: Symbol properties that belong to the METADATA gate, left out of the
@@ -759,18 +767,11 @@ def _symbol_text_without_metadata(text: str) -> str:
     """@brief A .kicad_sym text with its metadata property lines removed and whitespace normalised.
 
     @param text The library text (file or rendered).
-    @return The lines that describe the symbol itself (name, Footprint link,
-        pins, graphics, property positions), stripped, joined by newlines.
+    @return `component_check.symbol_text_without_metadata`: ONE rule for the
+        KiCad gate and the component check.
     """
-    kept = []
-    for line in text.replace("\r\n", "\n").split("\n"):
-        stripped = line.strip()
-        if not stripped:
-            continue
-        if any(stripped.startswith(f'(property "{key}"') for key in SYMBOL_METADATA_PROPERTIES):
-            continue
-        kept.append(stripped)
-    return "\n".join(kept)
+    from ..services.component_check import symbol_text_without_metadata
+    return symbol_text_without_metadata(text)
 
 
 #: Fields of the footprint parameters that change no pad and no outline:
@@ -2254,6 +2255,42 @@ class MainWindow(QMainWindow):
         #: next extraction (`answers=`), so a question with a known key is
         #: never asked twice (review 2026-11-04, H7).
         self._extraction_answers: dict = {}
+        #: Key of the «side_numbering» question of the analysis applied last
+        #: (its digest names the side/pinout situation), None when that
+        #: analysis asked none; saved with the project. The component check
+        #: reads the answer of THIS key only (`_component_check_document`).
+        self._side_numbering_key: str | None = None
+        #: `ExtractedParams.pin_numbers_printed` of the analysis applied last
+        #: (None: not declared, read as printed); saved with the project.
+        self._pin_numbers_printed: bool | None = None
+        #: The settled pinout of an analysis WITHOUT printed pin numbers: the
+        #: rows of the conventional numbering, in the same frame as
+        #: `_document_sides` (the component check compares these two, never
+        #: the analysis' own numbers). [] otherwise; saved with the project.
+        self._convention_pinout: list = []
+        #: True after the user answered «Lascia bloccato» (keep blocked) to a
+        #: pad-layout question: no footprint is written from the provisional
+        #: pads until an applied footprint edit or a new analysis; saved.
+        self._pads_kept_blocked = False
+        #: KiCad libraries this component was installed in, as
+        #: [{"scope": "project"|"global", "pretty_dir": folder}]: the component
+        #: check compares the installed footprint with the current one
+        #: (`component_check.library_checks`); saved with the project.
+        self._kicad_installs: list = []
+        #: How the NC/NO functions of a switch contact were confirmed
+        #: (`ExtractedParams.contact_function_witness`), None without a switch
+        #: contact; saved, read by «Verifica componente» after a reopen.
+        self._contact_function_witness = None
+        #: The field of the partial re-read being applied («body_height_mm»,
+        #: «pad_layout»), None otherwise: a re-read outside the pad scope does
+        #: not recompute the pad state (`_settle_pad_state_from`, H2).
+        self._reread_applying_field = None
+        #: The castellated sides of the analysis applied last, CANONICAL
+        #: (view from above, the numbering the footprint is built with) and
+        #: with their own silkscreen labels: the one source the component
+        #: check pairs labels and pads from (`pad_label_pairs`), saved with
+        #: the project. The window's side rows keep no labels.
+        self._document_sides: list = []
         #: Questions of the last extraction still without an answer, as the
         #: extractor returned them (`ExtractedParams.questions`); saved with
         #: the project so «Rigenera modello STEP» can still ask them.
@@ -2361,15 +2398,9 @@ class MainWindow(QMainWindow):
         # context menus) in the chosen language, not in English (26/09).
         from .qt_translations import install_qt_translations
         install_qt_translations(self.i18n.language)
-        # Model chosen for this session only (difficult datasheet): it is not
-        # saved in config.json and is lost on close, by choice.
-        self._session_model: str | None = None
-        #: Session choice for the model that looks at the photograph. None
-        #: means «the one configured in the profile»: at start-up no model
-        #: decided in here is imposed, because a constant in the window code
-        #: silently wins over the user's settings and sends the paid call to a
-        #: model the user did not choose.
-        self._vlm_model: str | None = None
+        # No per-session model any more (user, 2026-11-13): every analysis
+        # uses the saved default model and the per-step models of
+        # Configurazione → «Modello AI...» (Configuration → AI model).
         self._auto_after_extraction = False
         self._auto_generation_params = None
         self._applying_extraction = False
@@ -2554,6 +2585,7 @@ class MainWindow(QMainWindow):
             lambda: self._start_reread("pad_layout"))
         for action in (self.action_reread_height, self.action_reread_pads):
             action.setVisible(self._reread_worker_class() is not None)
+        # Also enables «Dimentica le risposte» only while no work runs (M4).
         tools_menu.aboutToShow.connect(self._refresh_reread_actions)
         tools_menu.addSeparator()
         # The number «n. 17» the analysis log gives each prompt sent, back
@@ -2605,10 +2637,10 @@ class MainWindow(QMainWindow):
         )
 
     def _edit_llm_settings(self) -> None:
-        """@brief Configurazione → «Modello AI...»: the single model and the model of every step.
+        """@brief Configurazione → «Modello AI...»: the default model and the model of every step.
 
         @note Models only: the prompts are edited in the profile manager
-            (user, 2026-11-12). The single model is saved among the AI
+            (user, 2026-11-12). The default model is saved among the AI
             defaults and, in the same transaction, ONLY the steps whose model
             the user changed (review finding B): an untouched pad or body step
             keeps following the old «Posizioni pad» model
@@ -2626,7 +2658,6 @@ class MainWindow(QMainWindow):
         dialog = LlmSettingsDialog(current_model=defaults["model"], parent=self,
                                    current_step_models=shown_steps,
                                    stored_step_fields=set(stored),
-                                   session_model=self._session_model,
                                    account_opener=self._open_ai_account)
         self.i18n.retranslate_widgets(dialog)
         if self._run_modal(dialog) != QDialog.DialogCode.Accepted:
@@ -2645,8 +2676,8 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(
                 self, self.i18n.text("Impostazioni non salvate"), str(exc))
             return
-        self._refresh_model_combo()
-        self._append_log(tx("Modelli AI salvati. Modello unico: {model}.",
+        self._refresh_ai_models_line()
+        self._append_log(tx("Modelli AI salvati. Modello predefinito: {model}.",
                             model=self._default_model()))
         own = self._own_step_models_text(chosen_steps)
         if own:
@@ -2654,11 +2685,11 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _own_step_models_text(models) -> str:
-        """@brief The log line naming the steps that do not use the single model.
+        """@brief The log line naming the steps that do not use the default model.
 
         @param models {step field: model or ""} (prompt_models.step_models), or None.
         @return «Passi con un modello proprio: <step> → <model>; ...», or ""
-            when every step follows the single model.
+            when every step follows the default model.
         """
         pairs = [f"{tx(item.title)} → {models[item.field]}" for item in PROMPT_STEPS
                  if models and (models.get(item.field) or "").strip()]
@@ -2667,7 +2698,7 @@ class MainWindow(QMainWindow):
     def _step_models(self):
         """@brief The model of every analysis step (ProfileStore.step_models), or None.
 
-        @return {step field: model or "" for the single model}, or None when
+        @return {step field: model or "" for the default model}, or None when
             the profile database cannot be read: every call then uses its
             usual model, as before the step table existed.
         """
@@ -3434,72 +3465,79 @@ class MainWindow(QMainWindow):
     # ── LLM model ───────────────────────────────────────────────────
 
     def _default_model(self) -> str:
-        """Resolved profile default; session selection remains separate."""
+        """@brief The saved default model (Configurazione → «Modello AI...»)."""
         return self._profile_values()['model']
 
     def _effective_model(self) -> str:
-        """Model to use for the next extraction.
+        """@brief Model to use for the next extraction: always the saved default model.
 
-        It is the session model, if one was chosen from the "Progetto" tab
-        for this component; otherwise the global default.
+        @return `_default_model()`.
+        @note There is no per-session model any more (user, 2026-11-13): the
+            analysis uses the saved default model plus the per-step models,
+            both chosen and saved in Configurazione → «Modello AI...».
         """
-        return self._session_model or self._default_model()
+        return self._default_model()
 
     def _vision_model(self) -> str:
         """@brief Return the extraction model, used by the side calls that run outside a full analysis.
 
         @return `_effective_model()`.
-        @note It is NOT the model of the photo inventory: that is
-            `_photo_detector_model()`, which follows the session vision model.
-            The key check of a full analysis (`_run_models`) names the photo
-            model directly; the pin-type suggestion and the terminal detail
-            keep this one, as before.
+        @note The pin-type suggestion and the terminal detail use it unless
+            their step has a model of its own.
         """
         return self._effective_model()
 
     def _photo_detector_model(self) -> str:
         """@brief Model that looks at the photo in the next extraction.
 
-        @return Model identifier: the session choice if there is one,
-            otherwise the one configured in the profile.
+        @return The default model; the inventory step's own model, when one
+            is saved, replaces it inside the worker (`step_models`).
         @note It is the paid call of the photo path -- with 'vlm' it detects
             and lists the bodies, with 'yolo' it reconciles the local
             proposals -- and it reaches the worker as `verification_model`.
-        @note At start-up it follows the model configured for extraction, not
-            a constant written here. Before, the initial value was a model
-            fixed in the window code: whoever opened the app found a model
-            already chosen that they had not configured, and the paid call on
-            the photo went to it without anything saying so. Whoever wants a
-            different model, perhaps a cheaper one, chooses it from the panel
-            and it applies to the session.
+            The former per-session vision model was removed with the session
+            model (user, 2026-11-13).
         """
-        return self._vlm_model or self._effective_model()
-
-    def _verification_model(self) -> str:
-        """@brief Return the single AI model also used for photo verification."""
         return self._effective_model()
 
-    def _refresh_model_combo(self) -> None:
-        """Realign the drop-down of the Progetto tab to default + session choice.
+    def _verification_model(self) -> str:
+        """@brief Return the default AI model also used for photo verification."""
+        return self._effective_model()
 
-        Also refreshes the summary of «Strumenti AI», which quotes the model
-        and detector texts this rewrites.
+    def _own_step_model_count(self) -> int:
+        """@brief How many analysis steps have a model of their own.
+
+        @return Number of steps whose model in `_step_models()` is not blank;
+            0 when the profile database cannot be read.
         """
-        if not hasattr(self, "combo_model"):
+        return sum(1 for model in (self._step_models() or {}).values()
+                   if str(model or "").strip())
+
+    def _ai_models_line_text(self) -> str:
+        """@brief Value of the read-only «Modelli AI:» row of «Strumenti AI».
+
+        @return «predefinito <model> · <N> passi con un modello proprio», the
+            count left out when no step has a model of its own.
+        @note Composed at every refresh (language change included), never
+            stored: the model id and the count come from the database.
+        """
+        text = tx("predefinito {model}", model=self._default_model())
+        count = self._own_step_model_count()
+        if count == 1:
+            text += " · " + tx("1 passo con un modello proprio")
+        elif count > 1:
+            text += " · " + tx("{n} passi con un modello proprio", n=count)
+        return text
+
+    def _refresh_ai_models_line(self) -> None:
+        """@brief Realign the «Modelli AI» row of the Progetto tab to the saved models.
+
+        Also refreshes the summary of «Strumenti AI», which quotes the default
+        model, and the provider of the balance line.
+        """
+        if not hasattr(self, "label_ai_models"):
             return
-        blocked = self.combo_model.blockSignals(True)
-        self.combo_model.clear()
-        self.combo_model.addItem(
-            self.i18n.tr("model.default", model=self._default_model()), None
-        )
-        if self._session_model:
-            self.combo_model.addItem(
-                self.i18n.tr("model.session", model=self._session_model), self._session_model
-            )
-            self.combo_model.setCurrentIndex(1)
-        else:
-            self.combo_model.setCurrentIndex(0)
-        self.combo_model.blockSignals(blocked)
+        self.label_ai_models.setText(self._ai_models_line_text())
         # Every path that changes the model goes through here (project
         # restore, models window, profile): the balance shown follows the
         # provider of the model in use (user, 27/09: it stayed OpenRouter after
@@ -3508,11 +3546,17 @@ class MainWindow(QMainWindow):
 
         if hasattr(self, "combo_photo_detector"):
             self._refresh_photo_detector_controls()
-        # The refill runs with signals blocked and rewrites both texts the
-        # summary quotes: refresh it here, after them (review 2026-10-16,
+        # Refresh the summary after the texts it quotes (review 2026-10-16,
         # R2I3: after a language switch it showed the previous language).
         if hasattr(self, "group_ai_tools"):
             self._refresh_ai_tools_summary()
+
+    def _on_edit_ai_models(self, _checked: bool = False) -> None:
+        """@brief The button of the «Modelli AI:» row: open Configurazione → «Modello AI...».
+
+        @param _checked Unused flag of `QPushButton.clicked`.
+        """
+        self._edit_llm_settings()
 
     def _photo_detector_text(self, key: str, **values: object) -> str:
         """Resolve local fallbacks through the existing translation mechanism."""
@@ -3566,12 +3610,6 @@ class MainWindow(QMainWindow):
             self._photo_detector_text("default", path=default_path))
         self.field_yolo_model.setToolTip(
             self._photo_detector_text("path_help", path=default_path))
-        self.label_vlm_model.setText(self._photo_detector_text("vlm_model"))
-        self.btn_pick_vlm_model.setAccessibleName(self._photo_detector_text("vlm_pick"))
-        self.btn_pick_vlm_model.setToolTip(
-            self._photo_detector_text("vlm_pick") + "\n" + self._photo_detector_text("vlm_help"))
-        self.field_vlm_model.setToolTip(self._photo_detector_text("vlm_help"))
-        self.field_vlm_model.setText(self._photo_detector_model())
         self._on_photo_detector_changed()
 
     def _on_photo_detector_changed(self) -> None:
@@ -3608,15 +3646,7 @@ class MainWindow(QMainWindow):
             self._models_form.setRowVisible(self._row_yolo_model, local and not single)
             self._models_form.setRowVisible(self._row_smd_model, smd and not single)
             self._models_form.setRowVisible(self._row_yolo_params, local and not single)
-            # The vision model is used in both photographic paths, but it normally
-            # coincides with «Modello AI» (AI model). The row is shown only when a
-            # different override has been chosen, avoiding repeating the same
-            # name twice. With yolo_only no AI model works.
-            vision_override = bool(
-                self._vlm_model and self._vlm_model != self._effective_model())
-            self._models_form.setRowVisible(
-                self._row_vlm_model,
-                not single and detector in ("yolo", "vlm") and vision_override)
+            # With «Solo YOLO locale» (local YOLO only) no AI model works.
             self._models_form.setRowVisible(self._row_ai_model, detector != "yolo_only")
             # The credit too (user, 2026-09-25): the pretest spends nothing.
             if hasattr(self, "_row_ai_account"):
@@ -3720,23 +3750,6 @@ class MainWindow(QMainWindow):
             return default_yolo_smd_model()
         return yolo_weights_path(DEFAULT_YOLO_ONNX)
 
-    def _pick_session_vlm_model(self) -> None:
-        """@brief Choose the model that looks at the photo, for this session only.
-
-        @note It asks for the capabilities of the photo work -- structured
-            answer and image reading -- not those of the datasheets: also
-            requiring PDFs would hide the vision-only models, which are
-            exactly the ones one wants to try here.
-        """
-        chosen = pick_model(self._photo_detector_model(), self,
-                            title=self._photo_detector_text("vlm_model"),
-                            capabilities=PHOTO_CAPABILITIES)
-        if chosen:
-            self._vlm_model = chosen
-            self.field_vlm_model.setText(chosen)
-            self._on_photo_detector_changed()
-            self._append_log(tx("Modello di visione per questa sessione: {chosen}.", chosen=chosen))
-
     def _pick_session_smd_model(self) -> None:
         """@brief «Scegli la rete SMD»: the checkpoints of models/smd with what each declares.
 
@@ -3782,41 +3795,6 @@ class MainWindow(QMainWindow):
         account = getattr(self, "ai_account", None)
         if account is not None:
             account.set_provider(self._balance_provider())
-
-    def _on_model_combo_changed(self) -> None:
-        self._session_model = self.combo_model.currentData()
-        self._sync_balance_provider()
-        if self._session_model:
-            self._append_log(
-                tx("Modello per questa sessione: {session_model} (il default globale non "
-                   "cambia).",
-                   session_model=self._session_model)
-            )
-        else:
-            self._append_log(tx("Modello: default globale ({default_model}).",
-                                default_model=self._default_model()))
-
-    def _pick_session_model(self) -> None:
-        """Choose a model valid only for the extractions of this session.
-
-        Useful for difficult datasheets: switch to a more capable (and more
-        expensive) model without changing the default saved in the SQLite
-        profile.
-        """
-        # The title goes through the catalogue like every visible text
-        # (review 2026-10-27, A5): the picker shows it as it receives it.
-        chosen = pick_model(
-            self._effective_model(), self,
-            title=self.i18n.text("Modello solo per questa sessione"),
-        )
-        if not chosen:
-            return
-        if chosen == self._default_model():
-            self._session_model = None
-        else:
-            self._session_model = chosen
-        self._refresh_model_combo()
-        self._on_model_combo_changed()
 
     def _open_config_file(self) -> None:
         if not config_path().is_file() and not self._save_config_safely():
@@ -4466,6 +4444,13 @@ class MainWindow(QMainWindow):
             self._refresh_footprint_checks(self._fp_last_checks_source())
         # The export history shows its kinds translated at draw time (B2).
         self._refresh_kicad_export_history()
+        # The 3D image window of «Prova in KiCad» composes its texts itself.
+        render_window = getattr(self, "_render_window", None)
+        if render_window is not None:
+            try:
+                render_window.retranslate()
+            except RuntimeError:
+                self._render_window = None  # deleted by Qt meanwhile
         if hasattr(self, "guided_docs"):
             # Status line and role badges are composed texts (`i18n_skip`):
             # only a refresh writes them in the new language.
@@ -4521,7 +4506,7 @@ class MainWindow(QMainWindow):
         self.action_report_problem.setText(self.i18n.text("Segnala un problema..."))
         self.action_check_updates.setText(self.i18n.text("Controlla aggiornamenti..."))
         self._retranslate_component_types()
-        self._refresh_model_combo()
+        self._refresh_ai_models_line()
         self._refresh_output_actions()
         self._apply_view_cube_labels()
         # Texts the generic pass does not cover: entries of the contact-type
@@ -4913,29 +4898,31 @@ class MainWindow(QMainWindow):
         self._align_form(ai_form, "project")
         models_form = QFormLayout()
 
-        self.combo_model = QComboBox()
-        self.combo_model.setToolTip(
-            "Unico modello AI usato per datasheet, analisi foto e verifica. "
-            "Il default si imposta da Configurazione -> Gestione tipologie e profili AI."
-        )
-        self.combo_model.currentIndexChanged.connect(self._on_model_combo_changed)
-        self.btn_pick_model = QPushButton()
-        self.btn_pick_model.setIcon(QIcon(str(Path(__file__).parent / 'assets' / 'model-edit.svg')))
-        self.btn_pick_model.setIconSize(QSize(20, 20))
-        self.btn_pick_model.setFixedSize(40, 32)
-        self.btn_pick_model.setAutoDefault(False)
-        self.btn_pick_model.setToolTip("Change the AI model for this session")
-        self.btn_pick_model.setAccessibleName("Change AI model")
-        self.btn_pick_model.setToolTip(
-            "Sceglie un modello (filtrabile per costo) valido solo per le "
-            "estrazioni di questa sessione: il default globale non cambia."
-        )
-        self.btn_pick_model.clicked.connect(self._pick_session_model)
-        model_row = QHBoxLayout()
-        # The «Ragionamento DeepSeek» (DeepSeek reasoning) checkbox (HANDOFF 161)
-        # was removed by the user on 2026-10-02: reasoning always stays off.
-        model_row.addWidget(self.combo_model, 1)
-        model_row.addWidget(self.btn_pick_model)
+        # One read-only row instead of the former per-session combo (user,
+        # 2026-11-13), laid out like its neighbours: «Modelli AI:» (AI
+        # models) in the label column, «predefinito <model> · N passi con un
+        # modello proprio» as the value, and an icon button in the button
+        # column opening «Modello AI...», same size as the folder buttons.
+        self.label_ai_models_title = QLabel("Modelli AI:")
+        self.label_ai_models = QLabel()
+        self.label_ai_models.setObjectName("ai_models_line")
+        self.label_ai_models.setTextFormat(Qt.TextFormat.PlainText)
+        self.label_ai_models.setWordWrap(True)
+        # Composed by _refresh_ai_models_line: the generic pass would use it as a key.
+        self.label_ai_models.setProperty("i18n_skip", True)
+        self.btn_edit_ai_models = QPushButton()
+        self.btn_edit_ai_models.setObjectName("edit_ai_models")
+        self.btn_edit_ai_models.setIcon(self._asset_icon("model-edit.svg"))
+        self.btn_edit_ai_models.setIconSize(QSize(20, 20))
+        self.btn_edit_ai_models.setFixedSize(40, 32)
+        self.btn_edit_ai_models.setAutoDefault(False)
+        self.btn_edit_ai_models.setToolTip("Modifica i modelli AI (Configurazione → Modello AI...)")
+        self.btn_edit_ai_models.setAccessibleName("Modifica i modelli AI (Configurazione → Modello AI...)")
+        self.btn_edit_ai_models.clicked.connect(self._on_edit_ai_models)
+        self.label_ai_models_title.setBuddy(self.btn_edit_ai_models)
+        ai_models_row = QHBoxLayout()
+        ai_models_row.addWidget(self.label_ai_models, 1)
+        ai_models_row.addWidget(self.btn_edit_ai_models)
         self.label_photo_detector = QLabel()
         self.combo_photo_detector = QComboBox()
         self.combo_photo_detector.addItem("", "ai")
@@ -4957,10 +4944,7 @@ class MainWindow(QMainWindow):
         # detector decides which of the rows below are needed.
         models_form.addRow(self.label_photo_detector, self.combo_photo_detector)
         self._row_photo_detector = models_form.rowCount() - 1
-        # «(questa sessione)»: the configured models are in Configurazione →
-        # «Modello AI...»; this row only replaces the single model for the
-        # session (finding 10: two things were named «Modello AI»).
-        models_form.addRow("Modello AI (questa sessione):", model_row)
+        models_form.addRow(self.label_ai_models_title, ai_models_row)
         self._row_ai_model = models_form.rowCount() - 1
         self.label_yolo_model = QLabel()
         self.field_yolo_model = QLineEdit()
@@ -5011,24 +4995,6 @@ class MainWindow(QMainWindow):
         params_row.addWidget(self.btn_yolo_settings)
         models_form.addRow(self.label_yolo_params, params_row)
         self._row_yolo_params = models_form.rowCount() - 1
-        self.label_vlm_model = QLabel()
-        self.field_vlm_model = QLineEdit()
-        self.field_vlm_model.setReadOnly(True)
-        # Same icon and same size as the button next to «Modello AI» (AI model)
-        # (user, 2026-09-24: «uniforma questo per scegliere il modello» (make this
-        # uniform for choosing the model)); the name is in the tooltip and in the
-        # accessible name.
-        self.btn_pick_vlm_model = QPushButton()
-        self.btn_pick_vlm_model.setIcon(self._asset_icon("model-edit.svg"))
-        self.btn_pick_vlm_model.setIconSize(QSize(20, 20))
-        self.btn_pick_vlm_model.setFixedSize(40, 32)
-        self.btn_pick_vlm_model.setAutoDefault(False)
-        self.btn_pick_vlm_model.clicked.connect(self._pick_session_vlm_model)
-        vlm_row = QHBoxLayout()
-        vlm_row.addWidget(self.field_vlm_model, 1)
-        vlm_row.addWidget(self.btn_pick_vlm_model)
-        models_form.addRow(self.label_vlm_model, vlm_row)
-        self._row_vlm_model = models_form.rowCount() - 1
         # Account balance and TOTAL cost of the project, all passes included
         # (`ai_account`): last row of «Strumenti AI» (AI tools) (user,
         # 2026-09-24), next to the models that spend that credit. It is not
@@ -5048,8 +5014,7 @@ class MainWindow(QMainWindow):
                        self.label_yolo_model, self.field_yolo_model, self.btn_pick_yolo_model,
                        self.label_smd_model, self.field_smd_model, self.btn_pick_smd_model,
                        self.label_yolo_params, self.label_yolo_summary,
-                       self.btn_yolo_settings,
-                       self.label_vlm_model, self.field_vlm_model, self.btn_pick_vlm_model):
+                       self.btn_yolo_settings):
             widget.setProperty("i18n_skip", True)
         self._align_form(models_form, "project")
 
@@ -5288,7 +5253,7 @@ class MainWindow(QMainWindow):
         self._set_review_buttons_enabled(False)
         self._refresh_ai_log_button()
 
-        self._refresh_model_combo()
+        self._refresh_ai_models_line()
         self._restore_component_type()
         self._update_project_path_label()
         # Keep the editors and their existing signals; only their navigation
@@ -5314,8 +5279,7 @@ class MainWindow(QMainWindow):
         self.project_wizard.projects_requested.connect(self._return_to_projects)
         outer.addWidget(self.project_wizard, 1)
         self._project_scroll = self.project_wizard.scrolls[0]
-        for combo in (self.combo_model, self.combo_photo_detector):
-            combo.currentIndexChanged.connect(self._refresh_ai_tools_summary)
+        self.combo_photo_detector.currentIndexChanged.connect(self._refresh_ai_tools_summary)
         self._refresh_ai_tools_summary()
         return tab
 
@@ -5332,8 +5296,12 @@ class MainWindow(QMainWindow):
         self._switch_project("", self._general_project_state)
 
     def _refresh_ai_tools_summary(self) -> None:
-        """@brief Summarise only the tools relevant to the project type."""
-        model = self.combo_model.currentText()
+        """@brief Summarise only the tools relevant to the project type.
+
+        @note It names the saved default model, the only one an analysis
+            starts from (no per-session model since 2026-11-13).
+        """
+        model = self._default_model()
         if self._is_single_component_project():
             summary = self.i18n.tr(
                 "ui:Componente singolo: analisi AI dei documenti · {model}",
@@ -5576,7 +5544,7 @@ class MainWindow(QMainWindow):
         if not getattr(self, "_restoring_project", False):
             self._config["component_type"] = key
             self._save_config_safely()
-        self._refresh_model_combo()
+        self._refresh_ai_models_line()
         self._refresh_type_effect()
         if hasattr(self, "combo_photo_detector"):
             self._refresh_photo_detector_controls()
@@ -6719,7 +6687,7 @@ class MainWindow(QMainWindow):
         @param step_options `detector` / `field`, forwarded to `_run_steps`.
         @return For the full analysis and the inventory re-run, the
             extraction model, the photo model (`_photo_detector_model`:
-            the session vision model when one was chosen) and, when the
+            the default model) and, when the
             profile names one, the per-body crop reading model (`crop_model`;
             blank means «the photo model», see `analysis_profiles.resolve`);
             for a side command (pin types, terminals, leads, re-read) only the
@@ -6763,7 +6731,7 @@ class MainWindow(QMainWindow):
         @return Their saved, non-blank models, in table order, without repeats.
         @note Only SAVED choices (ProfileStore.step_models_stored): the two pad
             steps that still follow the old «Posizioni pad» default are an
-            optional reader, which falls back on the single model with a log
+            optional reader, which falls back on the default model with a log
             line when its source cannot run (prompt_models.usable_model), as
             it always did; a choice the user made is checked before paying.
             An unreadable database adds nothing (the caller reports it).
@@ -6795,7 +6763,24 @@ class MainWindow(QMainWindow):
             the progress window had opened. `openrouter.api_key` reads no
             network (environment, Credential Manager, `.env`).
         """
-        return self._ensure_keys_for(self._run_models(command, **step_options))
+        if not self._ensure_keys_for(self._run_models(command, **step_options)):
+            return False
+        # The DEFAULT model must read the images the run sends: a step's own
+        # unusable model falls back on it, the default has no fallback.
+        from ..services.prompt_models import default_model_image_problem
+        model = (self._effective_model() if command in ("analysis", "relaunch")
+                 else self._vision_model())
+        try:
+            step_models = self.profile_store.step_models()
+        except (ProfileError, sqlite3.Error, OSError):
+            step_models = None
+        problem = default_model_image_problem(model, step_models,
+                                              self._run_steps(command, **step_options))
+        if problem:
+            QApplication.beep()
+            QMessageBox.warning(self, self.i18n.text("Modello AI"), problem)
+            return False
+        return True
 
     def _key_problems(self, models) -> list:
         """@brief The providers of `models` whose key cannot be used, with the reason.
@@ -6950,7 +6935,7 @@ class MainWindow(QMainWindow):
         self._photo_source = ""
         self._set_review_buttons_enabled(False)
 
-        model = self._session_model or profile['model']
+        model = profile['model']
         photo_model = model
         # It is this model that looks at the photograph: with 'vlm' it detects and
         # lists the bodies, with 'yolo' it reconciles the local proposals. In
@@ -6962,24 +6947,24 @@ class MainWindow(QMainWindow):
             tx("Estrazione da {n_doc_paths} file con il modello AI {model}",
                n_doc_paths=len(doc_paths),
                model=model)
-            + (tx(" (solo questa sessione).") if self._session_model else ".")
+            + "."
         )
         self._on_ai_progress(tx("Profilo AI: {currentText}.",
                                 currentText=self.combo_component_type.currentText()))
-        self._on_ai_progress(tx("Modello AI unico: {model}.", model=model))
+        self._on_ai_progress(tx("Modello AI predefinito: {model}.", model=model))
         try:
             ignored = self.profile_store.ignored_model_overrides(self._profile_key())
         except (ProfileError, sqlite3.Error, OSError):
             ignored = {}
         if ignored:
-            # Single model (user, 2026-10-02): a model saved on this component type
+            # Default model (user, 2026-10-02): a model saved on this component type
             # before the change is no longer valid, and that must be said.
             self._on_ai_progress(tx(
-                "La tipologia aveva un modello suo ({models}): ignorato. Il modello unico e "
+                "La tipologia aveva un modello suo ({models}): ignorato. Il modello predefinito e "
                 "quelli dei singoli passi si scelgono in Configurazione → «Modello AI...».",
                 models=", ".join(sorted(set(ignored.values())))))
         # The steps of this run with a model of their own, said before paying
-        # (user request 2026-11-12): the single model above is not the whole story.
+        # (user request 2026-11-12): the default model above is not the whole story.
         step_models = self._step_models()
         own = self._own_step_models_text(
             {field: (step_models or {}).get(field, "")
@@ -7019,7 +7004,7 @@ class MainWindow(QMainWindow):
             # untranslated Italian prefix and a translated suffix.
             # The step that sends the photo with this detector: the inventory
             # for 'yolo' and 'vlm'. Its own model, when chosen, replaces the
-            # session or configured one, and the line must name it (finding C).
+            # configured one, and the line must name it (finding C).
             photo_call_model = model_for('inventory_prompt', step_models, verification_model)
             if photo_call_model != verification_model:
                 self._on_ai_progress(
@@ -7028,8 +7013,7 @@ class MainWindow(QMainWindow):
             else:
                 self._on_ai_progress(
                     tx("Chiamata sulla fotografia affidata a {model}", model=verification_model)
-                    + (tx(" (scelto per questa sessione).") if self._vlm_model
-                       else tx(" (da impostazioni).")))
+                    + tx(" (da impostazioni)."))
         elif verification_model != model:
             self._on_ai_progress(tx("Rilevamento dei corpi affidato a {verification_model}.",
                                     verification_model=verification_model))
@@ -7073,8 +7057,8 @@ class MainWindow(QMainWindow):
             # readings, document roles, inventory, markings, ...): step P2 of
             # 2026-11-11. Only to a worker that declares the keyword.
             **accepted_kwargs(ExtractWorker.__init__, prompts=self._profile_prompt_texts()),
-            # The model of every step («Modello AI» table, 2026-11-12); the
-            # session model above replaces only the single model.
+            # The model of every step («Modello AI» table, 2026-11-12); a
+            # blank step follows the default model above.
             **accepted_kwargs(ExtractWorker.__init__, step_models=step_models),
         )
         if self._extraction_answers and accepts_keyword(extract_pin_header_params, "answers"):
@@ -7342,7 +7326,7 @@ class MainWindow(QMainWindow):
 
         @note Does nothing while `_extraction_busy` is set: the detector combo
             is not the only way here -- a model change from «Configurazione» ->
-            «Modello AI...» goes through `_refresh_model_combo` and
+            «Modello AI...» goes through `_refresh_ai_models_line` and
             `_on_photo_detector_changed` in the middle of a run, and used to
             put the idle text back over «Analisi in corso...» (audit 25/09,
             B6). The run's end clears the flag and calls this again through
@@ -9064,7 +9048,7 @@ class MainWindow(QMainWindow):
             anthropic/claude-opus-5.» disappeared from the modal precisely
             because it ended with the model name, i.e. a failure warning
             removed from the only place one was looking. Distinguishing a
-            label («Modello AI unico») from an event («Estrazione fallita»)
+            label («Modello AI predefinito») from an event («Estrazione fallita»)
             requires knowing whether the head contains a verb: Italian cannot
             be parsed with a regular expression, and every orthographic
             criterion tried (number of words, function words, capitals)
@@ -9455,8 +9439,6 @@ class MainWindow(QMainWindow):
             # The picture under the drawing: a view setting too (2026-11-06).
             "reference_image": self._reference_image_state(),
             "metadata": self._metadata_state(),
-            "models": {"session_model": getattr(self, "_session_model", None),
-                       "vlm_model": getattr(self, "_vlm_model", None)},
             "sides": self._serialised_sides(),
             # With the excluded AI-only bodies at the end, marked: on reopening the
             # project they come back aside, not in the table (HANDOFF 141).
@@ -9507,6 +9489,20 @@ class MainWindow(QMainWindow):
             state["extraction_answers"] = dict(self._extraction_answers)
         if getattr(self, "_extraction_questions", None):
             state["extraction_questions"] = deepcopy(self._extraction_questions)
+        if getattr(self, "_side_numbering_key", None):
+            state["side_numbering_key"] = self._side_numbering_key
+        if isinstance(getattr(self, "_pin_numbers_printed", None), bool):
+            state["pin_numbers_printed"] = self._pin_numbers_printed
+        if getattr(self, "_convention_pinout", None):
+            state["convention_pinout"] = deepcopy(self._convention_pinout)
+        if getattr(self, "_pads_kept_blocked", False):
+            state["pads_kept_blocked"] = True
+        if getattr(self, "_contact_function_witness", None):
+            state["contact_function_witness"] = self._contact_function_witness
+        if getattr(self, "_kicad_installs", None):
+            state["kicad_installs"] = deepcopy(self._kicad_installs)
+        if getattr(self, "_document_sides", None):
+            state["document_sides"] = deepcopy(self._document_sides)
         if getattr(self, "_step_deferral", None):
             state["step_deferral"] = dict(self._step_deferral)
         if getattr(self, "_unread_pads", None):
@@ -9595,6 +9591,10 @@ class MainWindow(QMainWindow):
         if package_geometry is not None:
             # The folder is the project's identity, including after a rename.
             package_geometry.name = self._component_name()
+        # «Solo nome principale» is an app preference, re-applied on every
+        # project load so the symbol and the preview never keep another choice.
+        if hasattr(self, "symbol_tab"):
+            self.symbol_tab.set_primary_pin_names(self._primary_pin_names_preference())
         skipped = []
         for name in PROJECT_WIDGETS:
             widget = getattr(self, name, None)
@@ -9628,13 +9628,9 @@ class MainWindow(QMainWindow):
             saved_yolo["confidence"] = round(float(legacy_threshold), 2)
         self._yolo_settings = self._valid_yolo_settings(saved_yolo, skipped)
         self._refresh_yolo_summary()
-        models = state.get("models") if isinstance(state.get("models"), dict) else {}
-        session = models.get("session_model")
-        self._session_model = session if isinstance(session, str) and session else None
-        self._refresh_model_combo()
-        vlm = models.get("vlm_model")
-        self._vlm_model = vlm if isinstance(vlm, str) and vlm else None
-        self.field_vlm_model.setText(self._photo_detector_model())
+        # A «models» block of an older project (per-session models) is
+        # ignored: every analysis uses the saved models (user, 2026-11-13).
+        self._refresh_ai_models_line()
         self._sides.clear()
         for index, side in enumerate(_project_list(state, "sides", skipped)):
             if isinstance(side, dict):
@@ -9712,6 +9708,17 @@ class MainWindow(QMainWindow):
             if isinstance(saved_extraction, dict) else {})
         self._extraction_questions = self._valid_extraction_questions(
             state.get("extraction_questions"))
+        saved_side_key = state.get("side_numbering_key")
+        self._side_numbering_key = (saved_side_key if isinstance(saved_side_key, str)
+                                    and saved_side_key.startswith("side_numbering:") else None)
+        self._document_sides = self._canonical_document_sides(state.get("document_sides"))
+        saved_printed = state.get("pin_numbers_printed")
+        self._pin_numbers_printed = saved_printed if isinstance(saved_printed, bool) else None
+        self._convention_pinout = self._valid_pinout_rows(state.get("convention_pinout"))
+        self._pads_kept_blocked = state.get("pads_kept_blocked") is True
+        self._contact_function_witness = self._valid_contact_witness(
+            state.get("contact_function_witness"))
+        self._kicad_installs = self._valid_kicad_installs(state.get("kicad_installs"))
         saved_deferral = state.get("step_deferral")
         self._step_deferral = (
             {"code": saved_deferral.get("code"),
@@ -9901,6 +9908,16 @@ class MainWindow(QMainWindow):
         symbol_tab = getattr(self, "symbol_tab", None)
         if symbol_tab is not None and hasattr(symbol_tab, "clear_clipboard"):
             symbol_tab.clear_clipboard()
+        # The 3D image of «Prova in KiCad» shows the closing project's part:
+        # closed, and a render still running is made stale (review 2026-11-13).
+        render_window = getattr(self, "_render_window", None)
+        self._render_window = None
+        if render_window is not None:
+            try:
+                render_window.close()
+            except RuntimeError:
+                pass  # already deleted by Qt (WA_DeleteOnClose)
+        self._preview_render_serial = getattr(self, "_preview_render_serial", 0) + 1
         self._restoring_project = True
         try:
             self._reset_project_runtime_state()
@@ -9988,11 +10005,13 @@ class MainWindow(QMainWindow):
         # The symbol tab needs no second refresh here: it was refreshed with
         # force=True above, and nothing in between touches its inputs (review
         # 2026-10-29, A8).
-        index = self.tabs.currentIndex()
-        if index == TAB_PREVIEW:
-            self._draw_preview()
-        elif index == TAB_MODEL_3D:
-            self._enter_3d_tab()
+        # Every opened project -- «Apri progetto», a recent project, a new
+        # one, a switch, the one reopened at start-up, the start page --
+        # lands on the FIRST tab (user request 2026-11-14), not on the tab
+        # the previous project was left on. The other tabs redraw the new
+        # project on entry (`_on_tab_changed`); their inner state is untouched.
+        if self.tabs.currentIndex() != TAB_PROJECT:
+            self.tabs.setCurrentIndex(TAB_PROJECT)
         # The state just applied is the saved one: it must not be rewritten.
         self._last_saved_project_state = self._project_state_text()
         # A footprint draft left by a crash is offered, never applied.
@@ -10716,21 +10735,30 @@ class MainWindow(QMainWindow):
                                    tr=self.i18n.text, parent=self)
         if self._run_modal(dialog) != QDialog.DialogCode.Accepted:
             return
-        # Check here too, not only in the OK button of the window: the
-        # name of another project would merge two projects (audit 25/09).
+        self._apply_project_rename(dialog.project_name())
+
+    def _apply_project_rename(self, new_name: str) -> str:
+        """@brief Rename the open project to `new_name`: the one path of «Rinomina progetto…» and «Correggi».
+
+        @param new_name The requested name.
+        @return The project name afterwards (the old one when nothing changed).
+        @note The name is checked again here (`name_problem`): the name of
+            another project would merge two projects (audit 25/09).
+        """
+        current = self._component_name()
         from .project_dialogs import name_problem
-        problem = name_problem(self._library_root(), dialog.project_name(), current)
+        problem = name_problem(self._library_root(), new_name, current)
         if problem:
             self._append_log(tx("Rinomina non applicata: {problem}",
                                 problem=self.i18n.text(problem)))
-            return
+            return current
         docs_dir = self._project_dir() / DOCS_SUBDIR
         try:
             moved_documents = sum(1 for path in docs_dir.iterdir() if path.is_file()) \
                 if docs_dir.is_dir() else 0
         except OSError:
             moved_documents = 0
-        applied = self._rename_project_folder(dialog.project_name())
+        applied = self._rename_project_folder(new_name)
         if applied != current:
             self.field_name.setText(applied)
             # Only now the diary resolves under the new name: a line written
@@ -10752,6 +10780,7 @@ class MainWindow(QMainWindow):
                     old_name=current, new_name=applied, n_files=moved_documents))
             if self.tabs.currentIndex() == TAB_MODEL_3D:
                 self._enter_3d_tab()
+        return applied
 
     def _rebind_symbol_after_rename(self) -> None:
         """@brief Point the symbol editor at the renamed project, keeping its draft.
@@ -11063,6 +11092,12 @@ class MainWindow(QMainWindow):
             self._append_log(tx("Rinomina annullata: {old_name} non rinominabile ({exc}).",
                                 old_name=old_name, exc=exc),
                              persist=not staged_project_link_rejected)
+            if isinstance(exc, PermissionError):
+                # A file held open: most often the preview in KiCad's editors.
+                self._append_log(self.i18n.text(
+                    "Un file del progetto è aperto in un altro programma: chiudi KiCad (anche "
+                    "l'anteprima di «Prova in KiCad») e riprova."),
+                    persist=not staged_project_link_rejected)
             return old_name
 
         if self._project_config_refused is not None and self._project_config_refused == old_project:
@@ -11093,14 +11128,23 @@ class MainWindow(QMainWindow):
         folder = project / PREVIEW_DIR_NAME
         if not folder.is_dir():
             return
+        from ..services.kicad_library import PREVIEW_LIBRARY_NICKNAME, PREVIEW_RENDER_SUFFIX
         board = folder / f"{old_name}-preview.kicad_pcb"
-        if kicad_lock_file(board).exists():
+        schematic = folder / f"{old_name}-preview.kicad_sch"
+        if kicad_lock_file(board).exists() or kicad_lock_file(schematic).exists():
             self._append_log(tx("Anteprima KiCad con il nome vecchio lasciata in {path}: è aperta "
                                 "in KiCad.", path=folder))
             return
+        # Every file the preview writes under the component name (schematic,
+        # symbol copy, footprint copy and 3D image included).
         for stale in (board, folder / f"{old_name}-preview.kicad_pro",
-                      folder / f"{old_name}-preview.kicad_prl",
-                      folder / f"{old_name}.step", folder / f"{old_name}.wrl"):
+                      folder / f"{old_name}-preview.kicad_prl", schematic,
+                      folder / f"{old_name}.kicad_sym",
+                      folder / f"{PREVIEW_LIBRARY_NICKNAME}.pretty" / f"{old_name}.kicad_mod",
+                      folder / f"{old_name}{PREVIEW_RENDER_SUFFIX}",
+                      folder / f"{old_name}.step", folder / f"{old_name}.wrl",
+                      # The applied symbol staged by «Mostra in KiCad».
+                      folder / "applied-symbol" / f"{old_name}.kicad_sym"):
             try:
                 if stale.is_file() and not stale.is_symlink():
                     stale.unlink()
@@ -11341,7 +11385,123 @@ class MainWindow(QMainWindow):
 
     #: Fields a question may be about; others are shown but not applied here.
     EXTRACTION_QUESTION_FIELDS = ("contacts_view", "body_height_mm", "pad_layout",
-                                  "height_equals_plan")
+                                  "height_equals_plan", "side_numbering", "row_spacing",
+                                  "contact_style", "contact_nc")
+    #: Questions whose answer decides the SYMBOL only («contact_nc»: which
+    #: switch terminal is normally closed, NC/NO witness 2026-11-14). Open,
+    #: they block no footprint and hold no generation back: the symbol uses
+    #: the main answer's functions meanwhile and «Verifica componente per
+    #: KiCad» reports the open question with the action that asks it
+    #: (`_resolve_stored_symbol_question`).
+    SYMBOL_QUESTION_FIELDS = ("contact_nc",)
+    #: Questions whose answer decides the footprint pads: while one is open no
+    #: footprint is written, and «Rigenera footprint» / «Applica ai file» ask
+    #: it first. «side_numbering» (2026-11-13): the sides and the document
+    #: pinout are not one numbering, so the pad numbers are not settled.
+    #: Without printed pin numbers no question is asked: the extractor applies
+    #: a fixed counter-clockwise convention and says so (user decision
+    #: 2026-11-13, the «numbering_convention» question was dropped; an old
+    #: saved answer to it is closed by `apply_answers` with a note).
+    #: «row_spacing» (the distance between the contact rows, which places the
+    #: through holes) and «contact_style» (through holes or half holes on a
+    #: side the photo cannot settle) decide the pads too (round 8).
+    #: «contacts_view» (top or bottom view of the pads) too: a bottom view
+    #: mirrors the footprint, so a footprint is never written with the view
+    #: unknown (GUI review 2026-11-14, H1: a «Torna indietro» on the side
+    #: question opened by a layout answer used to let the footprint through).
+    FOOTPRINT_QUESTION_FIELDS = ("pad_layout", "side_numbering", "row_spacing", "contact_style",
+                                 "contacts_view")
+    #: Footprint questions whose answer the extractor applies from the
+    #: option's value alone (`apply_answers`: the view, the printed row
+    #: distance or «estimate», the contact type of the key's edge), so no
+    #: stored candidate payload is needed (GUI review 2026-11-14, M3).
+    QUESTION_FIELDS_WITHOUT_CANDIDATES = ("contacts_view", "row_spacing", "contact_style")
+    #: Questions whose answer renumbers the castellated sides and rewrites the
+    #: pinout (`_apply_answered_side_numbering`).
+    SIDE_NUMBERING_FIELDS = ("side_numbering",)
+    #: Italian sources of the texts of an open footprint question, by field:
+    #: (block, not applicable in a reopened project, «Torna indietro» kept it
+    #: open, refused answer, held-back sentence, remedy sentence).
+    FOOTPRINT_QUESTION_TEXTS = {
+        "pad_layout": (
+            "Footprint non scritto: la domanda sulle posizioni dei pad è ancora aperta. "
+            "«Rigenera footprint» (o «Applica ai file») la ripropone prima di scrivere il "
+            "footprint.",
+            "Footprint non scritto: la domanda sulle posizioni dei pad è ancora aperta, e la "
+            "risposta si applica solo al risultato di un'analisi di questa sessione, che dopo "
+            "la riapertura del progetto non c'è. Ripeti l'analisi dei documenti e rispondi "
+            "alla domanda.",
+            "Footprint non scritto: la domanda sulle posizioni dei pad resta aperta e verrà "
+            "riproposta prima di scrivere il footprint.",
+            "Footprint non scritto: la disposizione dei pad scelta non si può "
+            "applicare. {reason}",
+            "La domanda sulle posizioni dei pad viene riproposta da «Rigenera footprint» o "
+            "«Applica ai file», prima di scrivere il footprint.",
+            "Una domanda sulle posizioni dei pad è rimasta aperta: «Rigenera footprint» o "
+            "«Applica ai file» la ripropone prima di scrivere il footprint."),
+        "side_numbering": (
+            "Footprint non scritto: la domanda sulla numerazione dei contatti è ancora aperta. "
+            "«Rigenera footprint» (o «Applica ai file») la ripropone prima di scrivere il "
+            "footprint.",
+            "Footprint non scritto: la domanda sulla numerazione dei contatti è ancora aperta, e "
+            "la risposta si applica solo al risultato di un'analisi di questa sessione, che dopo "
+            "la riapertura del progetto non c'è. Ripeti l'analisi dei documenti e rispondi "
+            "alla domanda.",
+            "Footprint non scritto: la domanda sulla numerazione dei contatti resta aperta e "
+            "verrà riproposta prima di scrivere il footprint.",
+            "Footprint non scritto: la numerazione dei contatti scelta non si può "
+            "applicare. {reason}",
+            "La domanda sulla numerazione dei contatti viene riproposta da «Rigenera footprint» "
+            "o «Applica ai file», prima di scrivere il footprint.",
+            "Una domanda sulla numerazione dei contatti è rimasta aperta: «Rigenera footprint» "
+            "o «Applica ai file» la ripropone prima di scrivere il footprint."),
+        "row_spacing": (
+            "Footprint non scritto: la domanda sulla distanza fra le file di contatti è ancora "
+            "aperta. «Rigenera footprint» (o «Applica ai file») la ripropone prima di scrivere il "
+            "footprint.",
+            "Footprint non scritto: la domanda sulla distanza fra le file di contatti è ancora "
+            "aperta, e la risposta si applica solo al risultato di un'analisi di questa sessione, "
+            "che dopo la riapertura del progetto non c'è. Ripeti l'analisi dei documenti e "
+            "rispondi alla domanda.",
+            "Footprint non scritto: la domanda sulla distanza fra le file di contatti resta aperta "
+            "e verrà riproposta prima di scrivere il footprint.",
+            "Footprint non scritto: la distanza fra le file di contatti scelta non si può "
+            "applicare. {reason}",
+            "La domanda sulla distanza fra le file di contatti viene riproposta da «Rigenera "
+            "footprint» o «Applica ai file», prima di scrivere il footprint.",
+            "Una domanda sulla distanza fra le file di contatti è rimasta aperta: «Rigenera "
+            "footprint» o «Applica ai file» la ripropone prima di scrivere il footprint."),
+        "contact_style": (
+            "Footprint non scritto: la domanda sul tipo di contatto di un lato è ancora aperta. "
+            "«Rigenera footprint» (o «Applica ai file») la ripropone prima di scrivere il "
+            "footprint.",
+            "Footprint non scritto: la domanda sul tipo di contatto di un lato è ancora aperta, e "
+            "la risposta si applica solo al risultato di un'analisi di questa sessione, che dopo la "
+            "riapertura del progetto non c'è. Ripeti l'analisi dei documenti e rispondi alla "
+            "domanda.",
+            "Footprint non scritto: la domanda sul tipo di contatto di un lato resta aperta e verrà "
+            "riproposta prima di scrivere il footprint.",
+            "Footprint non scritto: il tipo di contatto scelto non si può applicare. {reason}",
+            "La domanda sul tipo di contatto di un lato viene riproposta da «Rigenera footprint» o "
+            "«Applica ai file», prima di scrivere il footprint.",
+            "Una domanda sul tipo di contatto di un lato è rimasta aperta: «Rigenera footprint» o "
+            "«Applica ai file» la ripropone prima di scrivere il footprint."),
+        "contacts_view": (
+            "Footprint non scritto: la domanda sul lato da cui sono disegnati i pad (vista dall'alto "
+            "o dal basso) è ancora aperta. «Rigenera footprint» (o «Applica ai file») la ripropone "
+            "prima di scrivere il footprint.",
+            "Footprint non scritto: la domanda sul lato da cui sono disegnati i pad è ancora aperta, "
+            "e la risposta si applica solo al risultato di un'analisi di questa sessione, che dopo la "
+            "riapertura del progetto non c'è. Ripeti l'analisi dei documenti e rispondi alla "
+            "domanda.",
+            "Footprint non scritto: la domanda sul lato da cui sono disegnati i pad resta aperta e "
+            "verrà riproposta prima di scrivere il footprint.",
+            "Footprint non scritto: il lato scelto per i pad non si può applicare. {reason}",
+            "La domanda sul lato da cui sono disegnati i pad viene riproposta da «Rigenera "
+            "footprint» o «Applica ai file», prima di scrivere il footprint.",
+            "Una domanda sul lato da cui sono disegnati i pad è rimasta aperta: «Rigenera "
+            "footprint» o «Applica ai file» la ripropone prima di scrivere il footprint."),
+    }
     #: Largest side of the evidence crop shown in the question dialog (px).
     EVIDENCE_PIXMAP_MAX_PX = 480
 
@@ -11369,7 +11529,10 @@ class MainWindow(QMainWindow):
             if not isinstance(entry, dict):
                 continue
             key, field, text = entry.get("key"), entry.get("field"), entry.get("text")
-            options = [dict(label=str(o["label"]), value=o["value"])
+            # `recommended` is a declared flag of the option (never read
+            # from its wording); kept only when it is exactly True.
+            options = [dict(label=str(o["label"]), value=o["value"],
+                            **({"recommended": True} if o.get("recommended") is True else {}))
                        for o in entry.get("options") or ()
                        if isinstance(o, dict) and "label" in o and "value" in o]
             if (not isinstance(key, str) or not key or field not in cls.EXTRACTION_QUESTION_FIELDS
@@ -11420,6 +11583,13 @@ class MainWindow(QMainWindow):
         """
         questions = self._valid_extraction_questions(getattr(params, "questions", None))
         self._extraction_questions = []
+        # A partial re-read outside the pad scope (the body height) carries
+        # the raw main answer or the settled result for everything else: the
+        # pad state below is NOT recomputed from it (review 2026-11-14, H2:
+        # a height re-read lifted a «keep blocked» choice).
+        reread = getattr(self, "_reread_applying_field", None)
+        if reread is None or reread == "pad_layout":
+            self._settle_pad_state_from(params, questions)
         if not questions:
             return params, False
         from ..services import datasheet_extractor
@@ -11452,8 +11622,16 @@ class MainWindow(QMainWindow):
                 continue
             answer = self._ask_extraction_question(question)
             if answer is QUESTION_BACK:
-                held_back = True
                 open_questions.append(question)
+                if question["field"] in self.SYMBOL_QUESTION_FIELDS:
+                    # The symbol keeps the main answer's functions; nothing
+                    # is held back, the check reports the open question.
+                    self._append_log(self.i18n.text(
+                        "La domanda sul contatto normalmente chiuso resta aperta: il simbolo usa "
+                        "intanto le funzioni della risposta principale; «Verifica componente per "
+                        "KiCad» la ripropone."))
+                else:
+                    held_back = True
                 continue
             asked_now.add(key)
             # The answer given now is the newest: the saved ones it
@@ -11484,15 +11662,131 @@ class MainWindow(QMainWindow):
             self._append_log(tx("Risposta dell'utente: {text} -> {label}",
                                 text=question["text"], label=label))
         self._extraction_questions = open_questions
+        # «Lascia bloccato» (keep blocked) chosen or re-applied in this pass:
+        # no provisional pad is written (`_pads_kept_blocked`).
+        kept_blocked = any(str(key).startswith("pad_layout:") and self._is_layout_block_answer(value)
+                           for key, value in answers.items())
         if answers:
-            params = self._apply_extraction_answers(params, answers)
+            params = self._apply_extraction_answers(
+                params, answers, saved=self._saved_answers_for_deferred(params))
+            # Questions an answer of this pass opened (the terminal view,
+            # deferred by the extractor until a pad layout is chosen: VE12H,
+            # 2026-11-14): asked now, one left open holds the generation back;
+            # after «keep blocked» they stay pending without a question.
+            params, left_open = self._ask_opened_questions(
+                [q["key"] for q in questions], params, ask=not kept_blocked)
+            held_back = held_back or left_open
+        reread = getattr(self, "_reread_applying_field", None)
+        if answers and (reread is None or reread == "pad_layout"):
+            # An answer of this pass may settle the NC/NO functions («user»).
+            self._contact_function_witness = self._valid_contact_witness(
+                getattr(params, "contact_function_witness", None))
+        if kept_blocked:
+            self._pads_kept_blocked = True
+            # The question answered «blocked» stays listed (see
+            # `_resolve_one_footprint_question`): «Dimentica le risposte»
+            # leaves it open again.
+            for question in questions:
+                if (question["field"] == "pad_layout"
+                        and self._is_layout_block_answer(answers.get(question["key"]))
+                        and question not in self._extraction_questions):
+                    self._extraction_questions.append(question)
         return params, held_back
 
-    def _apply_extraction_answers(self, params, answers: dict):
+    def _settle_pad_state_from(self, params, questions) -> None:
+        """@brief The pad-related state an analysis (or a pad re-read) settles.
+
+        @param params The extraction being applied.
+        @param questions Its well-formed questions (`_valid_extraction_questions`).
+        @note Not run for a partial re-read of another datum (H2): its result
+            states nothing new about the pads.
+        """
+        # A new analysis states its own pads: a previous «keep blocked» choice
+        # holds again only when this analysis re-applied it from the saved answer.
+        answered = getattr(params, "answered_questions", None)
+        self._pads_kept_blocked = any(
+            str(key).startswith("pad_layout:") and self._is_layout_block_answer(value)
+            for key, value in (answered.items() if isinstance(answered, dict) else ()))
+        # The side-numbering question of THIS analysis, asked now, left open
+        # or settled by the extractor from a saved answer
+        # (`ExtractedParams.answered_questions`): its key is the only one
+        # whose answer the component check reads.
+        self._side_numbering_key = next(
+            (q["key"] for q in questions if q["field"] == "side_numbering"),
+            next((key for key in (answered if isinstance(answered, dict) else {})
+                  if isinstance(key, str) and key.startswith("side_numbering:")), None))
+        # Whether the documents print the pin numbers (None = not said, read as
+        # printed): without printed numbers the check makes no «document»
+        # claim about numbers (PIN round 3, 2026-11-13).
+        printed = getattr(params, "pin_numbers_printed", None)
+        self._pin_numbers_printed = printed if isinstance(printed, bool) else None
+        self._convention_pinout = (self._valid_pinout_rows(getattr(params, "pinout", None))
+                                   if printed is False else [])
+        self._contact_function_witness = self._valid_contact_witness(
+            getattr(params, "contact_function_witness", None))
+
+    @staticmethod
+    def _install_path_ok(scope, text) -> bool:
+        """@brief Whether a recorded library folder may be read by the check.
+
+        @param scope «project» or «global».
+        @param text The stored folder.
+        @return False for a remote or device path (UNC «\\\\server», «\\\\?\\»,
+            «//»): the check must never reach the network. A project folder
+            is RELATIVE to the project (without «..») when the library sits
+            inside it, or absolute on a local drive when the KiCad project is
+            elsewhere; a global one must be absolute on a local drive.
+        """
+        if not isinstance(text, str) or not text.strip():
+            return False
+        if text.startswith(("\\\\", "//")):
+            return False
+        path = Path(text)
+        if scope == "project" and not path.is_absolute():
+            return not path.drive and ".." not in path.parts
+        return path.is_absolute() and bool(path.drive)
+
+    @classmethod
+    def _valid_kicad_installs(cls, value) -> list:
+        """@brief The well-formed KiCad installations of a saved state, one per scope.
+
+        @param value The saved `kicad_installs`, any type.
+        @return [{"scope", "pretty_dir"}] with a known scope and a folder that
+            passes `_install_path_ok`; the last entry of a scope wins; [] otherwise.
+        """
+        found = {}
+        for entry in value if isinstance(value, list) else ():
+            if (isinstance(entry, dict) and entry.get("scope") in ("project", "global")
+                    and cls._install_path_ok(entry["scope"], entry.get("pretty_dir"))):
+                found[entry["scope"]] = {"scope": entry["scope"], "pretty_dir": entry["pretty_dir"]}
+        return list(found.values())
+
+    def _resolved_kicad_installs(self) -> list:
+        """@brief The recorded installations with ABSOLUTE folders, for the component check."""
+        resolved = []
+        for entry in getattr(self, "_kicad_installs", None) or []:
+            folder = Path(entry["pretty_dir"])
+            if entry["scope"] == "project" and not folder.is_absolute():
+                folder = self._project_dir() / folder
+            resolved.append({"scope": entry["scope"], "pretty_dir": str(folder)})
+        return resolved
+
+    @staticmethod
+    def _valid_contact_witness(value):
+        """@brief `value` when it is a known NC/NO witness (`CONTACT_WITNESSES`), else None."""
+        from ..services import datasheet_extractor
+        known = getattr(datasheet_extractor, "CONTACT_WITNESSES", ())
+        return value if isinstance(value, str) and value in known else None
+
+    def _apply_extraction_answers(self, params, answers: dict, saved: dict | None = None):
         """@brief Apply `answers` to `params` locally, without a paid call.
 
         @param params The extraction.
         @param answers {question key: chosen value}.
+        @param saved Saved answers that are no open question of `params`
+            (`_saved_answers_for_deferred`), passed to the extractor along with
+            `answers` and nothing else: the window's own fallback and its
+            «not applicable» log read `answers` only.
         @return The extraction with the answers applied: the extractor's
             `apply_answers` when the installed service has it; otherwise the
             one answer the window can apply alone, a body height (the value
@@ -11505,7 +11799,7 @@ class MainWindow(QMainWindow):
         apply = getattr(datasheet_extractor, "apply_answers", None)
         if callable(apply):
             try:
-                applied = apply(params, dict(answers))
+                applied = apply(params, {**(saved or {}), **answers})
             except Exception as exc:  # noqa: BLE001 - the result is still usable as read
                 self._append_log(tx("ATTENZIONE: risposte non applicate all'estrazione: {exc}", exc=exc))
                 return params
@@ -11614,6 +11908,12 @@ class MainWindow(QMainWindow):
         @param question A dict of `_valid_extraction_questions`.
         @return The `value` of the chosen option, or QUESTION_BACK for
             «Torna indietro» (also Esc: nothing is decided, nothing generated).
+        @note The options are highlighted (user, 2026-11-13, «metti in
+            evidenza le Opzioni»): one paragraph each with its «Opzione N:»
+            heading in bold and the accent colour, the recommended option
+            (declared flag `recommended`) marked with a badge and its button
+            the default one (`_question_options_html`, one formatter for
+            every kind of question).
         @note A separate method so tests answer it without opening a window,
             exactly like `_ask_geometry_doubt`. The evidence is shown as the
             dialog's icon pixmap (`_evidence_pixmap`); the dialog itself
@@ -11632,13 +11932,16 @@ class MainWindow(QMainWindow):
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Icon.Question)
         box.setWindowTitle(self.i18n.text("Domanda sull'analisi"))
-        box.setText(str(question.get("text") or question.get("key")))
+        # The question is escaped and shown as rich text like the options:
+        # QMessageBox.setTextFormat applies to BOTH its labels, so a plain-text
+        # question would also have shown the options' markup literally (user
+        # report, 2026-11-13). Escaping keeps «<» in a value literal.
+        question_text = escape(str(question.get("text") or question.get("key")), quote=False)
+        box.setText("<p>" + question_text.replace("\n", "<br>") + "</p>")
         options = list(question.get("options") or ())
-        # One paragraph per option, then the instruction; QMessageBox wraps
+        # The instruction paragraphs after the options; QMessageBox wraps
         # its labels at word boundaries.
-        paragraphs = [tx("Opzione {number}: {description}", number=number,
-                         description=str(option["label"]))
-                      for number, option in enumerate(options, start=1)]
+        paragraphs = []
         if len(options) == 1:
             # One option is a confirmation, not a choice of value (round 7b, F4).
             paragraphs.append(self.i18n.text(
@@ -11648,15 +11951,17 @@ class MainWindow(QMainWindow):
             paragraphs.append(self.i18n.text(
                 "Scegli il valore che vedi nel documento: la risposta viene ricordata per questo "
                 "progetto e non richiede una nuova analisi."))
-        if question.get("field") == "pad_layout":
+        if question.get("field") in self.FOOTPRINT_QUESTION_FIELDS:
             # What «Torna indietro» (back) does to THIS question: true since
-            # `_resolve_stored_pad_layout_question` (round 7b, F3/F4).
+            # `_resolve_stored_pad_layout_question` (round 7b, F3/F4), for
+            # the side numbering too (2026-11-13).
             paragraphs.append(self.i18n.text(
                 "«Torna indietro» lascia la domanda aperta: verrà riproposta prima di scrivere il "
                 "footprint."))
-        box.setInformativeText("\n\n".join(paragraphs))
-        # Plain text whatever the description holds («<» in a value is not markup).
-        box.setTextFormat(Qt.TextFormat.PlainText)
+        box.setInformativeText(self._question_options_html(options, paragraphs))
+        # Both labels are rich text built from escaped parts only, so a «<» in
+        # a value or a pin name is never taken as markup.
+        box.setTextFormat(Qt.TextFormat.RichText)
         # The coordinates can be selected and copied, e.g. to compare them
         # with the drawing.
         box.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse
@@ -11668,10 +11973,18 @@ class MainWindow(QMainWindow):
         for number, option in enumerate(options, start=1):
             button = box.addButton(tx("Opzione {number}", number=number),
                                    QMessageBox.ButtonRole.AcceptRole)
-            button.setToolTip(str(option["label"]))
+            # A label with «<» or «&» is forced to escaped rich text, so it is
+            # shown as written and never read as markup; others stay plain.
+            label = str(option["label"])
+            button.setToolTip(f"<qt>{escape(label, quote=False)}</qt>"
+                              if re.search(r"[<&]", label) else label)
             buttons.append((button, option["value"]))
         back = box.addButton(self.i18n.text("Torna indietro"), QMessageBox.ButtonRole.RejectRole)
-        box.setDefaultButton(back)
+        # The recommended option is the default (Enter); without one, «Torna
+        # indietro» stays the default: nothing is chosen by a stray Enter.
+        recommended = next((button for (button, _value), option in zip(buttons, options)
+                            if option.get("recommended") is True), None)
+        box.setDefaultButton(recommended or back)
         box.setEscapeButton(back)
         self._run_modal(box)
         clicked = box.clickedButton()
@@ -11679,6 +11992,33 @@ class MainWindow(QMainWindow):
             if clicked is button:
                 return value
         return QUESTION_BACK
+
+    def _question_options_html(self, options, paragraphs=()) -> str:
+        """@brief The informative text of an extraction question: highlighted options, then the notes.
+
+        @param options The question's options ({"label", "value", optional
+            "recommended": True}).
+        @param paragraphs Plain-text paragraphs shown after the options.
+        @return Rich text: one paragraph per option with «Opzione N:» in bold
+            and the theme's accent colour; the recommended option also gets a
+            «consigliata» badge; then the paragraphs. Every text taken from
+            the question (labels, pin names such as «<A&B>») and every
+            translated sentence is HTML-escaped, so it shows literally.
+        @note One formatter for every kind of question (pad layout, side
+            numbering, pad holes, height...).
+        """
+        parts = []
+        for number, option in enumerate(options, start=1):
+            heading = escape(tx("Opzione {number}", number=number), quote=False) + ":"
+            badge = ""
+            if option.get("recommended") is True:
+                badge = (f' <span style="background-color:{BLUE}; color:{BASE};">&nbsp;'
+                         + escape(self.i18n.text("consigliata"), quote=False) + "&nbsp;</span>")
+            parts.append(f'<p style="margin-bottom:8px"><b style="color:{BLUE}">{heading}</b>'
+                         f"{badge} {escape(str(option.get('label', '')), quote=False)}</p>")
+        parts.extend(f'<p style="margin-bottom:8px">{escape(str(text), quote=False)}</p>'
+                     for text in paragraphs)
+        return "<html><body>" + "".join(parts) + "</body></html>"
 
     def _forget_extraction_answers(self) -> None:
         """@brief «Dimentica le risposte» (Strumenti): drop the project's recorded answers.
@@ -11688,14 +12028,24 @@ class MainWindow(QMainWindow):
             already filled from the old answers are not touched. Nothing to
             forget: said, not silently ignored.
         """
-        if not self._extraction_answers and not self._geometry_doubt_answers:
+        if self._background_work_running() or self._automatic_generation_active:
+            # An analysis or re-read holds a snapshot of the answers and
+            # would apply them after the «forget» (review 2026-11-14, M4).
+            QMessageBox.information(self, self.i18n.text("Dimentica le risposte"),
+                                    self.i18n.text("Operazione in corso: attendi la fine."))
+            return
+        if (not self._extraction_answers and not self._geometry_doubt_answers
+                and not getattr(self, "_pads_kept_blocked", False)):
             QMessageBox.information(self, self.i18n.text("Dimentica le risposte"),
                                     self.i18n.text("Nessuna risposta registrata per questo progetto."))
             return
         count = len(self._extraction_answers) + len(self._geometry_doubt_answers)
         self._extraction_answers = {}
         self._geometry_doubt_answers = {}
+        # «Lascia bloccato» was one of the answers: forgotten with them (L7).
+        self._pads_kept_blocked = False
         self._save_project_config()
+        self._refresh_output_actions()
         self._append_log(tx("Risposte dimenticate per questo progetto: {count}. Le domande verranno "
                             "riproposte alla prossima analisi.", count=count))
 
@@ -11759,30 +12109,47 @@ class MainWindow(QMainWindow):
                   if isinstance(q, dict)}
         parts = [self.i18n.text("Generazione automatica non avviata: una domanda dell'analisi è "
                                 "rimasta senza risposta.")]
-        if "pad_layout" in fields:
-            parts.append(self.i18n.text(
-                "La domanda sulle posizioni dei pad viene riproposta da «Rigenera footprint» o "
-                "«Applica ai file», prima di scrivere il footprint."))
+        for field in self.FOOTPRINT_QUESTION_FIELDS:
+            if field in fields:
+                parts.append(self.i18n.text(self.FOOTPRINT_QUESTION_TEXTS[field][4]))
         if "body_height_mm" in fields:
             parts.append(self.i18n.text(
                 "La domanda sull'altezza del corpo viene riproposta da «Rigenera modello STEP»."))
-        if fields - {"pad_layout", "body_height_mm"}:
+        if fields & set(self.SYMBOL_QUESTION_FIELDS):
+            parts.append(self.i18n.text(
+                "La domanda sul contatto normalmente chiuso viene riproposta da «Verifica componente "
+                "per KiCad»."))
+        if fields - {"body_height_mm", *self.FOOTPRINT_QUESTION_FIELDS, *self.SYMBOL_QUESTION_FIELDS}:
             parts.append(self.i18n.text(
                 "Le domande di altro tipo vengono riproposte ripetendo l'analisi."))
         return " ".join(parts)
 
     def _stored_pad_layout_question(self) -> dict | None:
-        """@brief The open question about the pad layout, or None.
+        """@brief The open question that decides the footprint pads, or None.
 
-        @return The first question of field `pad_layout` left without an
-            answer (`_extraction_questions`: «Torna indietro» on it during the
+        @return The first question of a field in `FOOTPRINT_QUESTION_FIELDS`
+            (`pad_layout`, `side_numbering`) left without an answer
+            (`_extraction_questions`: «Torna indietro» on it during the
             apply of an analysis, or saved with the project).
         """
         return next((q for q in getattr(self, "_extraction_questions", None) or ()
-                     if isinstance(q, dict) and q.get("field") == "pad_layout"), None)
+                     if isinstance(q, dict)
+                     and q.get("field") in self.FOOTPRINT_QUESTION_FIELDS), None)
 
-    @staticmethod
-    def _extraction_holds_question(extracted, key: str) -> bool:
+    def _footprint_question_text(self, question, index: int, **values) -> str:
+        """@brief One translated text of an open footprint question (`FOOTPRINT_QUESTION_TEXTS`).
+
+        @param question The open question (its `field` picks the texts).
+        @param index Position of the text in the tuple of its field.
+        @param values Named values of the template ({reason}).
+        @return The text in the interface language, formatted.
+        """
+        field = question.get("field") if isinstance(question, dict) else None
+        texts = self.FOOTPRINT_QUESTION_TEXTS.get(field) or self.FOOTPRINT_QUESTION_TEXTS["pad_layout"]
+        return tx(texts[index], **values) if values else self.i18n.text(texts[index])
+
+    @classmethod
+    def _extraction_holds_question(cls, extracted, key: str) -> bool:
         """@brief Whether an extraction can still apply the answer to question `key`.
 
         @param extracted The settled extraction, or None.
@@ -11790,14 +12157,21 @@ class MainWindow(QMainWindow):
         @return True when the extraction lists the question and keeps the
             candidates its options write (`ExtractedParams.candidates`): a
             pad layout is applied from those payloads, never from the
-            question's text.
+            question's text. A question of `QUESTION_FIELDS_WITHOUT_CANDIDATES`
+            needs only to be listed: its answer is applied from the option's
+            value (review 2026-11-14, M3: a stored row-spacing or contact-type
+            question without candidates could never be answered).
         """
         if extracted is None:
             return False
-        listed = any(isinstance(q, dict) and q.get("key") == key
-                     for q in getattr(extracted, "questions", None) or ())
+        listed = next((q for q in getattr(extracted, "questions", None) or ()
+                       if isinstance(q, dict) and q.get("key") == key), None)
+        if listed is None:
+            return False
+        if listed.get("field") in cls.QUESTION_FIELDS_WITHOUT_CANDIDATES:
+            return True
         candidates = getattr(extracted, "candidates", None)
-        return listed and isinstance(candidates, dict) and isinstance(candidates.get(key), dict)
+        return isinstance(candidates, dict) and isinstance(candidates.get(key), dict)
 
     def _pad_layout_question_block(self) -> str:
         """@brief Why a path that cannot ask must not write the footprint now, '' when it may.
@@ -11807,12 +12181,12 @@ class MainWindow(QMainWindow):
             of a question (the automatic pipeline, the deferred rewrite of an
             applied edit): they write nothing and say which command asks it.
         """
-        if self._stored_pad_layout_question() is None:
+        if getattr(self, "_pads_kept_blocked", False):
+            return self._pads_kept_blocked_text()
+        question = self._stored_pad_layout_question()
+        if question is None:
             return ""
-        return self.i18n.text(
-            "Footprint non scritto: la domanda sulle posizioni dei pad è ancora aperta. "
-            "«Rigenera footprint» (o «Applica ai file») la ripropone prima di scrivere il "
-            "footprint.")
+        return self._footprint_question_text(question, 0)
 
     def _resolve_stored_pad_layout_question(self) -> bool:
         """@brief Ask the open pad-layout question before the footprint is written, apply the answer.
@@ -11838,29 +12212,50 @@ class MainWindow(QMainWindow):
             question cannot be applied: nothing is written and the user is
             told to repeat the analysis, which asks it again.
         """
-        question = self._stored_pad_layout_question()
-        if question is None:
-            return True
+        if getattr(self, "_pads_kept_blocked", False):
+            # «Lascia bloccato» chosen: no provisional pad is ever written.
+            text = self._pads_kept_blocked_text()
+            self._append_log(text)
+            QMessageBox.warning(self, self.i18n.text("Footprint non generato"), text)
+            return False
+        # Every open footprint question in turn (pad layout, side numbering):
+        # one left open is enough to write nothing.
+        asked = set()
+        while True:
+            question = self._stored_pad_layout_question()
+            if question is None:
+                return True
+            if id(question) in asked or not self._resolve_one_footprint_question(question):
+                return False
+            asked.add(id(question))
+
+    def _resolve_one_footprint_question(self, question: dict) -> bool:
+        """@brief Ask ONE open footprint question and apply its answer (`_resolve_stored_pad_layout_question`).
+
+        @param question The open question (`FOOTPRINT_QUESTION_FIELDS`).
+        @return True when the answer was applied and the question closed.
+        @note A «side_numbering» answer changes the sides and the pinout,
+            not a package: the window's sides take the answer's first pin and
+            direction by edge and the pinout is settled again from the
+            answer (`_apply_answered_side_numbering`).
+        """
         extracted = self._settled_extraction()
         if not self._extraction_holds_question(extracted, question["key"]):
-            text = self.i18n.text(
-                "Footprint non scritto: la domanda sulle posizioni dei pad è ancora aperta, e la "
-                "risposta si applica solo al risultato di un'analisi di questa sessione, che dopo "
-                "la riapertura del progetto non c'è. Ripeti l'analisi dei documenti e rispondi "
-                "alla domanda.")
+            text = self._footprint_question_text(question, 1)
             self._append_log(text)
             QMessageBox.warning(self, self.i18n.text("Footprint non generato"), text)
             return False
         answer = self._ask_extraction_question(question)
         if answer is QUESTION_BACK:
-            self._append_log(self.i18n.text(
-                "Footprint non scritto: la domanda sulle posizioni dei pad resta aperta e verrà "
-                "riproposta prima di scrivere il footprint."))
+            self._append_log(self._footprint_question_text(question, 2))
             return False
         from ..services import datasheet_extractor
         key = question["key"]
         try:
-            updated = datasheet_extractor.apply_answers(extracted, {key: answer})
+            # The saved answers that are no open question go along (a side
+            # already answered for the chosen candidate: `_saved_answers_for_deferred`).
+            updated = datasheet_extractor.apply_answers(
+                extracted, {**self._saved_answers_for_deferred(extracted), key: answer})
         except Exception as exc:  # noqa: BLE001 - nothing is written, the question stays open
             self._append_log(tx("ATTENZIONE: risposte non applicate all'estrazione: {exc}", exc=exc))
             return False
@@ -11869,29 +12264,65 @@ class MainWindow(QMainWindow):
             # `apply_answers` refused the layout and kept the question open,
             # with the reason in the block (`pin_map_conflict`).
             reason = str(getattr(updated, "pin_map_conflict", None) or "").strip()
-            self._append_log(tx("Footprint non scritto: la disposizione dei pad scelta non si può "
-                                "applicare. {reason}", reason=reason))
+            if not reason and question.get("field") in self.SIDE_NUMBERING_FIELDS:
+                # The extractor gives this reason as its last note (no pin map conflict).
+                notes = str(getattr(updated, "notes", "") or "").strip().splitlines()
+                reason = notes[-1] if notes else ""
+            self._append_log(self._footprint_question_text(question, 3, reason=reason))
             return False
-        geometry = getattr(updated, "package_geometry", None)
-        package = None
-        if isinstance(geometry, dict) and geometry:
-            try:
-                data = dict(geometry)
-                # The project name, as on every apply of an extraction.
-                data["name"] = self._component_name() or "Package"
-                package = package_from_mapping(data)
-            except (KeyError, TypeError, ValueError) as exc:
-                self._append_log(tx("Footprint non scritto: la disposizione dei pad scelta non si "
-                                    "può applicare. {reason}", reason=exc))
+        # The chosen layout must build a package BEFORE anything else is
+        # asked (review 2026-11-14, L9): a side answered for a layout that
+        # then fails would stay remembered for nothing.
+        built, package = self._package_from_answered(updated)
+        if not built:
+            return False
+        # Questions the answer opened (the terminal view, deferred until the pad
+        # layout is chosen: VE12H, 2026-11-14), asked now one at a time, same
+        # dialog; one left with «Torna indietro» stays open and writes nothing
+        # (H1). After «Lascia bloccato» (keep blocked) the side of the
+        # provisional pads is left pending, not asked: those pads are never written.
+        kept_blocked = (question.get("field") == "pad_layout"
+                        and self._is_layout_block_answer(answer))
+        answers_before = dict(self._extraction_answers)
+        questions_before = list(self._extraction_questions)
+        opened_from = updated
+        updated, left_open = self._ask_opened_questions(
+            [q.get("key") for q in getattr(extracted, "questions", None) or () if isinstance(q, dict)],
+            updated, ask=not kept_blocked)
+        if updated is not opened_from:
+            built, package = self._package_from_answered(updated)
+            if not built:
+                # The opened answers made the layout unbuildable: they are
+                # rolled back with their questions, nothing is committed.
+                self._extraction_answers = answers_before
+                self._extraction_questions = questions_before
                 return False
         # Committed only now: the answer is remembered like every other
         # answer (the ones it contradicts are dropped) and the question closed.
         self._extraction_answers = datasheet_extractor.remember_answer(
             self._extraction_answers, key, answer)
+        if kept_blocked:
+            # «Lascia bloccato» (keep blocked): no reading was adopted, so the
+            # provisional pads must never be written; a hard block until the
+            # user enters the positions by hand (`_pads_kept_blocked`, lifted
+            # by a confirmed footprint edit, «Dimentica le risposte» or a new
+            # analysis). The question stays listed and the settled extraction
+            # unchanged: once the answer is forgotten, «Rigenera footprint»
+            # asks it again on the same readings (review 2026-11-14, L7).
+            self._pads_kept_blocked = True
+            text = self._pads_kept_blocked_text()
+            self._append_log(text)
+            self._save_project_config()
+            self._refresh_output_actions()
+            return False
         self._extraction_questions = [q for q in self._extraction_questions if q is not question]
         self._last_extracted = updated
         if package is not None:
             self.package_geometry = package
+        if question.get("field") in self.SIDE_NUMBERING_FIELDS:
+            self._apply_answered_side_numbering(updated)
+        elif question.get("field") in ("row_spacing", "contact_style"):
+            self._apply_answered_castellated_choice(updated, question["field"])
         # The pads the answer restored are no longer unread (PADNULL H1).
         self._unread_pads = self._dropped_footprint_pads(updated)
         self._unread_pad_holes = self._pads_with_unread_holes(updated, self._unread_pads)
@@ -11909,7 +12340,150 @@ class MainWindow(QMainWindow):
         self._append_log(tx("Risposta dell'utente: {text} -> {label}",
                             text=question["text"], label=label))
         self._save_project_config()
+        if left_open:
+            # A question the answer opened stays open (H1): it blocks the
+            # footprint like any footprint question and is asked again first.
+            for opened in self._extraction_questions:
+                if opened not in questions_before:
+                    self._append_log(self._footprint_question_text(opened, 2))
+            return False
         return True
+
+    def _stored_symbol_question(self) -> dict | None:
+        """@brief The open question that decides the symbol (`SYMBOL_QUESTION_FIELDS`), or None."""
+        return next((q for q in getattr(self, "_extraction_questions", None) or ()
+                     if isinstance(q, dict) and q.get("field") in self.SYMBOL_QUESTION_FIELDS), None)
+
+    def _resolve_stored_symbol_question(self) -> bool:
+        """@brief Ask the open «contact_nc» question again, apply the answer and recompose the symbol.
+
+        @return True when the answer was applied (or nothing was open);
+            False on «Torna indietro», a refused answer, or a reopened
+            project whose analysis result is gone (the user is told to
+            repeat the analysis).
+        @note Same flow as the footprint questions: the settled extraction
+            holds the candidates, `apply_answers` writes the chosen NC pin
+            into the pinout with the saved answers that ride along, the answer
+            is remembered, and the symbol is composed again from the new
+            pinout (`_settle_extracted_pinout`, the relay symbol is drawn
+            from the pin functions).
+        """
+        question = self._stored_symbol_question()
+        if question is None:
+            return True
+        extracted = self._settled_extraction()
+        if not self._extraction_holds_question(extracted, question["key"]):
+            text = self.i18n.text(
+                "Domanda sul contatto normalmente chiuso non applicabile: la risposta vale solo per "
+                "il risultato di un'analisi di questa sessione, che dopo la riapertura del progetto "
+                "non c'è. Ripeti l'analisi dei documenti e rispondi alla domanda.")
+            self._append_log(text)
+            QMessageBox.information(self, self.i18n.text("Funzioni NC/NO"), text)
+            return False
+        answer = self._ask_extraction_question(question)
+        if answer is QUESTION_BACK:
+            return False
+        from ..services import datasheet_extractor
+        key = question["key"]
+        try:
+            updated = datasheet_extractor.apply_answers(
+                extracted, {**self._saved_answers_for_deferred(extracted), key: answer})
+        except Exception as exc:  # noqa: BLE001 - nothing applied, the question stays open
+            self._append_log(tx("ATTENZIONE: risposte non applicate all'estrazione: {exc}", exc=exc))
+            return False
+        if any(isinstance(q, dict) and q.get("key") == key
+               for q in getattr(updated, "questions", None) or ()):
+            self._append_log(self.i18n.text(
+                "Risposta sul contatto normalmente chiuso non applicabile: la domanda resta aperta."))
+            return False
+        self._extraction_answers = datasheet_extractor.remember_answer(
+            self._extraction_answers, key, answer)
+        self._extraction_questions = [q for q in self._extraction_questions if q is not question]
+        self._last_extracted = updated
+        self._contact_function_witness = self._valid_contact_witness(
+            getattr(updated, "contact_function_witness", None))
+        # The relay symbol is drawn from the pin functions: composed again.
+        self._settle_extracted_pinout(self._pinout_candidate_after_sides(updated, None))
+        label = next((o["label"] for o in question["options"] if o["value"] == answer), str(answer))
+        self._append_log(tx("Risposta dell'utente: {text} -> {label}",
+                            text=question["text"], label=label))
+        self._save_project_config()
+        return True
+
+    def _answer_contact_nc_action(self) -> str:
+        """@brief The check dialog's «Rispondi alla domanda»: `_resolve_stored_symbol_question`.
+
+        @return A translated outcome line for the dialog.
+        @throws RuntimeError when the question was not answered (the dialog
+            shows it as a fix that did not succeed).
+        """
+        if not self._resolve_stored_symbol_question():
+            raise RuntimeError(self.i18n.text("Domanda sul contatto normalmente chiuso non risolta."))
+        if getattr(self, "_contact_function_witness", None) == "manual":
+            # «Nessuna delle due»: nothing applied, the roles go to the Pinout table.
+            return self.i18n.text("Funzioni NC/NO lasciate alla correzione a mano nella tabella "
+                                  "Pinout.")
+        return self.i18n.text("Contatto normalmente chiuso scelto: simbolo ricomposto.")
+
+    @staticmethod
+    def _switch_pins_changed(before, after) -> bool:
+        """@brief Whether a Pinout edit changed the name or the function of a switch-contact pin.
+
+        @param before Pinout rows before the edit.
+        @param after Pinout rows after it.
+        @return True when a pin whose function (before or after) is a switch
+            role (nc, no, common) changed its name or its function.
+        """
+        from ..generators.symbol_relay import pin_function
+
+        def roles(rows):
+            return {str(row.get("pin")): (pin_function(row), str(row.get("name") or ""))
+                    for row in rows or () if isinstance(row, dict)}
+        old, new = roles(before), roles(after)
+        switch = ("nc", "no", "common")
+        return any(old.get(pin) != new.get(pin) for pin in set(old) | set(new)
+                   if (old.get(pin, (None,))[0] in switch or new.get(pin, (None,))[0] in switch))
+
+    def _edit_pinout_action(self) -> str:
+        """@brief The check dialog's «Apri la tabella Pinout» for NC/NO left to a hand correction.
+
+        @return A translated outcome line for the dialog.
+        @throws RuntimeError when the table was closed without a change.
+        @note A pinout edited and applied after «Nessuna delle due» is the
+            user's own assignment: the witness «manual» becomes «user» (OK
+            in the check). Without that, the open review could never be
+            closed short of a new analysis.
+        """
+        before = deepcopy(self.pinout)
+        self._show_pinout_dialog()
+        if self.pinout == before:
+            raise RuntimeError(self.i18n.text("Tabella Pinout non modificata."))
+        if getattr(self, "_contact_function_witness", None) == "manual":
+            self._contact_function_witness = "user"
+            self._save_project_config()
+        return self.i18n.text("Tabella Pinout corretta a mano: le funzioni NC/NO valgono come scelta "
+                              "dell'utente.")
+
+    def _package_from_answered(self, updated):
+        """@brief The package an answered extraction describes, built and validated.
+
+        @param updated The extraction after `apply_answers`.
+        @return (True, package) -- package None when the extraction has no
+            package geometry -- or (False, None) when the geometry cannot be
+            built; the reason is in the log and nothing is committed.
+        """
+        geometry = getattr(updated, "package_geometry", None)
+        if not (isinstance(geometry, dict) and geometry):
+            return True, None
+        try:
+            data = dict(geometry)
+            # The project name, as on every apply of an extraction.
+            data["name"] = self._component_name() or "Package"
+            return True, package_from_mapping(data)
+        except (KeyError, TypeError, ValueError) as exc:
+            self._append_log(tx("Footprint non scritto: la disposizione dei pad scelta non si "
+                                "può applicare. {reason}", reason=exc))
+            return False, None
 
     # ── Partial re-read of one datum (review 2026-11-04, M16) ──
     #
@@ -12013,6 +12587,12 @@ class MainWindow(QMainWindow):
             action.setVisible(self._reread_worker_class() is not None)
             action.setEnabled(not reason)
             action.setToolTip(reason)
+        forget = getattr(self, "action_forget_answers", None)
+        if forget is not None:
+            # Not while an analysis or a re-read runs (M4).
+            busy = bool(self._background_work_running() or self._automatic_generation_active)
+            forget.setEnabled(not busy)
+            forget.setToolTip(self.i18n.text("Operazione in corso: attendi la fine.") if busy else "")
 
     def _start_reread(self, field: str) -> None:
         """@brief Start the partial re-read of `field` on the saved main answer.
@@ -12045,7 +12625,7 @@ class MainWindow(QMainWindow):
             return
         worker_class = self._reread_worker_class()
         stored = self._main_answer_for_reread()
-        model = self._session_model or profile['model']
+        model = profile['model']
         if hasattr(self, "ai_account"):
             self.ai_account.start_analysis(self._project_dir_or_none())
         self._begin_ai_run(self.REREAD_FIELDS[field])
@@ -12162,7 +12742,13 @@ class MainWindow(QMainWindow):
                                     "risultato dell'analisi con cui fonderla; i pad restano quelli "
                                     "salvati."))
                 return
-        self._on_extracted(params)
+        # Which datum this re-read confronted, for the apply (H2); None for a
+        # whole result.
+        self._reread_applying_field = partial.get("field") if isinstance(partial, dict) else None
+        try:
+            self._on_extracted(params)
+        finally:
+            self._reread_applying_field = None
 
     def _apply_reread_height_alone(self, params) -> None:
         """@brief Apply the height of a partial re-read and nothing else.
@@ -12185,8 +12771,12 @@ class MainWindow(QMainWindow):
         # From here the fields may change: the run owns the output, as in
         # `_on_extracted` (see `_on_extract_finished`).
         self._extraction_applied_revision = self._analysis_revision
-        with self._autosave_suspended():
-            self._apply_reread_height_scope(params)
+        self._reread_applying_field = "body_height_mm"
+        try:
+            with self._autosave_suspended():
+                self._apply_reread_height_scope(params)
+        finally:
+            self._reread_applying_field = None
 
     def _apply_reread_height_scope(self, params) -> None:
         """@brief Body of `_apply_reread_height_alone`: questions of the height scope, then the height.
@@ -12530,6 +13120,33 @@ class MainWindow(QMainWindow):
         if candidate is not None:
             self._compose_functional_symbol()
 
+    def _log_pinout_notes(self, notes) -> None:
+        """@brief Log the notes of `pinout_on_pads`, the «name refers to another pad» ones folded.
+
+        @param notes `LocalizedText` notes of `symbol_pins.pinout_on_pads`.
+        @note Real run 2026-11-13 (ESP32): 29 such lines for one analysis.
+            Those notes are recognised by their TEMPLATE
+            (`symbol_pins.NAME_REFERS_TO_OTHER_PAD`), never by the translated
+            text: the visible log gets one line with their count and pins,
+            each detail goes to the project log file once; every other note
+            is logged as before.
+        """
+        from ..generators.symbol_pins import NAME_REFERS_TO_OTHER_PAD
+        folded = []
+        for note in notes or ():
+            if getattr(note, "template", None) == NAME_REFERS_TO_OTHER_PAD:
+                folded.append(note)
+                self._write_log_line(tx("ATTENZIONE: ") + note.localized())
+            else:
+                self._append_log(tx("ATTENZIONE: ") + note.localized())
+        if folded:
+            from ..services.pinout_coherence import pin_ranges_text
+            pins = pin_ranges_text(str(note.values.get("number")) for note in folded)
+            self._append_log(tx("ATTENZIONE: {count} nomi del pinout richiamano un altro pad "
+                                "(pin {pins}): tenuti sul pad del loro numero; dettaglio nel "
+                                "registro del progetto.", count=len(folded), pins=pins),
+                             persist=False)
+
     def _settle_pinout_rows(self, candidate) -> None:
         """@brief Make the pinout of a new analysis current without losing the user's names silently.
 
@@ -12568,8 +13185,7 @@ class MainWindow(QMainWindow):
             # added by the symbol tab itself (_refresh_symbol_tab).
             candidate = [row for row in placed.rows
                          if _pin_name_text(row.get("name")) or set(row) - {"pin", "name"}]
-            for note in placed.notes:
-                self._append_log(tx("ATTENZIONE: ") + note.localized())
+            self._log_pinout_notes(placed.notes)
         proposed = {_pin_key(row.get("pin")): _pin_name_text(row.get("name")) for row in candidate}
         # From now on the user's names are judged against THIS analysis (L1).
         self._analysis_pin_names = dict(proposed)
@@ -12862,6 +13478,8 @@ class MainWindow(QMainWindow):
         else:
             self._set_photo_components(params.components_3d or [], replace_excluded=True)
             self.group_castellated.setChecked(False)
+            if not self._relaunch_base_synthesized:
+                self._document_sides = []
             # Since 26/09 the extraction leaves None whatever the answer lacks:
             # the pitch for a single column, the row spacing for a single row, the
             # whole grid for a component with explicit pads (SMD). Only what is
@@ -12937,17 +13555,8 @@ class MainWindow(QMainWindow):
                    n_pin_map=len(self.pin_map))
             )
 
-        # Precedence (item 11): an explicit pinout table, else the names the
-        # analysis read beside each pad of a package, else the side names of
-        # a castellated module (collected above), else nothing new.
-        if params.pinout:
-            pinout_candidate = [dict(entry) for entry in params.pinout]
-        elif self.package_geometry is not None and not params.is_castellated():
-            named = _package_pinout(self.package_geometry)
-            if named:
-                pinout_candidate = named
-                self._append_log(tx("Nomi dei pin letti accanto ai pad del package: {count}.",
-                                    count=len(named)))
+        pinout_candidate = self._pinout_candidate_after_sides(params, pinout_candidate)
+        self._log_pinout_without_pads(params)
         self._settle_extracted_pinout(pinout_candidate)
 
 
@@ -13325,6 +13934,56 @@ class MainWindow(QMainWindow):
                   sides=", ".join(str(EDGE_LABELS.get(side["edge"], side["edge"]))
                                   for side in missing))
 
+    def _pinout_candidate_after_sides(self, params, candidate):
+        """@brief The pinout an analysis proposes, by precedence (item 11, decision 2026-11-13).
+
+        @param params The settled extraction.
+        @param candidate The candidate collected so far: the side labels of a
+            castellated module, [] for «no names», None to keep the current one.
+        @return An explicit document pinout table, else the names read beside
+            each pad of a package, else `candidate`.
+        @note The DOCUMENT pinout wins over the side labels (coordinator
+            decision 2026-11-13, project invariant «symbol pin names aligned
+            with the source pinout»): when the sides and the pinout are one
+            numbering (`side_pinout_report(...)["contradicted"]` False, e.g.
+            after «renumber») the symbol gets «GPIO14 (...)», never the
+            silkscreen «14». The side labels are used only without a
+            document pinout, or after «keep_sides», where the extractor has
+            already made the pinout the side labels. While the sides and the
+            pinout contradict each other the question «side_numbering» is
+            open and no footprint is written.
+        """
+        if params.pinout:
+            return [dict(entry) for entry in params.pinout]
+        if self.package_geometry is not None and not params.is_castellated():
+            named = _package_pinout(self.package_geometry)
+            if named:
+                self._append_log(tx("Nomi dei pin letti accanto ai pad del package: {count}.",
+                                    count=len(named)))
+                return named
+        return candidate
+
+    def _log_pinout_without_pads(self, params) -> None:
+        """@brief Say which document pinout entries have no pad while the side numbering is asked.
+
+        @param params The settled extraction.
+        @note Only for a castellated module with a document pinout and an
+            open «side_numbering» question: the line names the entries
+            (compressed ranges) and the remedy, answering that question.
+        """
+        if not (params.is_castellated() and params.pinout):
+            return
+        if not any(isinstance(q, dict) and q.get("field") == "side_numbering"
+                   for q in getattr(self, "_extraction_questions", None) or ()):
+            return
+        from ..services.pinout_coherence import pin_ranges_text, side_pinout_report
+        report = side_pinout_report(params.castellated_sides, params.pinout)
+        if report.get("dropped"):
+            self._append_log(tx(
+                "Voci del pinout senza pad: {pins}. Rispondi alla domanda sulla numerazione dei "
+                "contatti: «Rigenera footprint» o «Applica ai file» la ripropone prima di scrivere "
+                "il footprint.", pins=pin_ranges_text(report["dropped"])))
+
     def _apply_extracted_castellated(self, params: ExtractedParams) -> None:
         """Fill the "Modulo castellated" group with the extracted sides.
 
@@ -13364,6 +14023,10 @@ class MainWindow(QMainWindow):
         self.field_cast_pad_width.setValue(_reference_pad("pad_width"))
 
         self._sides.clear()
+        if not getattr(self, "_relaunch_base_synthesized", False):
+            # A base rebuilt from the fields carries no labels: it must not
+            # wipe the ones of the analysis it re-runs.
+            self._document_sides = self._canonical_document_sides(params.castellated_sides)
         names = []
         pinout = []
         sources = getattr(params, "value_sources", None) or {}
@@ -13396,7 +14059,9 @@ class MainWindow(QMainWindow):
         if pinout:
             if self._extraction_side_pinout is not None:
                 self._extraction_side_pinout[:] = pinout
-            else:
+            elif not params.pinout:
+                # Outside an apply the side labels name the pins only when
+                # the analysis has no document pinout (decision 2026-11-13).
                 self.pinout = pinout
 
         self._set_photo_components(params.components_3d or [], replace_excluded=True)
@@ -13705,6 +14370,31 @@ class MainWindow(QMainWindow):
         """
         self._on_sides_changed()
         self._invalidate_generated_mesh()
+        self._resync_document_sides()
+
+    def _resync_document_sides(self) -> None:
+        """@brief Follow a manual side edit in the labelled sides the component check reads.
+
+        @note The labels are physical (listed along the edge), so a new first
+            pin or direction typed in the table is taken over and the labels
+            pair with the new numbers. A side whose contact count changed, or
+            that no longer exists in the table, loses its labels: they cannot
+            be placed safely, so no label check is made for it (review
+            2026-11-13).
+        """
+        current = {side.get("edge"): side for side in getattr(self, "_sides", ()) or ()
+                   if isinstance(side, dict)}
+        resynced = []
+        for side in getattr(self, "_document_sides", None) or ():
+            table = current.get(side.get("edge"))
+            side = dict(side)
+            if table is None or table.get("count") != side.get("count"):
+                side["pin_names"] = []
+            else:
+                side["first_pin"] = table.get("first_pin", side.get("first_pin"))
+                side["reverse"] = bool(table.get("reverse"))
+            resynced.append(side)
+        self._document_sides = resynced
 
     def _on_contact_style_edited(self, *_args) -> None:
         """@brief The contact style of one side was changed in the table.
@@ -14146,8 +14836,9 @@ class MainWindow(QMainWindow):
         review_group = QGroupBox("Verifica prima dell’installazione")
         review_layout = QVBoxLayout(review_group)
         review_note = QLabel(
-            "Crea un piccolo progetto temporaneo con il footprint e il modello STEP, "
-            "quindi lo apre nel PCB Editor. In KiCad premi Alt+3 per la vista 3D.")
+            "Crea un piccolo progetto temporaneo con il footprint, il simbolo e il modello STEP, "
+            "apre lo schema nell'Editor di schemi e la scheda nel PCB Editor e mostra "
+            "un'immagine 3D del componente. In KiCad premi Alt+3 per la vista 3D interattiva.")
         review_note.setWordWrap(True)
         # Icons instead of text buttons, name and explanation in the tooltip
         # (user, 2026-09-24), with the same style as the other bars: the
@@ -14700,8 +15391,8 @@ class MainWindow(QMainWindow):
         typed = self.field_fp_filters.text().strip() if hasattr(self, "field_fp_filters") else ""
         if typed:
             return typed
-        name = self._component_name()
-        return f"{name}*" if name else ""
+        # One token even for a name with spaces (`fp_filter_pattern`).
+        return fp_filter_pattern(self._component_name())
 
     def _effective_datasheet(self) -> str:
         """@brief Datasheet URL or path for the Datasheet property; '' when not given."""
@@ -14828,6 +15519,8 @@ class MainWindow(QMainWindow):
             item.setData(FINDING_DETAILS_ROLE,
                          finding_details(finding.severity, finding.message, hint))
             self.klc_list.addItem(item)
+            if finding.fix in klc_checks.FIX_IDS:
+                self._add_klc_fix_button(item, finding)
         self._mark_metadata_fields(findings)
         self._refresh_install_gate(findings)
 
@@ -14846,6 +15539,67 @@ class MainWindow(QMainWindow):
             dialog.exec()
         finally:
             dialog.deleteLater()
+
+    def _add_klc_fix_button(self, item, finding) -> None:
+        """@brief Put a «Correggi» button at the right of a KLC row whose finding has an automatic fix.
+
+        @param item The row of the finding.
+        @param finding The `klc_checks.Finding`; its `fix` id (never its
+            text) decides what the button does (`_apply_klc_fix`).
+        @note The row keeps its text and its click (full text and remedy);
+            the button sits on a transparent widget over the row's right end.
+        """
+        holder = QWidget()
+        holder.setProperty("i18n_skip", True)
+        layout = QHBoxLayout(holder)
+        layout.setContentsMargins(0, 0, 2, 0)
+        layout.addStretch(1)
+        button = QPushButton(self.i18n.text("Correggi"))
+        button.setObjectName(f"klc_fix_{finding.fix}")
+        button.setAutoDefault(False)
+        button.setProperty("i18n_skip", True)
+        button.setProperty("klc_fix", finding.fix)
+        button.clicked.connect(lambda _checked=False, f=finding: self._apply_klc_fix(f))
+        layout.addWidget(button)
+        item.setSizeHint(item.sizeHint().expandedTo(holder.sizeHint()))
+        self.klc_list.setItemWidget(item, holder)
+
+    def _apply_klc_fix(self, finding) -> bool:
+        """@brief Run the automatic fix of a KLC finding, after a confirmation that shows the result.
+
+        @param finding The `klc_checks.Finding` carrying `fix` and `fix_value`.
+        @return True when the fix ran.
+        @note Dispatched by the fix id, never by the message text:
+            `FIX_NAME_SPACES` renames the project to `fix_value` through the
+            one rename path («Rinomina progetto…», `_apply_project_rename`),
+            so folder, footprint, symbol and STEP names stay consistent.
+        """
+        from ..services import klc_checks
+        if finding.fix != klc_checks.FIX_NAME_SPACES or not finding.fix_value:
+            return False
+        if self._project_change_blocked():
+            return False
+        current = self._component_name()
+        # The finding may describe a name the project no longer has: the fix is
+        # applied only to the name it was computed from (KiCad workflow review).
+        if finding.fix_value != klc_checks.proposed_name_without_spaces(current):
+            message = self.i18n.text("Correzione non applicata: il nome del progetto è cambiato dopo "
+                                     "il controllo. Ripeti i controlli.")
+            self._append_log(message)
+            QMessageBox.information(self, self.i18n.text("Correggi"), message)
+            self._refresh_klc_findings()
+            return False
+        answer = QMessageBox.question(
+            self, self.i18n.text("Correggi"),
+            tx("Rinominare il progetto «{old_name}» in «{new_name}»? Cartella, footprint, simbolo "
+               "e modello STEP prendono il nuovo nome. Le copie già installate nelle librerie "
+               "KiCad mantengono il nome vecchio: una nuova installazione aggiunge il nome nuovo "
+               "accanto.", old_name=current, new_name=finding.fix_value),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if answer != QMessageBox.StandardButton.Yes:
+            return False
+        return self._apply_project_rename(finding.fix_value) != current
 
     def _on_klc_finding_clicked(self, item) -> None:
         """@brief Open the full text and remedy of a clicked «Controlli KiCad (KLC)» row.
@@ -15898,6 +16652,8 @@ class MainWindow(QMainWindow):
     #: every remedy of this table and checks the gate clears.
     KICAD_BLOCK_REMEDIES = {
         "busy": None,                               # wait for the work to end
+        "pads_kept_blocked": None,                  # enter the pads by hand, or «Dimentica le risposte»
+        "footprint_question": "btn_apply_metadata",  # «Applica ai file» asks the open question
         "footprint_invalid": None,                  # correct the fields
         "footprint_pending_write": "btn_apply_metadata",  # «Applica ai file» (B5)
         "footprint_pads": "btn_apply_metadata",     # «Applica ai file»
@@ -15921,12 +16677,31 @@ class MainWindow(QMainWindow):
         """
         return self._refresh_memo("kicad_block", self._kicad_block_now)
 
-    def _kicad_block_now(self):
-        """The gate of `_kicad_block`, always evaluated (no per-refresh memo)."""
-        if self._kicad_work_busy():
+    def _kicad_block_now(self, ignore_busy: bool = False):
+        """The gate of `_kicad_block`, always evaluated (no per-refresh memo).
+
+        @param ignore_busy True leaves out the «busy» code: «Mostra in KiCad»
+            runs from the open check dialog, which itself counts as work.
+        """
+        if not ignore_busy and self._kicad_work_busy():
             return ("busy", self.i18n.text(
                 "Comando non disponibile mentre è in corso un lavoro (generazione, modello STEP, "
                 "analisi): i file del componente potrebbero essere a metà. Attendi che finisca."))
+        if getattr(self, "_pads_kept_blocked", False):
+            # «Lascia bloccato» (L7): a .kicad_mod on disk comes from pads the
+            # user did not confirm, so it is neither previewed nor installed.
+            return ("pads_kept_blocked", self.i18n.text(
+                "Footprint bloccato: le posizioni dei pad sono state lasciate bloccate per scelta "
+                "dell'utente. Inseriscile a mano nell'anteprima del footprint (o in «Piazzole del "
+                "componente THT») e applica, oppure usa «Dimentica le risposte» e ripeti "
+                "l'analisi."))
+        question = self._stored_pad_layout_question()
+        if question is not None:
+            # An open footprint question (pad layout, side numbering, row
+            # spacing, contact type, terminal view): the .kicad_mod on disk
+            # is not the answered layout, so it is neither previewed nor
+            # installed (review 2026-11-14). «Applica ai file» asks it.
+            return ("footprint_question", self._footprint_question_text(question, 0))
         return self._kicad_files_alignment_block()
 
     def _kicad_command_block_reason(self) -> str:
@@ -16213,19 +16988,18 @@ class MainWindow(QMainWindow):
             self._append_log(stale[1])
             QMessageBox.warning(self, self.i18n.text('Verifica componente per KiCad'), stale[1])
             return
-        if not self.symbol_tab.has_pending_edits():
-            self._refresh_symbol_tab()
-        pending = self.symbol_tab.has_pending_edits()
-        # The check reads the .kicad_mod on disk: the applied footprint. A
-        # pending footprint draft is reported, like the symbol's.
-        args = dict(directory=self._project_dir(), name=self._component_name(),
-                    rows=deepcopy(self.symbol_tab.rows()), pending=pending,
-                    issues=self.symbol_tab.review_issues() if not pending else (),
-                    footprint_pending=self.has_pending_footprint_edits(),
-                    # The 3D import test places the model as the deliveries
-                    # will: the APPLIED anchor's offset (plan F2).
-                    model_offset=self._kicad_model_offset())
-        dialog = ComponentCheckDialog(args, self, tx=self.i18n.text)
+        from ..services.component_check import (ACTION_ANSWER_CONTACT_NC, ACTION_EDIT_PINOUT,
+                                                ACTION_REEXPORT_SYMBOL, ACTION_SHOW_IN_KICAD)
+        # A callable, not a dict: every run (the first, «Ripeti la verifica»,
+        # the re-run after a fix) reads the window as it is THEN -- e.g. «Solo
+        # nome principale» toggled in the Pinout table changes the applied
+        # symbol without changing the pinout (review 2026-11-14).
+        dialog = ComponentCheckDialog(
+            self._component_check_args, self, tx=self.i18n.text,
+            actions={ACTION_REEXPORT_SYMBOL: self._reexport_symbol_action,
+                     ACTION_ANSWER_CONTACT_NC: self._answer_contact_nc_action,
+                     ACTION_EDIT_PINOUT: self._edit_pinout_action,
+                     ACTION_SHOW_IN_KICAD: self._show_check_in_kicad})
         self._component_review_dialog = dialog
         # The open dialog counts as work in progress (`_background_work_running`):
         # the KiCad commands follow it on opening and on closing (review pass 2, L6).
@@ -16236,9 +17010,380 @@ class MainWindow(QMainWindow):
             self._component_review_dialog = None
             self._refresh_kicad_command_gate()
             self._retry_footprint_rewrite()
-        if getattr(dialog, "ai_review_requested", False):
+        self._route_check_handoff(getattr(dialog, "handoff", None)
+                                  or ("suggest_pin_types"
+                                      if getattr(dialog, "ai_review_requested", False) else None))
+
+    def _record_kicad_install(self, scope: str, footprint_path) -> None:
+        """@brief Remember the library a successful installation wrote, for the component check.
+
+        @param scope «project» or «global».
+        @param footprint_path The installed .kicad_mod (`LibraryInstallResult.footprint_path`);
+            None records nothing.
+        @note One entry per scope, the newest wins; saved with the project. A
+            project library is stored relative to the project; a remote
+            folder is never recorded (`_install_path_ok`).
+        """
+        if footprint_path is None or scope not in ("project", "global"):
+            return
+        folder = Path(footprint_path).parent
+        if scope == "project":
+            # Relative to the project when inside it (it travels with the
+            # project folder); a KiCad project elsewhere is recorded with its
+            # absolute local path (review 2026-11-14: it was not recorded and
+            # the check said «non installato»).
+            try:
+                folder = folder.resolve().relative_to(self._project_dir().resolve())
+            except ValueError:
+                folder = folder.resolve()
+            except OSError:
+                return
+        text = str(folder)
+        if not self._install_path_ok(scope, text):
+            return
+        self._kicad_installs = [entry for entry in getattr(self, "_kicad_installs", None) or []
+                                if entry.get("scope") != scope]
+        self._kicad_installs.append({"scope": scope, "pretty_dir": text})
+        self._save_project_config()
+
+    def _route_check_handoff(self, handoff) -> None:
+        """@brief Carry out what the closed check dialog handed to the window.
+
+        @param handoff The dialog's `handoff`: «suggest_pin_types» (Symbol tab,
+            then the AI suggestion of the electrical types), «open_symbol_tab»
+            (review the types by hand), «open_kicad_tab» (reinstall a library);
+            None or anything else does nothing.
+        """
+        from ..services.component_check import ACTION_OPEN_KICAD_TAB, ACTION_OPEN_SYMBOL_TAB
+        if handoff == "suggest_pin_types":
             self.tabs.setCurrentIndex(TAB_SYMBOL)
             self._suggest_pin_types()
+        elif handoff == ACTION_OPEN_SYMBOL_TAB:
+            self.tabs.setCurrentIndex(TAB_SYMBOL)
+        elif handoff == ACTION_OPEN_KICAD_TAB:
+            self.tabs.setCurrentIndex(TAB_KICAD)
+
+    def _show_check_in_kicad(self) -> str:
+        """@brief «Mostra in KiCad» of the check dialog: open the preview board and schematic.
+
+        @return A translated outcome line for the dialog.
+        @throws RuntimeError when the preview cannot be opened (no footprint,
+            files behind the parameters, no PCB Editor, a write refused).
+        @note A VIEW, not a fix: nothing changes and the check is not run
+            again. It does not go through `_refuse_kicad_command`, which
+            counts the open check dialog itself as work in progress; it
+            applies the same gate minus «busy» (`_kicad_block_now`): pads
+            kept blocked, an open footprint question, files behind the
+            parameters. The preview schematic shows the APPLIED symbol, the
+            one the ERC checked. Without a STEP the preview opens without a
+            model, without asking (the check already says so).
+        """
+        if not self._kicad_output_complete():
+            raise RuntimeError(self.i18n.text("Nessun footprint da mostrare: genera prima il componente."))
+        block = self._kicad_block_now(ignore_busy=True)
+        if block is not None:
+            # The same gate as «Prova in KiCad», minus «busy» (the dialog
+            # itself): its text names the reason and the remedy.
+            raise RuntimeError(block[1])
+        artifacts = self._current_kicad_artifacts()
+        if artifacts is None:
+            raise RuntimeError(self.i18n.text("File KiCad incompleti"))
+        applications = detect_external_applications()
+        if not applications.pcbnew:
+            raise RuntimeError(self.i18n.text(
+                "PCB Editor non rilevato. Installa KiCad e riavvia l'applicazione."))
+        try:
+            # The APPLIED symbol, the one the ERC checked (not an older
+            # exported .kicad_sym): staged inside the preview folder.
+            from ..services.kicad_library import PREVIEW_DIR_NAME
+            symbol = self._applied_symbol_full_text()
+            if symbol and is_dataclass(artifacts):
+                staging = self._project_dir() / PREVIEW_DIR_NAME / "applied-symbol"
+                staging.mkdir(parents=True, exist_ok=True)
+                from ..services.kicad_library import _atomic_write_text
+                _atomic_write_text(staging / f"{artifacts.name}.kicad_sym", symbol)
+                preview = create_preview_project(replace(artifacts, component_dir=staging),
+                                                 self._project_dir() / PREVIEW_DIR_NAME)
+            else:
+                preview = create_preview_project(artifacts)
+            launch = launch_preview_editors(preview, applications.pcbnew)
+        except (KiCadLibraryError, OSError, ValueError) as exc:
+            raise RuntimeError(self._kicad_error_text(exc)) from exc
+        launched = self._preview_launch_text(launch)
+        self._append_log(launched)
+        return self.i18n.tr("kicad.preview_opened", path=preview.board_path) + "\n" + launched
+
+    def _component_check_args(self) -> dict:
+        """@brief The keyword arguments of `component_check.verify_component` for this component.
+
+        @return directory, name, applied rows, pending flags, review issues,
+            model offset and `document` (`_component_check_document`).
+        @note The check reads the .kicad_mod on disk: the applied footprint.
+            A pending footprint draft is reported, like the symbol's.
+        """
+        if not self.symbol_tab.has_pending_edits():
+            self._refresh_symbol_tab()
+        pending = self.symbol_tab.has_pending_edits()
+        return dict(directory=self._project_dir(), name=self._component_name(),
+                    rows=deepcopy(self.symbol_tab.rows()), pending=pending,
+                    # (kind, text): the check drops the kinds it reports per
+                    # row whatever the language of the text.
+                    issues=self.symbol_tab.review_issue_items() if not pending else (),
+                    footprint_pending=self.has_pending_footprint_edits(),
+                    # The 3D import test places the model as the deliveries
+                    # will: the APPLIED anchor's offset (plan F2).
+                    model_offset=self._kicad_model_offset(),
+                    document=self._component_check_document(),
+                    # The symbol exactly as «Esporta» writes it (graphics and
+                    # metadata): compared with the exported file the way the
+                    # KiCad gate compares them (real runs 2026-11-13).
+                    applied_symbol=self._applied_symbol_full_text() if not pending else None,
+                    footprint_missing=self._footprint_missing_reason(),
+                    contact_witness=getattr(self, "_contact_function_witness", None),
+                    pad_leads=self._applied_pad_leads(),
+                    installs=self._resolved_kicad_installs(),
+                    # KiCad workflow errors in the interface language.
+                    describe_error=self._kicad_error_text)
+
+    def _applied_pad_leads(self) -> dict:
+        """@brief {pad number: declared terminal} of the APPLIED package pads, for the component check.
+
+        @return {number: {"lead", "fit", "source"}} for every applied package
+            pin that declares a lead: the lead mapping, its `lead_fit` (None
+            when the pin has none) and the provenance of the lead
+            (`sources["lead"]`). The draft is never read: the check reads the
+            file written from the applied state. {} without a package or a
+            declared terminal.
+        """
+        package = getattr(self, "package_geometry", None)
+        if package is None:
+            return {}
+        pins = package.pins
+        applied = getattr(self, "_fp_applied", None)
+        if (self.has_pending_footprint_edits() and isinstance(applied, dict)
+                and applied.get("package_pins") is not None):
+            pins = applied["package_pins"]
+        return {str(pin.number): {"lead": deepcopy(pin.lead),
+                                  "fit": getattr(pin, "lead_fit", None),
+                                  "source": (getattr(pin, "sources", None) or {}).get("lead")}
+                for pin in pins or () if getattr(pin, "lead", None)}
+
+    def _applied_symbol_full_text(self) -> str | None:
+        """@brief The applied symbol rendered as the export writes it, or None when it cannot be.
+
+        @return The full .kicad_sym text (`_applied_symbol_export_args`),
+            None on a pad mismatch or an invalid layout.
+        """
+        from ..generators.symbol import serialize_symbol
+        try:
+            name, pins, kwargs = self._applied_symbol_export_args()
+            return serialize_symbol(name, pins, **kwargs)
+        except (ValueError, TypeError, KeyError):
+            return None
+
+    def _footprint_missing_reason(self) -> str | None:
+        """@brief Why the footprint is not on disk yet, in words, or None when no question explains it.
+
+        @return The block text of the open footprint question's own field
+            (pad layout, side numbering, row spacing, contact type); None
+            otherwise.
+        """
+        if getattr(self, "_pads_kept_blocked", False):
+            # «Lascia bloccato» chosen (L7): the remedy is the hand entry.
+            return self._pads_kept_blocked_text()
+        question = self._stored_pad_layout_question()
+        if question is None:
+            return None
+        # The block text of that question's own field (FOOTPRINT_QUESTION_TEXTS).
+        return self._footprint_question_text(question, 0)
+
+    def _component_check_document(self) -> dict | None:
+        """@brief The document pinout and the user's choices about it, for the component check.
+
+        @return None without a document pinout (no document check is made);
+            otherwise {"pinout": [{"pin", "name"}] of the main answer
+            (`_main_answer_for_reread`), "side_labels": [(pad, label)] of the
+            castellated sides at the window's CURRENT numbering, "user_names":
+            pins whose name the user typed, "decision": the saved answer of
+            the «side_numbering» question ("renumber", "keep_sides" or None),
+            "open_question": True while that question (or the numbering
+            convention question) is open, "layout": "sides", "off_side_pins":
+            entries declared off the sides, "unexplained_pins": entries
+            without a pad that nobody declared off the sides,
+            "numbers_printed": False when the documents print no pin numbers}.
+            None too for a layout whose pads are not numbered along sides
+            (audit M1).
+        @note The side labels come from ONE canonical source,
+            `_document_sides` (the settled sides, view from above, with their
+            own labels and numbering, updated by a «side_numbering» answer),
+            paired pad by pad by `pinout_coherence.pad_label_pairs` (audit
+            H1, 2026-11-13). The raw answer is read for the document pinout
+            only: its sides are as read, before a bottom view is mirrored.
+        @note `decision` is the saved answer of the EXACT «side_numbering»
+            key of the analysis applied last (`_side_numbering_key`, digest of
+            its side/pinout situation); an answer saved for another digest
+            (an older analysis) is never read, and an analysis without that
+            question gives None (coordinator, 2026-11-13).
+        @note A saved answer the extractor applied by itself records no
+            question; the extractor reports its key
+            (`ExtractedParams.answered_questions`), so a silently re-applied
+            «keep_sides» is still the user's decision here.
+        """
+        from ..services.pinout_coherence import pad_label_pairs, side_pinout_report
+        # Side-based layouts only (audit M1): the document rules and remedies
+        # speak of the sides' numbering, which another layout does not have.
+        if not (self.group_castellated.isChecked() and getattr(self, "_sides", None)):
+            return None
+        raw = self._main_answer_for_reread() or {}
+        convention = getattr(self, "_pin_numbers_printed", None) is False
+        if convention:
+            # No printed numbers (audit HIGH 1): the extractor renumbered the
+            # contacts by convention, so the analysis' own numbers are another
+            # frame. The check compares the SETTLED convention rows with the
+            # settled sides -- one frame -- and makes no claim about the
+            # manufacturer's numbers.
+            raw = {"pinout": getattr(self, "_convention_pinout", None) or []}
+        # Entries declared off the sides (an exposed pad): by the model in its
+        # answer, or by the user's answer in the settled pinout. The flag is
+        # kept, so such an entry is never counted as a dropped pin.
+        settled = getattr(self._settled_extraction(), "pinout", None) or ()
+        declared = {str(entry.get("pin")) for entry in settled
+                    if isinstance(entry, dict) and entry.get("off_side") is True}
+        pinout = [dict({"pin": entry.get("pin"), "name": entry.get("name")},
+                       **({"off_side": True} if entry.get("off_side") is True
+                          or str(entry.get("pin")) in declared else {}),
+                       # Informative: the name was the side's label (kept as is).
+                       **({"label_name": True} if entry.get("label_name") is True else {}))
+                  for entry in raw.get("pinout") or () if isinstance(entry, dict)]
+        if not pinout:
+            return None
+        sides = getattr(self, "_document_sides", None) or []
+        # One canonical source, paired pad by pad (audit H1): never the raw
+        # answer's labels matched to the window's numbering by edge name,
+        # which a bottom view mirrors.
+        labels = [(pad, label) for pad, label in pad_label_pairs(sides) if label]
+        report = side_pinout_report(sides, pinout) if sides else {}
+        off_side = [str(pin) for pin in report.get(self.OFF_SIDE_REPORT_KEY) or ()]
+        unexplained = [str(pin) for pin in report.get("unexplained_entries") or ()]
+        key = getattr(self, "_side_numbering_key", None)
+        answers = getattr(self, "_extraction_answers", None) or {}
+        decision = answers.get(key) if key else None
+        open_question = any(isinstance(q, dict) and q.get("field") in self.SIDE_NUMBERING_FIELDS
+                            for q in getattr(self, "_extraction_questions", None) or ())
+        return {"pinout": pinout, "side_labels": labels, "layout": "sides",
+                "off_side_pins": off_side, "unexplained_pins": unexplained,
+                # Positive evidence of a shifted numbering (pinout_coherence
+                # «contradicted», audit H1): only then do entries count as dropped.
+                "shifted": bool(report.get("contradicted")),
+                # Sides whose labels strongly put the pinout names on other
+                # contacts (FINDING_LABEL_PLACEMENT): to review before use.
+                # The extractor's own list (pins in the SETTLED numbering,
+                # recomputed after a side-numbering answer) when this session
+                # holds the analysis; otherwise the report of the saved frame.
+                "label_conflicts": [{"edge": str(item.get("edge") or ""),
+                                     "pins": [str(pin) for pin in item.get("pins") or ()]}
+                                    for item in (self._settled_label_conflicts()
+                                                 if self._settled_label_conflicts() is not None
+                                                 else report.get("label_conflicts") or ())
+                                    if isinstance(item, dict)],
+                "numbers_printed": getattr(self, "_pin_numbers_printed", None) is not False,
+                "user_names": set(getattr(self, "_user_pin_names", None) or {}),
+                "decision": decision if self._known_side_decision(decision) else None,
+                "open_question": open_question}
+
+    def _settled_label_conflicts(self):
+        """@brief `ExtractedParams.label_conflicts` of the analysis this session settled, or None.
+
+        @return The list (pins in the settled numbering), or None when there is
+            no settled extraction or it carries no such list.
+        """
+        conflicts = getattr(self._settled_extraction(), "label_conflicts", None)
+        return list(conflicts) if isinstance(conflicts, (list, tuple)) else None
+
+    @staticmethod
+    def _valid_pinout_rows(raw) -> list:
+        """@brief Pinout rows kept for the component check, validated.
+
+        @param raw A pinout (list of dicts) or the saved copy: any type.
+        @return [{"pin": text, "name": text, optional "off_side"/"label_name": True}]
+            for each dict with a non-empty pin; [] otherwise.
+        """
+        rows = []
+        for entry in raw if isinstance(raw, (list, tuple)) else ():
+            if not isinstance(entry, dict) or not str(entry.get("pin") or "").strip():
+                continue
+            row = {"pin": str(entry["pin"]).strip(), "name": str(entry.get("name") or "")}
+            for flag in ("off_side", "label_name"):
+                if entry.get(flag) is True:
+                    row[flag] = True
+            rows.append(row)
+        return rows
+
+    @staticmethod
+    def _known_side_decision(value) -> bool:
+        """@brief Whether `value` is an answer of the «side_numbering» question.
+
+        @param value The saved answer, any type.
+        @return True for "renumber", "keep_sides", "off_side_entries" and
+            "shift:+N" / "shift:-N" (N a whole number); False otherwise.
+        """
+        if value in ("renumber", "keep_sides", "off_side_entries"):
+            return True
+        return isinstance(value, str) and re.fullmatch(r"shift:[+-]\d+", value) is not None
+
+    #: Key of `pinout_coherence.side_pinout_report` listing the pinout entries
+    #: that are on no side (e.g. a numbered exposed pad): not dropped pins.
+    OFF_SIDE_REPORT_KEY = "off_side_entries"
+
+    @staticmethod
+    def _canonical_document_sides(raw) -> list:
+        """@brief The labelled castellated sides kept for the component check, validated.
+
+        @param raw Settled `castellated_sides` (or the saved copy): any type.
+        @return [{"edge", "count", "first_pin", "reverse", "pin_names"}] for
+            each side dict with an integer count and first pin; [] otherwise.
+        """
+        sides = []
+        for side in raw if isinstance(raw, (list, tuple)) else ():
+            if not isinstance(side, dict):
+                continue
+            count, first = side.get("count"), side.get("first_pin", 1)
+            if not (isinstance(count, int) and not isinstance(count, bool)
+                    and isinstance(first, int) and not isinstance(first, bool)):
+                continue
+            names = side.get("pin_names")
+            sides.append({"edge": str(side.get("edge") or ""), "count": count,
+                          "first_pin": first, "reverse": bool(side.get("reverse")),
+                          "pin_names": [str(name) for name in names]
+                          if isinstance(names, (list, tuple)) else []})
+        return sides
+
+    def _reexport_symbol_action(self) -> str:
+        """@brief «Riesporta il simbolo»: write the applied symbol into the component folder again.
+
+        @return The short outcome text shown by the check dialog.
+        @throws RuntimeError When the symbol editor holds unapplied edits, the
+            rows do not match the footprint pads, or the write failed (the
+            reason is then in the log).
+        @note The same writer and the same review question
+            (`confirm_export_review`) as «Esporta simbolo KiCad…», without the
+            file dialog: the target is always ``<component>/<name>.kicad_sym``.
+        """
+        if self.symbol_tab.has_pending_edits():
+            raise RuntimeError(self.i18n.text("Modifiche non applicate."))
+        mismatch = self._symbol_pad_mismatch()
+        if mismatch:
+            raise RuntimeError(mismatch)
+        # The same review question as the manual export (KiCad workflow review).
+        if not self.symbol_tab.confirm_export_review():
+            raise RuntimeError(self.i18n.text("Esportazione annullata."))
+        exported = self._save_applied_electrical_symbol(quiet=True)
+        if exported is None:
+            raise RuntimeError(self.i18n.text("Simbolo non esportato: il motivo è nel registro."))
+        self._refresh_output_actions()
+        message = self.i18n.text("Simbolo esportato: {path}").format(path=exported)
+        self._append_log(message)
+        return message
 
     def _file_paths_toggle_text(self, expanded: bool) -> str:
         """@brief Translated label of the full-paths toggle of the KiCad tab.
@@ -16530,8 +17675,9 @@ class MainWindow(QMainWindow):
             return
         try:
             preview = create_preview_project(artifacts)
-            launch_preview(applications.pcbnew, preview.board_path)
-        except (KiCadLibraryError, OSError) as exc:
+            launch = launch_preview_editors(preview, applications.pcbnew)
+        except (KiCadLibraryError, OSError, ValueError) as exc:
+            # ValueError too: a slot must never let one escape (review 2026-11-14).
             QMessageBox.warning(
                 self, self.i18n.text("Impossibile aprire KiCad"),
                 self._kicad_error_text(exc))
@@ -16542,7 +17688,117 @@ class MainWindow(QMainWindow):
             message += " " + self.i18n.text(
                 "Anteprima senza modello STEP: la vista 3D mostra solo la scheda.")
         self._append_log(message)
+        self._append_log(self._preview_launch_text(launch))
         self.label_kicad_status.setText(message)
+        self._start_preview_render(preview, applications.kicad_cli, artifacts)
+
+    #: Italian source of the log line of each reason the preview schematic
+    #: was not opened (`kicad_library.PreviewLaunch.schematic_skipped`).
+    PREVIEW_SCHEMATIC_SKIP_TEXTS = {
+        # The reasons a schematic is not WRITTEN: one table, the check's own
+        # (`component_check.SCHEMATIC_SKIP_TEXTS`), so both say the same.
+        **SCHEMATIC_SKIP_TEXTS,
+        "schematic_locked": ("Schema non aggiornato: è aperto nell'Editor di schemi; chiudilo e "
+                             "ripeti «Prova in KiCad» per aggiornarlo. La scheda è aggiornata."),
+        "eeschema_missing": "Editor di schemi non trovato: aperta solo la scheda.",
+        "eeschema_launch_failed": "Impossibile avviare l'Editor di schemi: aperta solo la scheda.",
+    }
+    #: Italian source of the log line of each reason the 3D image was not made
+    #: (`kicad_library.PreviewRender.reason`).
+    PREVIEW_RENDER_FAILURE_TEXTS = {
+        "no_step": "Immagine 3D non creata: manca il modello STEP.",
+        "kicad_cli_missing": "Immagine 3D non creata: kicad-cli non trovato.",
+        "render_timeout": "Immagine 3D non creata: kicad-cli non ha risposto in tempo.",
+        "render_failed": "Immagine 3D non creata: kicad-cli non è riuscito a generarla.",
+        "render_no_image": "Immagine 3D non creata: kicad-cli non è riuscito a generarla.",
+        "render_start_failed": "Immagine 3D non creata: kicad-cli non è riuscito a generarla.",
+    }
+
+    def _preview_launch_text(self, launch) -> str:
+        """@brief The log line of what «Prova in KiCad» opened.
+
+        @param launch `kicad_library.PreviewLaunch`.
+        @return «both opened», or the translated reason the schematic was not
+            opened, with the OS error when there is one. The reason is told
+            by its code, never by text.
+        """
+        reason = getattr(launch, "schematic_skipped", None)
+        if reason is None:
+            return self.i18n.text("Aperti lo schema e la scheda di anteprima in KiCad.")
+        text = self.i18n.text(self.PREVIEW_SCHEMATIC_SKIP_TEXTS.get(
+            reason, "Schema non creato: manca la libreria simboli del componente."))
+        error = getattr(launch, "schematic_error", None)
+        return f"{text} ({error})" if error else text
+
+    def _preview_render_key(self) -> tuple:
+        """@brief What a preview image belongs to: the project folder and the component name.
+
+        @return A tuple compared when the render ends: a result of another
+            project or component is stale and is dropped.
+        """
+        return (str(self._project_dir_or_none() or ""), self._component_name())
+
+    def _start_preview_render(self, preview, kicad_cli, artifacts) -> None:
+        """@brief Render the preview board to a 3D image off the GUI thread (`PreviewRenderWorker`).
+
+        @param preview `kicad_library.PreviewProject` just created.
+        @param kicad_cli Path of kicad-cli, or None.
+        @param artifacts The delivered ComponentArtifacts (`has_step`, `name`).
+        @note Every start bumps a serial number; the result of an older start,
+            or of another project or component, is ignored
+            (`_on_preview_rendered`). Without a STEP the image is not made and
+            the reason is logged at once, no thread started.
+        """
+        self._preview_render_serial = getattr(self, "_preview_render_serial", 0) + 1
+        if not artifacts.has_step:
+            self._append_log(self.i18n.text(self.PREVIEW_RENDER_FAILURE_TEXTS["no_step"]))
+            return
+        self._append_log(self.i18n.text("Creazione dell'immagine 3D…"))
+        token = (self._preview_render_serial, self._preview_render_key(), artifacts.name)
+        worker = PreviewRenderWorker(preview, kicad_cli, has_step=artifacts.has_step, token=token)
+        worker.done.connect(self._on_preview_rendered)
+        self._preview_render_worker = worker
+        worker.start()
+
+    def _on_preview_rendered(self, result, token) -> None:
+        """@brief Show the 3D image of the preview, or log why there is none.
+
+        @param result `kicad_library.PreviewRender`.
+        @param token (serial, project key, component name) of the start.
+        @note A result whose serial is not the latest, or whose project or
+            component is no longer the open one, is dropped silently: it
+            would show another footprint's picture.
+        """
+        serial, key, name = token
+        if serial != getattr(self, "_preview_render_serial", 0) or key != self._preview_render_key():
+            return
+        self._preview_render_worker = None
+        image = getattr(result, "image_path", None)
+        if image is None:
+            reason = getattr(result, "reason", None) or "render_failed"
+            text = self.i18n.text(self.PREVIEW_RENDER_FAILURE_TEXTS.get(
+                reason, self.PREVIEW_RENDER_FAILURE_TEXTS["render_failed"]))
+            detail = str(getattr(result, "detail", "") or "").strip()
+            self._append_log(f"{text} {detail}".strip())
+            return
+        from .render_preview_window import show_render_preview
+        old = getattr(self, "_render_window", None)
+        if old is not None:
+            try:
+                old.close()
+            except RuntimeError:
+                pass  # already deleted by Qt (WA_DeleteOnClose)
+        window = show_render_preview(image, name, self.i18n.text, self)
+        self._render_window = window
+        window.destroyed.connect(lambda *_args, w=window: self._forget_render_window(w))
+
+    def _forget_render_window(self, window) -> None:
+        """@brief Drop the reference to a closed 3D image window (it deletes itself on close).
+
+        @param window The window that was destroyed.
+        """
+        if getattr(self, "_render_window", None) is window:
+            self._render_window = None
 
     def _install_project_library(self) -> None:
         """@brief Install the current artifacts as a portable project library.
@@ -16877,6 +18133,10 @@ class MainWindow(QMainWindow):
         rollback_left = getattr(result, "rollback_left", None)
         if rollback_left:
             message += "\n\n" + self.i18n.tr("kicad.result_rollback_left", path=str(rollback_left))
+        # The library just written, for the component check's «Libreria KiCad»
+        # row: one entry per scope, the newest wins (saved with the project).
+        self._record_kicad_install("project" if project_library else "global",
+                                   getattr(result, "footprint_path", None))
         # A stable code is persisted, translated only when shown (B2).
         kind = "project_library" if project_library else "global_library"
         if record_kicad_export(component=artifacts.name, kind=kind,
@@ -17346,6 +18606,196 @@ class MainWindow(QMainWindow):
             return None
         return detail.strip()
 
+    def _apply_answered_side_numbering(self, updated) -> None:
+        """@brief Bring a «side_numbering» answer into the window: sides by edge, then the pinout.
+
+        @param updated The extraction with the answer applied
+            (`datasheet_extractor.apply_answers`).
+        @note «renumber» changes each side's first pin and direction, the
+            document pinout then names every pad; «keep_sides» keeps the
+            sides and the pinout becomes the side labels. Either way the
+            pinout is settled again (`_settle_extracted_pinout`), so the
+            user's own names are asked about, never dropped silently.
+        """
+        by_edge = {side.get("edge"): side for side in getattr(updated, "castellated_sides", None) or ()
+                   if isinstance(side, dict)}
+        changed = False
+        for side in self._sides:
+            target = by_edge.get(side.get("edge"))
+            if target is None:
+                continue
+            for key in ("first_pin", "reverse"):
+                if key in target and side.get(key) != target[key]:
+                    side[key] = target[key]
+                    changed = True
+        if changed:
+            self._on_sides_changed()
+            # The pads moved: the STEP built over the old ones is stale.
+            self._invalidate_generated_mesh()
+        # The labels follow the answer's numbering (one canonical source).
+        self._document_sides = self._canonical_document_sides(
+            getattr(updated, "castellated_sides", None))
+        self._settle_extracted_pinout(self._pinout_candidate_after_sides(updated, None))
+
+    def _saved_answers_for_deferred(self, params) -> dict:
+        """@brief The saved answers that may accompany an answer given to `params`.
+
+        @param params The extraction the answer is applied to.
+        @return {key: value} of the project's saved answers whose key is NOT an
+            open question of `params` and that no other saved answer
+            contradicts (`contradicting_answers`).
+        @note The extractor keeps the side question of each pad-layout
+            candidate inside the candidate (`_deferred_view_question`): a
+            saved side answer must reach `apply_answers` together with the
+            layout answer, or the side is asked again for a layout the
+            project already settled. Keys of listed questions are left out:
+            those are asked or applied by their own rule (a saved answer the
+            user left open, or one contradicted, is never applied silently);
+            keys that match nothing are ignored by `apply_answers`.
+        """
+        from ..services import datasheet_extractor
+        listed = {q.get("key") for q in getattr(params, "questions", None) or () if isinstance(q, dict)}
+        saved = self._extraction_answers if isinstance(self._extraction_answers, dict) else {}
+        return {key: value for key, value in saved.items()
+                if key not in listed
+                and not datasheet_extractor.contradicting_answers(saved, key)}
+
+    def _ask_opened_questions(self, known_keys, updated, ask: bool = True):
+        """@brief Settle, one at a time, the questions an answer opened, and apply each answer.
+
+        @param known_keys Keys of the questions that existed before the answer
+            (asked, answered or open): only the others are «opened».
+        @param updated The extraction after the answer (`apply_answers`).
+        @param ask False to ask nothing and keep nothing: after «Lascia
+            bloccato» the opened question is the side of the provisional
+            pads, which are never written; kept, it would block (it is a
+            footprint question) and, answered later, rebuild those pads over
+            the ones the user entered by hand (review 2026-11-14). `left_open`
+            stays False.
+        @return (updated, left_open): `updated` with the new answers applied,
+            and True when at least one opened question stays open -- answered
+            with «Torna indietro» (back) or refused by `apply_answers` -- in
+            which case it joins `_extraction_questions`.
+        @note The deferred terminal-view question (VE12H, 2026-11-14) is the
+            case this serves: the extractor asks the side only after a pad
+            layout is chosen, so the side question appears in the result of
+            the layout answer. A saved answer for it is applied without
+            asking, as in the analysis pass (unless another saved answer
+            contradicts it); an answer that opens yet another question is
+            followed the same way, each key at most once.
+        """
+        from ..services import datasheet_extractor
+        seen = {key for key in known_keys if isinstance(key, str)}
+        seen.update(q.get("key") for q in self._extraction_questions if isinstance(q, dict))
+        left_open = False
+        while True:
+            question = next((q for q in self._valid_extraction_questions(
+                getattr(updated, "questions", None)) if q["key"] not in seen), None)
+            if question is None:
+                return updated, left_open
+            key = question["key"]
+            seen.add(key)
+            if not ask:
+                continue
+            saved = (key in self._extraction_answers
+                     and not datasheet_extractor.contradicting_answers(self._extraction_answers, key))
+            if saved:
+                answer = self._extraction_answers[key]
+            else:
+                answer = self._ask_extraction_question(question)
+                if answer is QUESTION_BACK:
+                    self._extraction_questions.append(question)
+                    left_open = True
+                    continue
+            try:
+                applied = datasheet_extractor.apply_answers(updated, {key: answer})
+            except Exception as exc:  # noqa: BLE001 - the question stays open, said
+                self._append_log(tx("ATTENZIONE: risposte non applicate all'estrazione: {exc}",
+                                    exc=exc))
+                applied = None
+            if applied is None or any(isinstance(q, dict) and q.get("key") == key
+                                      for q in getattr(applied, "questions", None) or ()):
+                # Refused (the reason is in the extraction's notes): still open.
+                self._extraction_questions.append(question)
+                left_open = True
+                continue
+            updated = applied
+            if saved:
+                self._append_log(tx("Domanda già risolta per questo progetto: {text}",
+                                    text=question["text"]))
+                continue
+            self._extraction_answers = datasheet_extractor.remember_answer(
+                self._extraction_answers, key, answer)
+            label = next((o["label"] for o in question["options"] if o["value"] == answer), str(answer))
+            self._append_log(tx("Risposta dell'utente: {text} -> {label}",
+                                text=question["text"], label=label))
+
+    @staticmethod
+    def _is_layout_block_answer(value) -> bool:
+        """@brief Whether `value` is the «Lascia bloccato» answer of a pad-layout question.
+
+        @param value An answer value, any type.
+        @return True only for the extractor's exact block value
+            (`LAYOUT_BLOCK_KIND` + ":blocked"). Compared whole, never by
+            suffix: reading values carry a placement mark («~at<x>,<y>») and
+            the pad-hole questions sharing the field end in «=block».
+        """
+        from ..services import datasheet_extractor
+        kind = getattr(datasheet_extractor, "LAYOUT_BLOCK_KIND", "layout_block")
+        return str(value) == f"{kind}:blocked"
+
+    def _confirm_pads_verified(self) -> bool:
+        """@brief Ask whether EVERY pad position is now checked on the drawing (lifts «keep blocked»).
+
+        @return True on «Sì»; «No» keeps the block, the edit is applied anyway.
+        """
+        answer = QMessageBox.question(
+            self, self.i18n.text("Posizioni dei pad"),
+            self.i18n.text("Le posizioni di tutti i pad sono ora verificate sul disegno?"),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        return answer == QMessageBox.StandardButton.Yes
+
+    def _pads_kept_blocked_text(self) -> str:
+        """@brief The block of pad positions the user chose to keep blocked, with its remedy."""
+        return self.i18n.text("Footprint non scritto: posizioni dei pad lasciate bloccate per scelta "
+                              "dell'utente. Inseriscile a mano nell'anteprima del footprint (o in "
+                              "«Piazzole del componente THT») e applica, oppure ripeti l'analisi.")
+
+    def _apply_answered_castellated_choice(self, updated, field: str) -> None:
+        """@brief Bring a «row_spacing» or «contact_style» answer into the window.
+
+        @param updated The extraction with the answer applied (`apply_answers`).
+        @param field "row_spacing": the chosen printed distance between the
+            contact rows (None for «estimate») becomes the declared row spacing,
+            validated as in the apply of an analysis; "contact_style": each
+            window side takes the style of the answer's side of the same edge.
+        """
+        if field == "row_spacing":
+            spacing = getattr(updated, "row_spacing_mm", None)
+            declared = (
+                float(spacing) if isinstance(spacing, (int, float)) and not isinstance(spacing, bool)
+                and math.isfinite(float(spacing)) and float(spacing) > 0 else None)
+            if declared != self._declared_row_spacing:
+                self._declared_row_spacing = declared
+                # The through holes moved: the STEP built over them is stale.
+                self._invalidate_generated_mesh()
+            self._draw_preview()
+            return
+        by_edge = {side.get("edge"): side for side in getattr(updated, "castellated_sides", None) or ()
+                   if isinstance(side, dict)}
+        changed = False
+        for side in self._sides:
+            target = by_edge.get(side.get("edge"))
+            style = target.get("contact_style") if target is not None else None
+            if style in contact_styles() and side.get("contact_style") != style:
+                side["contact_style"] = style
+                changed = True
+        if changed:
+            self._on_sides_changed()
+            # Another contact type is another hole: the STEP is stale.
+            self._invalidate_generated_mesh()
+
     def _pad_layout_question_remedy(self) -> str:
         """@brief The sentence naming the open pad-layout question, '' when it cannot be answered now.
 
@@ -17362,9 +18812,7 @@ class MainWindow(QMainWindow):
             return ""
         if not self._extraction_holds_question(self._settled_extraction(), question.get("key")):
             return ""
-        return self.i18n.text(
-            "Una domanda sulle posizioni dei pad è rimasta aperta: «Rigenera footprint» o "
-            "«Applica ai file» la ripropone prima di scrivere il footprint.")
+        return self._footprint_question_text(question, 5)
 
     @staticmethod
     def _valid_unread_pads(raw) -> list[str] | None:
@@ -17444,10 +18892,17 @@ class MainWindow(QMainWindow):
                     "Nessun footprint: i pad {pads} sono quotati nel disegno, ma il loro foro non è "
                     "quotato e nessun terminale permette di ricavarlo. I campi della matrice non "
                     "sono il footprint di questo componente.").format(pads=", ".join(quoted)))
-                remedies.append(self.i18n.text(
+                # Only a re-read that really ran and found nothing says so
+                # (`ExtractedParams.terminal_reread` "nothing"); otherwise no
+                # claim that re-reading could not help (2026-11-13).
+                reread = getattr(self._settled_extraction(), "terminal_reread", None)
+                remedy = self.i18n.text(
                     "Per il foro dei pad {pads} ripeti l'analisi aggiungendo un documento che quoti "
-                    "il foro o il terminale: rileggere lo stesso disegno non lo troverebbe.").format(
-                    pads=", ".join(quoted)))
+                    "il foro o il terminale.").format(pads=", ".join(quoted))
+                if reread == "nothing":
+                    remedy = self.i18n.text(
+                        "Riletto: nessuna quota di terminale o foro trovata.") + " " + remedy
+                remedies.append(remedy)
         elif getattr(self, "_unread_pad_holes_elsewhere", False):
             # Other pads of the same part DO have a hole: «no printed hole»
             # is no fact about the drawing, and whether these pads are
@@ -18177,8 +19632,14 @@ class MainWindow(QMainWindow):
             if pending:
                 self._append_log(pending)
                 return False
-        elif not self._resolve_stored_pad_layout_question():
-            return False
+        else:
+            if (getattr(self, "_pads_kept_blocked", False) and self.has_pending_footprint_edits()
+                    and not self._settle_footprint_draft_before_start()):
+                # The draft may hold the pads entered by hand that lift the
+                # block (review 2026-11-14, L6): it is settled first.
+                return False
+            if not self._resolve_stored_pad_layout_question():
+                return False
         if (not automatic and not self._fp_rewrite_flushing
                 and not self._settle_footprint_draft_before_start()):
             return False
@@ -18393,6 +19854,7 @@ class MainWindow(QMainWindow):
         self._worker.error.connect(self._on_error)
         self._worker.cad3d_done.connect(self._on_cad3d_generated)
         self._worker.warning.connect(self._on_cad3d_warning)
+        self._worker.finished.connect(self._flush_cad3d_warnings)
         self._worker.cad3d_error.connect(self._on_cad3d_error)
         self._worker.progress.connect(self._on_ai_progress)
         self._worker.phase.connect(self._on_phase)
@@ -18729,10 +20191,25 @@ class MainWindow(QMainWindow):
         self._refresh_output_actions()
 
     def _on_cad3d_warning(self, message: str) -> None:
-        """Annotation not applied: the model exists anyway, but it must be said."""
+        """Annotation not applied: the model exists anyway, but it must be said.
+
+        The detail goes to the project log file once; the visible log gets
+        ONE line per run with the count (`_flush_cad3d_warnings`, real run
+        2026-11-13: 42 lines for one ESP32 board).
+        """
         if not self._cad_result_is_current():
             return
-        self._append_log(tx("ATTENZIONE 3D: {message}", message=message))
+        self._write_log_line(tx("ATTENZIONE 3D: {message}", message=message))
+        self._cad3d_warning_count = getattr(self, "_cad3d_warning_count", 0) + 1
+
+    def _flush_cad3d_warnings(self) -> None:
+        """@brief At the end of a 3D run, one visible line for its warnings (count; detail in the log file)."""
+        count = getattr(self, "_cad3d_warning_count", 0)
+        self._cad3d_warning_count = 0
+        if count:
+            self._append_log(tx("ATTENZIONE 3D: {count} avvisi sui componenti del modello STEP "
+                                "(geometrie approssimate o generiche); dettaglio nel registro del "
+                                "progetto.", count=count), persist=False)
 
     # ── Tab 4: Anteprima (preview) ─────────────────────────────────
 
@@ -21885,6 +23362,33 @@ class MainWindow(QMainWindow):
             self._sync_body_fields(current["package_body"])
         pad_edit = (current["pad_overrides"] != applied["pad_overrides"]
                     or current["package_pins"] != applied["package_pins"] or body_edit)
+        was_kept_blocked = getattr(self, "_pads_kept_blocked", False)
+        questions_before_apply = list(getattr(self, "_extraction_questions", None) or [])
+
+        def placement(pins):
+            """Number and centre of each package pad: what «keep blocked» left to the user."""
+            return [(pin.number, pin.x_mm, pin.y_mm) for pin in pins or ()]
+
+        if (was_kept_blocked
+                and placement(current["package_pins"]) != placement(applied["package_pins"])
+                and self._confirm_pads_verified()):
+            # Pad positions entered by hand (moved, added, removed or
+            # renumbered) AND confirmed for every pad (review 2026-11-14, M5:
+            # one moved pad lifted the block for all): the «keep blocked»
+            # choice is met. A drill or shape edit alone leaves the read
+            # positions unconfirmed, so it does not. Saved with the project
+            # below, put back if the save fails.
+            self._pads_kept_blocked = False
+            # The hand entry settles the question answered «blocked» and the
+            # side of the provisional pads (the preview's pads are seen from
+            # above): neither is asked any more.
+            self._extraction_questions = [
+                q for q in self._extraction_questions
+                if not (isinstance(q, dict) and (
+                    q.get("field") == "contacts_view"
+                    or (q.get("field") == "pad_layout"
+                        and self._is_layout_block_answer(
+                            self._extraction_answers.get(q.get("key"))))))]
         self._fp_applied = None
         was_stale = self._fp_file_stale
         if folder is not None:
@@ -21896,6 +23400,8 @@ class MainWindow(QMainWindow):
         if not saved:
             self._fp_file_stale = was_stale
             self._fp_applied = applied
+            self._pads_kept_blocked = was_kept_blocked
+            self._extraction_questions = questions_before_apply
             QMessageBox.warning(self, self.i18n.text("Errore"), self.i18n.text(
                 "Modifiche al footprint non salvate: restano da applicare."))
             return False
@@ -25946,7 +27452,36 @@ class MainWindow(QMainWindow):
         self.symbol_tab.theme_changed.connect(self._refresh_drawing_selection)
         self.symbol_tab.export_requested.connect(self._export_electrical_symbol)
         self.symbol_tab.pin_types_ai_requested.connect(self._suggest_pin_types)
+        # The per-pin normalisation notes go to the log, the status keeps one
+        # summary line (user, 2026-11-13).
+        self.symbol_tab.log_message.connect(self._append_log)
+        # «Solo nome principale» (primary name only): an app preference, ON by default.
+        self.symbol_tab.set_primary_pin_names(self._primary_pin_names_preference())
         return self.symbol_tab
+
+    def _primary_pin_names_preference(self) -> bool:
+        """@brief The saved «Solo nome principale» choice (config key "pin_primary_names").
+
+        @return True unless the configuration holds exactly False: the
+            default is ON (user, 2026-11-13).
+        """
+        return self._config.get("pin_primary_names", True) is not False
+
+    def _set_primary_pin_names_preference(self, enabled: bool) -> None:
+        """@brief Save the «Solo nome principale» choice and apply it to the symbol tab.
+
+        @param enabled True: symbol pins take the text before «(», the other
+            functions becoming KiCad alternates; False: the full pinout text.
+        @note The choice is program-wide (generator switch), so the symbol
+            export, the component check and the footprint preview labels
+            follow it alike.
+        """
+        enabled = bool(enabled)
+        if enabled != self._primary_pin_names_preference():
+            self._config["pin_primary_names"] = enabled
+            self._save_config_safely()
+        if hasattr(self, "symbol_tab"):
+            self.symbol_tab.set_primary_pin_names(enabled)
 
     def _suggest_pin_types(self):
         from .pin_type_dialog import PinTypeDialog
@@ -26381,24 +27916,38 @@ class MainWindow(QMainWindow):
 
     def _show_pinout_dialog(self) -> None:
         """@brief Edit the pinout table in a modal dialog and apply the accepted rows."""
-        dialog = PinoutDialog(self._pinout_rows_for_dialog(), self._component_name(), self)
+        primary = self._primary_pin_names_preference()
+        dialog = PinoutDialog(self._pinout_rows_for_dialog(), self._component_name(), self,
+                              primary_names=primary)
         self.i18n.retranslate_widgets(dialog)
         if self._run_modal(dialog) != QDialog.DialogCode.Accepted:
             return
+        # Toggling only «Solo nome principale» is a real change: applied before
+        # the «nothing edited» return below, and the preview redrawn.
+        chosen_primary = bool(dialog.primary_names())
+        if chosen_primary != primary:
+            self._set_primary_pin_names_preference(chosen_primary)
         # A pad row added only for the table and still without a name is not
         # a pinout entry: «no name» is what the pinout already says for it.
         known = {_pin_key(row.get("pin")) for row in self.pinout or () if isinstance(row, dict)}
         edited = [row for row in dialog.edited_pinout()
                   if _pin_key(row.get("pin")) in known or _pin_name_text(row.get("name"))]
         if edited == self.pinout:
+            if chosen_primary != primary:
+                self._draw_preview()
             return
         previous = self.pinout
         previous_names = dict(self._user_pin_names)
+        previous_witness = getattr(self, "_contact_function_witness", None)
         self._note_user_pin_names(edited)
         self.pinout = edited
+        if self._switch_pins_changed(previous, edited):
+            # NC/NO typed by hand are the user's own: never «lette una sola volta».
+            self._contact_function_witness = "user"
         if not self._save_project_config(force=True):
             self.pinout = previous
             self._user_pin_names = previous_names
+            self._contact_function_witness = previous_witness
             QMessageBox.warning(self, self.i18n.text("Errore"), self.i18n.text(
                 "Pinout non salvato. Le modifiche non sono state applicate."))
             return
@@ -27442,6 +28991,7 @@ class MainWindow(QMainWindow):
         self._cad3d_worker.progress.connect(self._on_regen_3d_progress)
         self._cad3d_worker.warning.connect(self._on_regen_3d_progress)
         self._cad3d_worker.warning.connect(self._on_cad3d_warning)
+        self._cad3d_worker.finished.connect(self._flush_cad3d_warnings)
         self._cad3d_worker.cancellable.connect(self._on_cad_cancellable)
         self._cad3d_worker.error.connect(self._on_regen_3d_error)
         self._cad3d_worker.finished.connect(self._on_regen_3d_finished)
@@ -28421,19 +29971,66 @@ class MainWindow(QMainWindow):
         return "\n" + tx("Stimato dal programma, da verificare sul disegno: {values}",
                          values=", ".join(unverified))
 
+    def _preview_pin_labels(self) -> dict:
+        """@brief The pin names the symbol writes, by pin number, for the footprint preview labels.
+
+        @return {pin number text: name} decided by `symbol.symbol_inputs` on the
+            pinout's pins and names: the primary name under «Solo nome
+            principale», the full name when two different signals would
+            collapse onto one primary name (review 2026-11-14: «GPIO0/BOOT»
+            and «GPIO0/STRAP» are both GPIO0 on the footprint otherwise).
+            {} when the pinout cannot be read as pins.
+        @note Cached by the pinout's pins and names and the preference: the
+            preview asks once per pad.
+        """
+        from ..generators.symbol import primary_pin_names_enabled, symbol_inputs
+        rows = [{"pin": str(row.get("pin", "")).strip(), "name": str(row.get("name") or "").strip()}
+                for row in self.pinout or () if isinstance(row, dict)]
+        key = (tuple((row["pin"], row["name"]) for row in rows), primary_pin_names_enabled())
+        cached = getattr(self, "_preview_pin_labels_cache", None)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        try:
+            pins, _body = symbol_inputs(rows)
+            labels = {}
+            for pin in pins:
+                # The first row of a duplicated number wins, as in the pad
+                # tooltip (review 2026-11-14, L8).
+                labels.setdefault(str(pin.number), pin.name)
+        except (ValueError, TypeError, KeyError):
+            labels = {}
+        self._preview_pin_labels_cache = (key, labels)
+        return labels
+
+    @staticmethod
+    def _split_label(name: str) -> str:
+        """@brief The preview label of a name the pinout does not hold (a side label, a fallback).
+
+        @param name The text to show.
+        @return Its primary name under «Solo nome principale», else the text.
+        """
+        from ..generators.symbol import primary_pin_names_enabled, split_pin_name
+        return (split_pin_name(name)[0] or name) if primary_pin_names_enabled() else name
+
     def _add_preview_pin_function(self, number, side, bounds, fallback="", max_length=None):
         """Draw the documented function inward, separate from the pad number.
 
         This is a preview annotation, not a change to the electrical pad ID.
         Top/bottom rows use vertical text to leave adjacent pins readable.
         Returns the label item, or None when the pin has no documented name.
+        With «Solo nome principale» on, the label is the primary name only
+        (`split_pin_name`) and the tooltip the full pinout text.
         """
         name = next((str(row.get("name") or "").strip() for row in self.pinout or ()
                      if isinstance(row, dict)
                      and str(row.get("pin", "")).strip() == str(number).strip()), fallback)
         if not name:
             return None
-        label = self.preview_scene.addSimpleText(f"({name})")
+        # The label is the symbol pin's own name (`_preview_pin_labels`): with
+        # «Solo nome principale» the primary name, unless two different signals
+        # would collapse onto it; the tooltip keeps the whole pinout entry.
+        shown = self._preview_pin_labels().get(str(number).strip()) or self._split_label(name)
+        label = self.preview_scene.addSimpleText(f"({shown})")
         label.setData(0, "pin-function")
         label.setData(1, str(number))
         label.setBrush(QBrush(QColor(TEXT)))

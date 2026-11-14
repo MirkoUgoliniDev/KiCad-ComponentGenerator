@@ -389,6 +389,14 @@ def test_default_3d_payload_is_the_pinned_one_plus_only_the_plated_ring(name, mo
     # stessa di prima.
     pin_style = captured["extra_payload"].pop("pin_style", None)
     header_pitches = captured["extra_payload"].pop("header_pitches", None)
+    # CONTRACT CHANGED 2026-11-13: the seating lift of the drawn headers
+    # (user-confirmed seating plane: spacer bottom on the host) is another
+    # ADDITION to the payload, decided by header_seating_plan from the same
+    # header pins; removed here like pin_style, checked against that rule.
+    seating_lift = captured["extra_payload"].pop("header_seating_lift_mm", None)
+    from kicadgen.cad3d import step_generator
+    header_pins, pitches, skipped = step_generator.castellated_header_pins(params)
+    assert seating_lift == step_generator.header_seating_plan(header_pins, pitches, skipped)[0]
     pinned = {k: captured[k] for k in ("notches", "edge_contacts", "extra_boxes", "extra_payload")}
     assert hashlib.sha256(json.dumps(pinned, sort_keys=True).encode()).hexdigest() == PINNED_PAYLOAD[name]
     assert pin_style == "male_header"

@@ -109,8 +109,8 @@ KiCad-Bibliothek, die nach ähnlichen Maßen ausgewählt werden.</p>
   <strong>DeepSeek (direkte API)</strong> (Modelle <code>deepseek-api/...</code>;
   beim Start aus den Quellen ist der Standard <code>deepseek-api/deepseek-flash</code>).
   Das Modell wählen Sie in der Oberfläche: <span class="ui">Konfiguration</span> →
-  <span class="ui">KI-Modell...</span>,
-  oder für die Sitzung im Bereich <span class="ui">KI-Modell</span>.
+  <span class="ui">KI-Modell...</span>
+  (auch über die Schaltfläche neben der Zeile <span class="ui">KI-Modelle</span>).
   Den Schlüssel geben Sie unter <span class="ui">Konfiguration</span> →
   <span class="ui">KI-Konto...</span> ein: Das Fenster listet jeden Anbieter mit
   der Herkunft des verwendeten Schlüssels (Umgebungsvariable, Anmeldeinformationsverwaltung,
@@ -254,21 +254,22 @@ um die übrigen Einstellungen zu sehen oder zu ändern:</p>
     daher wird sie nur geprüft, wenn Sie
     <span class="ui">Kompatibilität prüfen</span> klicken. Fehlt die Datei oder ist sie nicht
     kompatibel, hält die Analyse an, bevor Kosten entstehen.</li>
-  <li><span class="ui">KI-Modell (diese Sitzung)</span>: das eine Modell, das für Dokumente,
-  Fotos und Prüfung verwendet wird. Die Schaltfläche daneben wählt ein anderes Modell (filterbar nach
-  Kosten, Quelle OpenRouter oder DeepSeek) <em>nur für diese Sitzung</em>;
-  den Standard und seine Quelle legen Sie unter <span class="ui">Konfiguration →
-  KI-Modell...</span> fest. Dasselbe Fenster enthält im Abschnitt <span class="ui">Andere Modelle für einzelne
+  <li><span class="ui">KI-Modelle</span>: eine schreibgeschützte Zeile,
+  <span class="ui">Standard &lt;Modell&gt; · N Schritte mit eigenem Modell</span>. Das
+  Standardmodell führt jeden Analyseschritt (Dokumente, Fotos und Prüfung) aus, der kein
+  eigenes Modell hat; die Schaltfläche daneben öffnet <span class="ui">Konfiguration → KI-Modell...</span>, wo das Standardmodell mit
+  seiner Quelle (OpenRouter oder DeepSeek) gewählt wird. Ein Modell nur für die Sitzung gibt
+  es nicht mehr: Jede Wahl wird in diesem Fenster getroffen und gespeichert.
+  Dasselbe Fenster enthält im Abschnitt <span class="ui">Andere Modelle für einzelne
   Schritte</span> (beim Öffnen geschlossen, der Titel zählt die Schritte mit eigenem Modell)
   eine Tabelle mit dem Modell
   jedes Analyseschritts (Dokumentlesung, Padpositionen, Gehäusemaße, Inventar
   und Ausschnitte des Fotos, Beschriftungen, Anschlüsse, Pin-Typen): Jeder
-  Schritt folgt dem einzigen Modell, bis <span class="ui">Ändern…</span> ihm
-  ein eigenes zuweist; <span class="ui">Einziges verwenden</span> setzt ihn auf das
-  einzige Modell zurück und <span class="ui">Standardschritte wiederherstellen</span>
-  setzt nur die Tabelle auf die ursprüngliche Wahl zurück, ohne das einzige Modell
-  zu ändern; das Sitzungsmodell ersetzt nur das einzige Modell.
-  Alle Prompts (allgemein und je Typ) bearbeiten Sie unter <span class="ui">Konfiguration →
+  Schritt folgt dem Standardmodell, bis <span class="ui">Ändern…</span> ihm
+  ein eigenes zuweist; <span class="ui">Standard verwenden</span> setzt ihn auf das
+  Standardmodell zurück und <span class="ui">Standardschritte wiederherstellen</span>
+  setzt nur die Tabelle auf die ursprüngliche Wahl zurück, ohne das Standardmodell
+  zu ändern. Alle Prompts (allgemein und je Typ) bearbeiten Sie unter <span class="ui">Konfiguration →
   KI-Typen und -Profile verwalten …</span>.</li>
 </ul>
 
@@ -618,10 +619,13 @@ installieren, das STEP-Modell neu erzeugen und den Befehl wiederholen.</p>
 <table>
   <tr><th>Befehl</th><th>Was er macht</th></tr>
   <tr><td class="ui">In KiCad testen …</td>
-      <td>Erstellt ein kleines temporäres Projekt mit Footprint und STEP-Modell im
-      Unterordner <code>.kicad-preview</code> des Bauteils und öffnet es im PCB
-      Editor. Drücken Sie in KiCad <kbd>Alt</kbd>+<kbd>3</kbd> für die 3D-Ansicht. Installiert
-      nichts und ändert keine KiCad-Bibliothek.</td></tr>
+      <td>Erstellt ein kleines temporäres Projekt mit Footprint, Symbol und STEP-Modell im
+      Unterordner <code>.kicad-preview</code> des Bauteils, öffnet den Schaltplan im
+      Schaltplaneditor und die Platine im Leiterplatteneditor und zeigt ein von KiCad
+      erzeugtes 3D-Bild des Bauteils in einem eigenen Fenster. Drücken Sie in KiCad
+      <kbd>Alt</kbd>+<kbd>3</kbd> für die interaktive 3D-Ansicht. Ohne Symbol öffnet sich
+      nur die Platine und das Protokoll nennt den Grund; ohne STEP-Modell wird kein 3D-Bild
+      erstellt. Installiert nichts und ändert keine KiCad-Bibliothek.</td></tr>
   <tr><td class="ui">Im KiCad-Projekt installieren …</td>
       <td>Die empfohlene Wahl. Wählen Sie den Ordner eines KiCad-Projekts: Es werden
       <code>KiCadGen.pretty</code> und <code>KiCadGen.3dshapes</code> angelegt, und die

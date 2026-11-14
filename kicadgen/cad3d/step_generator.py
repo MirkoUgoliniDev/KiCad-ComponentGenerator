@@ -857,6 +857,43 @@ def castellated_header_pins(params: CastellatedModuleParams):
     return pins, pitches, skipped
 
 
+def header_seating_plan(pins, pitches, flat_contacts) -> tuple:
+    """@brief Z lift of the whole STEP model for drawn male headers, with its note.
+
+    @param pins The [number, x, y] that receive a drawn header (empty when no
+        header is drawn, e.g. pins switched off).
+    @param pitches Declared pitch of every pin, aligned with `pins`, or None
+        to infer it from the pins (header_geometry rules).
+    @param flat_contacts Numbers of the module's contacts that do NOT get a
+        header and are soldered flat on their pads (half-hole castellations).
+    @return (lift_mm, notes): the lift the FreeCAD script applies to every
+        object, and the translated notes that state it.
+    @note User-confirmed seating plane (2026-11-13): with headers under the
+        module, KiCad's Z=0 (host top) is the bottom of the plastic spacer, so
+        the model is lifted by the spacer height -- a catalogue estimate,
+        always said in a note. The lift applies ONLY when every contact is
+        header-mounted: a single flat-soldered contact seats the module on
+        its pads (lifting would leave those castellations floating above the
+        host by the spacer height), so the lift is 0 and a note says the
+        headers are drawn but the module rests on its flat contacts.
+        No header drawn: lift 0, no note (flat-soldered module as before).
+    """
+    from .header_geometry import header_seating
+    if not pins:
+        return 0.0, []
+    if flat_contacts:
+        return 0.0, [tx(
+            "Modello STEP non sollevato: i pettini sono disegnati, ma {count} contatti "
+            "({numbers}) si saldano in piano, quindi il modulo appoggia sui contatti "
+            "piatti e non sul distanziale del pettine.",
+            count=len(flat_contacts), numbers=", ".join(str(n) for n in flat_contacts))]
+    lift, pitch = header_seating(pins, pitches)
+    return lift, [tx(
+        "Modello STEP sollevato di {mm} mm: altezza del distanziale del pettine "
+        "stimata da catalogo (passo {pitch} mm).",
+        mm=f"{lift:.2f}", pitch=f"{pitch:g}")]
+
+
 def component_payloads(components, board_length: float, board_width: float,
                        height_cap: float, *, centre=(0.0, 0.0),
                        photo_scale_px_per_mm: Optional[float] = None):
@@ -1154,7 +1191,12 @@ def generate_castellated_3d_model(
     # no pins and no style.
     header_pins, header_pitches, header_skipped = (
         castellated_header_pins(params) if getattr(body, "show_pins_3d", True) else ([], [], []))
-    header_payload = ({"pin_style": "male_header", "header_pitches": header_pitches}
+    # Seating plane: lifted onto the spacer only when every contact carries
+    # a header; any half-hole-only contact seats the module flat.
+    seating_lift, seating_notes = header_seating_plan(
+        header_pins, header_pitches, header_skipped)
+    header_payload = ({"pin_style": "male_header", "header_pitches": header_pitches,
+                       "header_seating_lift_mm": seating_lift}
                       if header_pins else {})
     # An assumed pitch is an estimate: said in the notes, never silent.
     header_notes = header_pitch_notes(params) if header_pins else []
@@ -1163,6 +1205,7 @@ def generate_castellated_3d_model(
             "Pin 3D: {count} contatti a solo mezzo foro ({numbers}) restano senza pin "
             "maschio, perche' uno strip si salda solo in un foro passante.",
             count=len(header_skipped), numbers=", ".join(header_skipped)))
+    header_notes += seating_notes
 
     # The body is the module's PCB; the total height of `body` stays the
     # reference for the component block when there is no photo.
@@ -1697,6 +1740,11 @@ def _generate_populated_tht(params, body, pins, output_dir, **options):
                      pad_width_mm=params.pad_diameter, pad_length_mm=params.pad_diameter,
                      color_hex=body.pin_color_hex)
                 for (pin, _, _), hole in zip(pins, holes)]
+    # Every pin of a populated board gets a header, so the board rests on the
+    # spacers whenever the pins are drawn; switched off, nothing is lifted.
+    header_pitches = [params.pitch] * len(pins)
+    seating_lift, seating_notes = header_seating_plan(
+        pins if getattr(body, "show_pins_3d", True) else [], header_pitches, [])
     result = _run_freecad(params.name, pins, pcb, output_dir,
         notches=holes, edge_contacts=contacts,
         extra_payload={"components": components,
@@ -1706,10 +1754,12 @@ def _generate_populated_tht(params, body, pins, output_dir, **options):
                        # spacer, not cylinders (see header_geometry).
                        "pin_style": "male_header",
                        # Missing positions do not change the physical header pitch.
-                       "header_pitches": [params.pitch] * len(pins)},
+                       "header_pitches": header_pitches,
+                       "header_seating_lift_mm": seating_lift},
         **options)
     result["warnings"] = overlap_warnings + result.get("warnings", [])
-    result["notes"] = ([] if progress else notes) + placement_notes + list(result.get("notes", []))
+    result["notes"] = (([] if progress else notes) + placement_notes + seating_notes
+                       + list(result.get("notes", [])))
     result["candidate_report_path"] = candidate_report
     _reconcile_model_imports(result, components, output_dir)
     reuse.save(components, result, notes=model_notes)

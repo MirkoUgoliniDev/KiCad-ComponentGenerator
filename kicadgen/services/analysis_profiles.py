@@ -693,7 +693,7 @@ class ProfileStore:
         """@brief The model choices saved for the analysis steps, {prompt field: model or ""}.
 
         @return Only the steps with a saved choice (prompt_models.STEPS);
-            "" means «the single model». Global: never per component type.
+            "" means «the default model». Global: never per component type.
         @note Kept in the `metadata` table under «step_model:<field>» (user
             request 2026-11-12, «Modello AI» table), not among the AI
             defaults, so the code reading those defaults is unaffected.
@@ -707,7 +707,7 @@ class ProfileStore:
         return dict(self._cached('step_models', None, load))
 
     def step_models(self):
-        """@brief The model of every analysis step, {prompt field: model or "" for the single model}.
+        """@brief The model of every analysis step, {prompt field: model or "" for the default model}.
 
         @return prompt_models.step_models of the saved choices, the two pad
             steps falling back on the old «Posizioni pad» model (pad_model).
@@ -718,7 +718,7 @@ class ProfileStore:
     def save_step_models(self, values):
         """@brief Save the model of some analysis steps.
 
-        @param values {prompt field of a step: model identifier, or "" for the single model}.
+        @param values {prompt field of a step: model identifier, or "" for the default model}.
         @throws ProfileError When a field is not a step or a value is not text.
         """
         self.save_models(steps=values)
@@ -729,7 +729,7 @@ class ProfileStore:
         @param defaults Mapping of default names to their new values, validated
             as `save_defaults` does (model ids stripped), or None for none.
         @param steps {prompt field of a step: model identifier, or "" for the
-            single model}, validated as `save_step_models` does, or None.
+            default model}, validated as `save_step_models` does, or None.
         @throws ProfileError When any value fails validation: nothing is written.
         @note Both mappings are validated before the write and stored in one
             `_writing()` block, so the «Modello AI» dialog never leaves the

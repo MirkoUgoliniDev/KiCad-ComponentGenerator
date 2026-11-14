@@ -82,9 +82,13 @@ def test_duplicate_pin_repair_preserves_geometry_and_labels(tmp_path, monkeypatc
     monkeypatch.setattr(ext, "check_credit", lambda **kw: None)
     monkeypatch.setattr(ext, "call_tool", call)
     if corrected_start == 1:
-        with pytest.raises(ExtractionError, match="pad duplicato"):
-            ext.extract_pin_header_params([source])
-        assert call.call_count == 2
+        # CONTRACT CHANGED (model benchmark 2026-11-14 and its audit, H1): a
+        # correction that repeats the duplicated number never escapes as an
+        # exception and is never guessed: the side-numbering question is
+        # asked, the footprint blocked until the answer.
+        result = ext.extract_pin_header_params([source])
+        assert any(q["field"] == "side_numbering" for q in result.questions)
+        assert result.pin_map_conflict
         return
     result = ext.extract_pin_header_params([source])
     assert call.call_count == 3  # Main, numbering repair, missing-style check.

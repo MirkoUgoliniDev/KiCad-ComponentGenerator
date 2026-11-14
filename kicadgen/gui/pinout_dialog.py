@@ -10,7 +10,7 @@ from PyQt6.QtGui import QColor
 from ..services.messages import tx
 
 from PyQt6.QtWidgets import (
-    QAbstractItemView, QDialog, QDialogButtonBox, QHeaderView, QLabel,
+    QAbstractItemView, QCheckBox, QDialog, QDialogButtonBox, QHeaderView, QLabel,
     QTableWidget, QTableWidgetItem, QVBoxLayout,
 )
 
@@ -23,6 +23,14 @@ PREFILLED_COLOR = "#9e9e9e"
 #: Tooltip of a prefilled name (Italian source, translated by the window).
 PREFILLED_TIP = ("Nome proposto dal disegno dei pad, non dalla documentazione: da "
                  "verificare. Viene applicato solo se lo modifichi.")
+#: Label of the «primary name only» switch (user, 2026-11-13; Italian source,
+#: translated by the window's retranslation pass).
+PRIMARY_NAMES_LABEL = "Solo nome principale (le altre funzioni diventano alternative in KiCad)"
+#: Tooltip of that switch.
+PRIMARY_NAMES_TIP = ("Il simbolo e l'anteprima del footprint usano il testo prima di «(»; le "
+                     "funzioni fra parentesi, separate da virgole o \"/\", diventano funzioni "
+                     "alternative del pin in KiCad. Un nome con \"/\" fuori dalle parentesi resta "
+                     "intero. La tabella mostra sempre il testo completo.")
 
 
 def pin_sort_key(entry: dict) -> tuple:
@@ -53,7 +61,8 @@ class PinoutDialog(QDialog):
     whole height of the tab: the dimensioned footprint is already dense.
     """
 
-    def __init__(self, pinout: list[dict], component_name: str = "", parent=None):
+    def __init__(self, pinout: list[dict], component_name: str = "", parent=None, *,
+                 primary_names: bool = True):
         """@brief Build the dialog.
 
         @param pinout Rows {"pin": ..., "name": ...} as extracted; shown in
@@ -61,6 +70,9 @@ class PinoutDialog(QDialog):
             name is only a proposal (see `edited_pinout`).
         @param component_name Shown in the window title.
         @param parent Optional parent widget.
+        @param primary_names Initial state of the «Solo nome principale»
+            switch (the caller's saved preference, ON by default); read back
+            with `primary_names()`. The table always shows the full text.
         """
         super().__init__(parent)
         self._entries = deepcopy(pinout)
@@ -103,6 +115,17 @@ class PinoutDialog(QDialog):
             self.table = table
             table.itemChanged.connect(self._restyle_prefilled)
 
+        # The switch is shown only with a pinout to name, but always exists so
+        # `primary_names()` returns the caller's choice unchanged otherwise.
+        ## @brief The «Solo nome principale» switch, exposed for tests and callers.
+        self.primary_names_check = QCheckBox(PRIMARY_NAMES_LABEL)
+        self.primary_names_check.setToolTip(PRIMARY_NAMES_TIP)
+        self.primary_names_check.setChecked(bool(primary_names))
+        if pinout:
+            layout.addWidget(self.primary_names_check)
+        else:
+            self.primary_names_check.hide()
+
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Apply | QDialogButtonBox.StandardButton.Cancel
             if pinout else QDialogButtonBox.StandardButton.Close)
@@ -110,6 +133,15 @@ class PinoutDialog(QDialog):
             buttons.button(QDialogButtonBox.StandardButton.Apply).clicked.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def primary_names(self) -> bool:
+        """@brief The state of the «Solo nome principale» switch when the dialog closed.
+
+        @return True: the symbol takes the text before «(» as the pin name
+            and the listed functions as KiCad alternates; False: the full
+            text. The caller saves it as a preference.
+        """
+        return self.primary_names_check.isChecked()
 
     def _shown_name(self, index: int) -> str:
         """The name text the cell of source row `index` was opened with."""

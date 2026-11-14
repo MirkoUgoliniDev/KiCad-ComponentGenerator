@@ -77,7 +77,7 @@ STEPS: tuple[Step, ...] = (
     Step("terminal_prompt", "Terminali", GROUP_PHOTO,
          "Solo con il rilevatore «AI (attuale)»: terminali di ogni corpo."),
     Step("lead_prompt", "Piedini", GROUP_PHOTO,
-         "Solo su comando manuale (oggi nascosto): piedini di un corpo."),
+         "Solo su comando manuale: piedini di un corpo."),
     # Sends the component documents (PDF, images): it needs a model that reads them.
     Step("pin_type_prompt", "Tipi elettrici dei pin", GROUP_SYMBOL,
          "Propone il tipo elettrico di ogni pin del simbolo."),
@@ -166,7 +166,8 @@ def usable_model(field: str, models: Optional[Mapping[str, str]], fallback: str,
     @return The step's own model when it can run, else `fallback`.
     @note Same rules as the old «Posizioni pad» reader
         (datasheet_extractor._pad_reading_model): a step that sends images
-        refuses a DeepSeek model declared text-only; a provider other than
+        refuses a model declared text-only (openrouter.image_capability: the
+        OpenRouter catalogue, borrowed for DeepSeek direct); a provider other than
         the fallback's is checked for key and credit. An optional model never
         stops the run: the step falls back and the log says why.
     """
@@ -174,15 +175,17 @@ def usable_model(field: str, models: Optional[Mapping[str, str]], fallback: str,
     chosen = model_for(field, models, fallback)
     if chosen == fallback:
         return fallback
-    from .openrouter import OpenRouterError, deepseek_declared_text_only
-    from .providers import PROVIDER_DEEPSEEK, ProviderError, ensure_providers_ready, provider_of
+    from .openrouter import IMAGES_NOT_READ, OpenRouterError, image_capability
+    from .providers import ProviderError, ensure_providers_ready, provider_of
     try:
         title = tx(step(field).title)
         needs_images = step(field).images
     except KeyError:
         title, needs_images = field, True
     reason = None
-    if needs_images and provider_of(chosen) == PROVIDER_DEEPSEEK and deepseek_declared_text_only(chosen):
+    # The same rule as the model picker, for both providers: a fresh explicit
+    # «text only» declaration refuses; an undeclared capability never does.
+    if needs_images and image_capability(chosen) == IMAGES_NOT_READ:
         reason = tx("legge solo testo")
     elif provider_of(chosen) != provider_of(fallback):
         try:
@@ -195,3 +198,44 @@ def usable_model(field: str, models: Optional[Mapping[str, str]], fallback: str,
         progress(tx("Modello del passo «{step}» {model} non utilizzabile ({reason}): lo esegue il "
                     "modello {fallback}.", step=title, model=chosen, reason=reason, fallback=fallback))
     return fallback
+
+
+def default_model_image_problem(model: str, models: Optional[Mapping[str, str]] = None,
+                                fields=None) -> Optional[str]:
+    """@brief Before a run: the message when the DEFAULT model is declared text only and image steps use it.
+
+    @param model The default model the run would use (the single model, or
+        the session model of the Project tab).
+    @param models The step models (`step_models`), or None: every step on
+        the default model.
+    @param fields The step fields the command may run (a step field or a
+        prompt riding inside one), or None for every step.
+    @return A translated message naming the image steps that would run on
+        `model`, or None when the model is not declared text only
+        (openrouter.image_capability: undeclared or stale data never
+        refuses) or no image step of the run follows it.
+    @note A step's OWN unusable model already falls back to the default
+        model (usable_model); the default has no fallback. DeepSeek direct
+        refuses the request before sending it; on OpenRouter the call is
+        sent to a model that cannot read the pictures. This check lets the
+        caller stop before paying either way.
+    """
+    from .messages import tx
+    from .openrouter import IMAGES_NOT_READ, image_capability
+    wanted = None
+    if fields is not None:
+        wanted = set()
+        for field in fields:
+            try:
+                wanted.add(step(field).field)
+            except KeyError:
+                continue
+    affected = [item for item in STEPS
+                if item.images and (wanted is None or item.field in wanted)
+                and not ((models or {}).get(item.field) or "").strip()]
+    if not affected or image_capability(model) != IMAGES_NOT_READ:
+        return None
+    return tx("Il modello predefinito {model} non legge immagini (dichiarato da OpenRouter): "
+              "i passi {steps} mandano immagini e lo userebbero. Scegli un altro modello in "
+              "«Modello AI».", model=model, steps=", ".join("«" + tx(item.title) + "»"
+                                                              for item in affected))

@@ -34,8 +34,10 @@ from ..core.package_geometry import PAD_SHAPES, PinSpec, package_doubts, package
 # constants (formerly copied here): one definition with the footprint checks.
 from ..core.tht_estimates import (HOLE_TO_PAD_ANNULUS_MM, LEAD_TO_HOLE_CLEARANCE_MM,  # noqa: F401
                                   MIN_ANNULAR_RING_MM, estimated_hole, estimated_pad_diameter,
-                                  estimated_round_pad, lead_passes, normalised_lead,
+                                  estimated_round_pad, lead_circumscribed_diameter, lead_passes,
+                                  normalised_lead,
                                   unverified_values)
+from ..core.contact_roles import renamed_role_word, role_conflicts, role_word_of
 from ..core.validation import finite_number
 from ..generators.castellated_module import (
     CONTACT_STYLES, EDGE_LABELS, EDGES,
@@ -49,6 +51,7 @@ from .openrouter import (DEFAULT_MODEL, OpenRouterError, ToolArgumentsError, api
                          check_credit, reset_usage, usage_totals)
 from .edge_notches import EdgeCount
 from .messages import end_sentence, tx
+from . import pinout_coherence
 # The registry imports no owning module at load time, so no import cycle.
 from .prompt_catalog import effective_text
 from .prompt_catalog import sending as prompt_sending
@@ -160,6 +163,10 @@ _LEAD_RULE = ("the PRINTED protrusion of the terminals below the bottom of the b
 #: on the page. "other" is also the role of a bare number sent by an older or
 #: cached answer that declared nothing.
 PRINTED_QUOTE_ROLES = ("body_height", "plan", "standoff", "lead", "overall", "other")
+
+#: What a printed quote across the two contact rows of a castellated module
+#: measures (`printed_row_quotes`), as the reader declares it.
+ROW_QUOTE_ROLES = ("contact_rows", "mounting_holes", "board", "other")
 
 #: Schema of the printed profile quotes, shared by the single-part tool and
 #: the dedicated body reading: one object per printed number with its role.
@@ -283,6 +290,12 @@ _PAD_TERMINAL_PROPERTIES = {
             "thickness_mm": {"type": "number", "exclusiveMinimum": 0},
         },
     },
+    "lead_fit": {
+        "type": "string", "enum": ["clearance", "press_fit"],
+        "description": (
+            "press_fit ONLY when the document states that this terminal is pressed into its "
+            "hole (a press-fit or compliant pin); omit it otherwise."),
+    },
     "hole_callout": {
         "type": "string",
         "description": (
@@ -314,6 +327,14 @@ _PAD_TERMINAL_PROPERTIES = {
 #: relay roles the symbol composer reads, `generators.symbol_relay`): the
 #: program never derives them from the free-text ``name``.
 PINOUT_FUNCTIONS = ("coil", "common", "nc", "no", "other")
+
+#: What a drawn switch contact shows for one terminal (`symbol_contact`, an
+#: observation of the model) and the role the PROGRAM derives from it: the
+#: arm's pivot is the common, the contact the arm touches in the drawing
+#: (drawn de-energised) is normally closed, the one drawn apart is normally
+#: open (night real runs of 2026-11-14: NC and NO swapped between two
+#: readings of one relay drawing).
+SYMBOL_CONTACT_ROLES = {"arm_pivot": "common", "arm_touches": "nc", "drawn_apart": "no"}
 
 
 _EXTRACTION_TOOL = {
@@ -522,8 +543,10 @@ _EXTRACTION_TOOL = {
                     "packages it is normally much greater: read them separately, do not "
                     "reuse one number for the other. "
                     "Also with layout=\"castellated\", if the contacts lie on two opposite "
-                    "sides: distance between the CENTRES of the contacts of the two rows, if dimensioned "
-                    "or readable on the grid; omit it if you do not know it."
+                    "sides: distance between the CENTRES of the contacts of the two rows (the "
+                    "centres of their holes or half-holes), if dimensioned or readable on the grid; "
+                    "never the distance between mounting holes, nor the width or the outline of the "
+                    "board. Omit it if you do not know it."
                 ),
             },
             "pad_diameter_mm": {
@@ -731,8 +754,11 @@ _EXTRACTION_TOOL = {
                 "description": (
                     "Pinout table of the datasheet: for every PHYSICALLY PRESENT pin, "
                     "the number and the function. If the datasheet lists several configurations "
-                    "(variants in different columns), report the first one and add "
-                    "the alternative in brackets only if different. If there is no table but "
+                    "of the SAME part (variants in different columns), the first column gives "
+                    "PRIMARY and a different name of another column goes inside the parentheses "
+                    "of name with the other names of that pin (they become alternate functions "
+                    "of the pin); a column that belongs to another part number goes to notes, "
+                    "not into name. If there is no table but "
                     "the pinout drawing shows the ELECTRICAL SCHEMATIC with the numbered terminals "
                     "(coil between two terminals, contact with common/NC/NO, anode and cathode, "
                     "windings), derive the function from the symbol and write it (e.g. \"Coil\", "
@@ -749,7 +775,24 @@ _EXTRACTION_TOOL = {
                             "type": "string",
                             "description": (
                                 "Function of the pin as the document writes it (NC if "
-                                "not connected)."
+                                "not connected), in the form PRIMARY or PRIMARY (ALT1, ALT2, "
+                                "...). PRIMARY is the pin's own name as printed: the pin-name "
+                                "column of a table, or in a pinout diagram the label of the "
+                                "category that the legend or layout designates as the pin name, "
+                                "the same category for every pin. Every other signal name or "
+                                "function the document prints for the SAME pin goes inside one "
+                                "pair of parentheses after PRIMARY, separated by commas, in "
+                                "printed order. If the document prints the pin's own label with "
+                                "'/' (one label, e.g. a combined signal), keep it as printed as "
+                                "PRIMARY. Do not join DIFFERENT names the document lists "
+                                "separately with '/', spaces or '_': put them in the parentheses. "
+                                "Never put remarks inside the parentheses: "
+                                "where it is printed, what it is labelled and any doubt go to "
+                                "notes. One entry per physical contact. It is the "
+                                "SIGNAL NAME of the pinout diagram or table (e.g. GPIO19, "
+                                "U0TXD), not the short abbreviation printed on the board beside "
+                                "the contact (e.g. 19, G): that abbreviation goes in pin_names "
+                                "of the side."
                             ),
                         },
                         "function": {
@@ -761,7 +804,32 @@ _EXTRACTION_TOOL = {
                                 "contact; nc = normally CLOSED contact (NOT «not "
                                 "connected»: a pin that is not connected is other); no = normally "
                                 "open contact; other = any other role or a role not "
-                                "shown. Never deduced from the name of the component."
+                                "shown. Never deduced from the name of the component. Read from a "
+                                "drawn switch contact (drawn de-energised): nc = the terminal whose "
+                                "contact the moving arm touches in the drawing, no = the one drawn "
+                                "apart from the arm, common = the arm's pivot; never from the order "
+                                "or position of the terminals."
+                            ),
+                        },
+                        "symbol_contact": {
+                            "type": "string", "enum": list(SYMBOL_CONTACT_ROLES),
+                            "description": (
+                                "ONLY for a terminal of a switch contact DRAWN in a circuit "
+                                "symbol, what the drawing shows: arm_pivot = the moving arm is "
+                                "hinged on this terminal; arm_touches = the moving arm is drawn "
+                                "touching or resting on this terminal's contact; drawn_apart = "
+                                "this terminal's contact is drawn apart from the arm, with a gap. "
+                                "Omit it otherwise, and omit it when the drawing states that it "
+                                "shows a set or energised state."
+                            ),
+                        },
+                        "contact_common": {
+                            "type": "string",
+                            "description": (
+                                "ONLY for a terminal of a switch contact DRAWN in a circuit "
+                                "symbol: the number of the pivot (common) terminal this terminal "
+                                "is drawn with; for the common itself, its own number. Omit it "
+                                "otherwise."
                             ),
                         },
                         "contact": {
@@ -773,9 +841,44 @@ _EXTRACTION_TOOL = {
                                 "omit it. Never invented: without a printed label omit it."
                             ),
                         },
+                        "off_side": {
+                            "type": "boolean",
+                            "description": (
+                                "ONLY for a castellated module: true when this terminal is NOT a "
+                                "contact of any of castellated_sides (an exposed pad, a centre or "
+                                "bottom pad under the module). Omit it otherwise."
+                            ),
+                        },
                     },
                     "required": ["pin", "name"],
                 },
+            },
+            "printed_row_quotes": {
+                "type": "array",
+                "description": (
+                    "ONLY for a castellated module with contacts on two opposite sides: ALL the "
+                    "dimensions PRINTED across the board perpendicular to those two rows (from one "
+                    "row side towards the other), in the unit of drawing_unit, each with what it "
+                    "measures; empty list if none is printed."),
+                "items": {"type": "object", "properties": {
+                    "value": {"type": "number", "exclusiveMinimum": 0,
+                              "description": "The dimension as printed, in the unit of drawing_unit."},
+                    "measures": {"type": "string", "enum": list(ROW_QUOTE_ROLES),
+                                 "description": (
+                                     "What it measures: contact_rows (between the CENTRES of the "
+                                     "two contact rows), mounting_holes (between mounting holes), "
+                                     "board (the board outline or width), other.")},
+                }, "required": ["value", "measures"]},
+            },
+            "pin_numbers_printed": {
+                "type": "boolean",
+                "description": (
+                    "true ONLY if the documents PRINT the pad or pin NUMBERS (1, 2, 3... in a "
+                    "drawing or in a pinout table); false when they show only names or "
+                    "silkscreen labels (GND, 3V3, IO4, TX...) and the numbers in your answer "
+                    "are a numbering you chose. Then number the contacts with a convention "
+                    "and say which one in notes."
+                ),
             },
             "body_color_hex": {
                 "type": "string",
@@ -957,7 +1060,9 @@ _EXTRACTION_TOOL = {
                                 "printed across two holes (e.g. two letters "
                                 "close together) is split between the two contacts, not joined into a "
                                 "single name; the labels of nearby LEDs or components are not "
-                                "contact names. They document the "
+                                "contact names. They are the abbreviations printed on the board "
+                                "(e.g. 19, G, TX), not the signal names of the pinout diagram, "
+                                "which go in pinout. They document the "
                                 "pinout, they do not number the pads."
                             ),
                         },
@@ -1096,7 +1201,12 @@ _EXTRACTION_TOOL = {
         # Unit and view are required so that the model always declares them;
         # an answer that omits them stays readable (millimetres, unknown view
         # declared as a doubt in the notes).
-        "required": ["layout", "confidence", "drawing_unit", "contacts_view"],
+        # pin_numbers_printed is required too (audit L1, 2026-11-13): the
+        # model must say whether the numbers are printed. In strict mode every
+        # field is nullable anyway; an answer without it (older ones) is read
+        # as «printed» (`_numbers_printed`).
+        "required": ["layout", "confidence", "drawing_unit", "contacts_view",
+                     "pin_numbers_printed"],
     },
 }
 
@@ -1329,6 +1439,10 @@ DEFAULT_PAD_POSITIONS_PROMPT = (
     "printed_terminals with the numbers of the holes it refers to: shape \"round\" with diameter, or "
     "shape \"flat\" with width and thickness, and the text as printed. It is the terminal, NOT the "
     "hole; a terminal whose cross-section is not dimensioned stays out, it must not be estimated. "
+    "CIRCUIT SYMBOL (pin roles only; it changes nothing above about holes and terminal "
+    "sections): only if the same documents draw a circuit symbol with the numbered pins, report "
+    "in terminal_functions the electrical role of each pin as the symbol shows it; otherwise "
+    "leave it empty. "
     "Write any note in English. Answer ONLY by calling the tool."
 )
 
@@ -1474,6 +1588,35 @@ _PAD_POSITIONS_TOOL = {
                                   "description": "Only for flat: the dimensioned thickness of the blade."},
                     "text": {"type": "string", "description": "The dimension as printed."},
                 }, "required": ["pads", "shape"]},
+            },
+            # A second reading of the switch roles of a drawn circuit symbol,
+            # in the call that is made anyway (night real runs 2026-11-14:
+            # NC/NO came from one reading of the main answer, unchecked).
+            "terminal_functions": {
+                "type": "array",
+                "description": ("ONLY when a circuit symbol with the numbered terminals is drawn: the "
+                                "role of each terminal as the symbol shows it. Empty otherwise."),
+                "items": {"type": "object", "properties": {
+                    "pad": {"type": "string", "description": "Number of the terminal as printed."},
+                    "function": {"type": "string", "enum": list(PINOUT_FUNCTIONS),
+                                 "description": ("coil, common, nc (normally CLOSED), no (normally "
+                                                 "open) or other. Read from a drawn switch contact "
+                                                 "(drawn de-energised): nc = the terminal whose "
+                                                 "contact the moving arm touches in the drawing, no = "
+                                                 "the one drawn apart from the arm, common = the "
+                                                 "arm's pivot.")},
+                    "symbol_contact": {"type": "string", "enum": list(SYMBOL_CONTACT_ROLES),
+                                       "description": ("ONLY for a terminal of a drawn switch "
+                                                       "contact: arm_pivot, arm_touches or "
+                                                       "drawn_apart, as the drawing shows it; "
+                                                       "omit it when the drawing states that it "
+                                                       "shows a set or energised state.")},
+                    "contact_common": {"type": "string",
+                                       "description": ("ONLY for a terminal of a drawn switch "
+                                                       "contact: the number of the pivot (common) "
+                                                       "terminal it is drawn with; for the common "
+                                                       "itself, its own number.")},
+                }, "required": ["pad", "function"]},
             },
             "notes": {"type": "string", "description": "Reading doubts, in English."},
         },
@@ -2270,6 +2413,180 @@ def pads_from_chains(chains, factor: float = 1.0, midpoints=None, pad_sizes=None
             "references": references, "unplaced": sorted(mentioned - set(pads))}
 
 
+#: Name of the tool of the targeted re-read of the terminals and holes.
+PAD_TERMINALS_TOOL_NAME = "report_pad_terminals"
+
+#: Request of the targeted re-read (`read_pad_terminals`), sent as the last
+#: block with the pad-positions system prompt of the profile: what to read,
+#: never a value. A user block like the recount texts, not a system prompt.
+_PAD_TERMINALS_REQUEST = (
+    "Read ONLY the cross-sections of the terminals (pins, leads, blades) and the hole or land "
+    "callouts printed for the numbered pads of this component, and call the tool. For each printed "
+    "dimension give the pad numbers it refers to, round with diameter or flat with width and "
+    "thickness, and the text exactly as printed; a hole callout only if the drawing prints it. Do "
+    "not estimate anything: leave a list empty if the drawing prints nothing for it. Pads to read: "
+    "{pads}.")
+
+
+def _pad_terminals_tool() -> dict:
+    """The targeted re-read schema: the unit, the printed terminals and hole callouts (subset of the pad tool)."""
+    properties = _PAD_POSITIONS_TOOL["input_schema"]["properties"]
+    return {"type": "function", "function": {
+        "name": PAD_TERMINALS_TOOL_NAME,
+        "description": ("Terminal cross-sections and hole callouts PRINTED for the numbered pads, in "
+                        "the declared unit."),
+        "parameters": {"type": "object", "properties": {
+            "drawing_unit": properties["drawing_unit"],
+            "printed_terminals": properties["printed_terminals"],
+            "printed_holes": properties["printed_holes"],
+            "notes": properties["notes"],
+        }, "required": ["drawing_unit", "printed_terminals", "printed_holes"]}}}
+
+
+def read_pad_terminals(documents, pads, *, model, call, prompt=None, progress=None) -> dict:
+    """@brief One paid re-read of the drawing for ONLY the terminals and holes of the given pads.
+
+    @param documents Image documents of `numbering_documents`.
+    @param pads Pad numbers that have neither a hole nor a terminal.
+    @param model Model of the re-read (the pad-positions step's reader).
+    @param call The logged, cancellable call wrapper of the analysis.
+    @param prompt Profile text of the pad-positions system prompt (None: default).
+    @param progress Optional log callback.
+    @return {"leads": `printed_terminals`, "holes": `printed_holes`} in mm,
+        or {"failed": reason} / {"discarded": reason} with empty maps.
+    @throws ExtractionCancelled When the user cancels during the call.
+    @note Transcriptions only; the program derives holes and lands from the
+        terminals (`core.tht_estimates`), a terminal read once is estimated.
+    """
+    empty = {"leads": {}, "holes": {}}
+    try:
+        blocks = []
+        for index, path in enumerate(documents):
+            blocks.append({"type": "text", "text": f"FILE {index}: {path.name}"})
+            blocks.append(_file_to_content_block(path, model))
+        blocks.append({"type": "text", "text": _PAD_TERMINALS_REQUEST.format(
+            pads=", ".join(str(pad) for pad in pads))})
+        sent = effective_text("pad_positions_prompt", {"pad_positions_prompt": prompt})
+        with prompt_sending({"pad_positions_prompt": sent}):
+            data = call(model=model, system_prompt=sent, content_blocks=blocks,
+                        tool=_pad_terminals_tool(), max_tokens=PAD_POSITIONS_MAX_TOKENS,
+                        has_pdf=False)
+    except ExtractionCancelled:
+        raise
+    except (OpenRouterError, ToolArgumentsError, ExtractionError) as exc:
+        return dict(empty, failed=str(exc))
+    if not isinstance(data, dict):
+        return dict(empty, discarded=tx("risposta non strutturata"))
+    data = without_private_keys(data)
+    factor = _declared_unit_factor(data)
+    if factor is None:
+        return dict(empty, discarded=_undeclared_unit_reason())
+    return {"leads": printed_terminals(data.get("printed_terminals"), factor),
+            "holes": printed_holes(data.get("printed_holes"), factor)}
+
+
+def _pads_left_without_terminal(data: dict) -> list:
+    """Placed holed pads the pad rules would leave with neither a hole nor a terminal (simulated on a copy).
+
+    The rules (`_resolve_pad_terminals`) run on a canonical COPY of the
+    answer, so nothing is written; the answer and its working state stay
+    as they are. Anything the simulation cannot run on gives [].
+    """
+    trial = {key: value for key, value in data.items() if not callable(value)}
+    try:
+        trial = copy.deepcopy(trial)
+        _canonicalize_answer(trial)
+        geometry = _pads_with_the_fields_read(trial.get("package_geometry"), [])
+        resolved, _problems = _resolve_pad_terminals(geometry, trial, [])
+    except (ExtractionError, KeyError, TypeError, ValueError, AttributeError, ArithmeticError):
+        return []
+    if not isinstance(resolved, dict):
+        return []
+    placed = set(_pads_without_positions(resolved))
+    return [number for number in _pads_without_holes(resolved) if number not in placed]
+
+
+def _saved_hole_answer_settles(data: dict, pads) -> bool:
+    """Whether a saved pad-hole answer (a hole or a removal, not «block») covers these pads."""
+    answers = data.get("_answers") if isinstance(data.get("_answers"), dict) else {}
+    wanted = {str(pad) for pad in pads}
+    for value in answers.values():
+        text = str(value)
+        if not text.startswith(PAD_HOLE_KIND + ":") or text.endswith("=block"):
+            continue
+        group = set(text[len(PAD_HOLE_KIND) + 1:].partition("=")[0].split(","))
+        if wanted <= group:
+            return True
+    return False
+
+
+def _reread_missing_terminals(data: dict, documents, model: str, call, prompt=None,
+                              progress=None, announce=None, check_cancel=None) -> None:
+    """At most ONE paid re-read of the terminals and holes of pads left with neither, before they block.
+
+    Real case SRD-05VDC-SL-C (2026-11-13): the drawing prints the terminals
+    («2-Ø0.6», «2-1*0.4», «1.1 x 0.3»), the analysis declared none, and the
+    pads were blocked with a message saying a re-read could not help. Run
+    after the dedicated readings of a single part: when the pad rules would
+    leave placed holed pads with neither a printed hole nor a terminal
+    (`_pads_left_without_terminal`), and no saved answer already settles
+    their holes, the same documents are read once more for ONLY those
+    values (`read_pad_terminals`). What it reads joins the dedicated
+    reading's terminals as `_reading_leads` (a terminal read once,
+    estimated); its printed hole callouts go to `_reread_holes`, a hole
+    read once (estimated, `hole_once`) unless the dedicated reading saw the
+    same callout. `data["_terminal_reread"]` records the outcome for the
+    result and the block message: "found" or "nothing".
+    """
+    if data.get("_terminal_reread") or not documents:
+        return
+    missing = _pads_left_without_terminal(data)
+    if not missing or _saved_hole_answer_settles(data, missing):
+        return
+    if check_cancel:
+        check_cancel()
+    if announce:
+        announce("llm", model)
+    if progress:
+        progress(tx("Pad {pads}: ne' foro ne' terminale nella lettura; una sola rilettura a "
+                    "pagamento del disegno per le sezioni dei terminali e le quote dei fori, con "
+                    "{model}.", pads=", ".join(missing), model=model))
+    reading = read_pad_terminals(documents, missing, model=model, call=call, prompt=prompt,
+                                 progress=progress)
+    leads = {pad: value for pad, value in (reading.get("leads") or {}).items()
+             if str(pad) in missing}
+    holes = {pad: value for pad, value in (reading.get("holes") or {}).items()
+             if str(pad) in missing}
+    if leads:
+        merged = dict(data.get("_reading_leads") or {})
+        for pad, value in leads.items():
+            merged.setdefault(pad, value)
+        data["_reading_leads"] = merged
+    if holes:
+        # A hole callout read ONCE, in a one-off re-read, is not a measure
+        # (generality audit 2026-11-13, item 4): kept apart from the
+        # dedicated reading's callouts, it gives the pad an ESTIMATED hole
+        # with a read-once note (`_resolve_one_pad`), unless that reading
+        # transcribed the same callout (then two readings agree).
+        merged = dict(data.get("_reread_holes") or {})
+        for pad, value in holes.items():
+            merged.setdefault(pad, value)
+        data["_reread_holes"] = merged
+    found = bool(leads or holes)
+    data["_terminal_reread"] = "found" if found else "nothing"
+    line = (tx("Rilettura dei terminali: trovate le quote dei pad {pads}; fori e piazzole ricavati "
+               "dai terminali come stime.", pads=", ".join(sorted(
+                   {str(pad) for pad in (*leads, *holes)}, key=_pad_number_key)))
+            if found else
+            tx("Rilettura dei terminali: riletto, nessuna quota di terminale o foro trovata per i "
+               "pad {pads}.", pads=", ".join(missing)))
+    if reading.get("failed") or reading.get("discarded"):
+        line += " " + tx("({exc})", exc=reading.get("failed") or reading.get("discarded"))
+    data["notes"] = (str(data.get("notes") or "") + "\n" + line).strip()
+    if progress:
+        progress(line)
+
+
 def read_pad_positions(documents, *, model, call, prompt=None, progress=None,
                        pad_sizes=None) -> Optional[dict]:
     """@brief Ask the model, alone, for the dimension chains of the numbered pads.
@@ -2333,12 +2650,21 @@ def read_pad_positions(documents, *, model, call, prompt=None, progress=None,
         reason = _undeclared_unit_reason()
         if progress:
             progress(tx("Lettura dedicata delle posizioni dei pad scartata ({exc}).", exc=reason))
-        return {"view": view, "pads": {}, "notes": "", "discarded": reason}
+        # The switch roles of a drawn symbol do not depend on the unit (M7).
+        return {"view": view, "pads": {}, "notes": "", "discarded": reason,
+                "functions": printed_functions(data.get("terminal_functions"))}
     solved = pads_from_chains(data.get("chains"), factor, data.get("midpoints"), pad_sizes)
     notes = data.get("notes")
     return dict(solved, view=view, notes=notes if isinstance(notes, str) else "",
                 holes=printed_holes(data.get("printed_holes"), factor),
-                leads=printed_terminals(data.get("printed_terminals"), factor))
+                leads=printed_terminals(data.get("printed_terminals"), factor),
+                # The transcription as given, for a re-read of ONE axis
+                # (`_reread_failing_axis`): its chains and midpoints in the
+                # drawing's unit, with that unit's factor and the pad sizes.
+                functions=printed_functions(data.get("terminal_functions")),
+                raw_chains=list(data.get("chains") or ()),
+                raw_midpoints=list(data.get("midpoints") or ()),
+                raw_factor=factor, pad_sizes=pad_sizes)
 
 
 def without_private_keys(answer):
@@ -2362,6 +2688,32 @@ def without_private_keys(answer):
     if isinstance(answer, list):
         return [without_private_keys(value) for value in answer]
     return answer
+
+
+def printed_functions(entries) -> dict:
+    """@brief The switch roles the dedicated pad reading transcribed from a drawn circuit symbol.
+
+    @param entries `terminal_functions` of the pad-position answer (any value).
+    @return {pad number as text: (function or None, symbol_contact or None,
+        contact_common or None)} for the well-formed entries; a function
+        outside PINOUT_FUNCTIONS or an observation outside
+        SYMBOL_CONTACT_ROLES counts as absent. Empty when the reading saw no
+        symbol.
+    """
+    found = {}
+    for entry in entries if isinstance(entries, list) else ():
+        if not isinstance(entry, dict):
+            continue
+        pad = _pad_number_text(entry.get("pad"))
+        if not pad:
+            continue
+        function = entry.get("function") if entry.get("function") in PINOUT_FUNCTIONS else None
+        observed = (entry.get("symbol_contact")
+                    if entry.get("symbol_contact") in SYMBOL_CONTACT_ROLES else None)
+        common = _pad_number_text(entry.get("contact_common")) or None
+        if function is not None or observed is not None:
+            found[pad] = (function, observed, common)
+    return found
 
 
 def printed_terminals(entries, factor: float) -> dict:
@@ -2511,9 +2863,13 @@ def _respell_reading(reading: dict, numbers) -> dict:
 
 #: Fields a structured question may concern (`ExtractedParams.questions`):
 #: the side the pads are seen from, the body height between two printed
-#: candidates, the pad layout between candidate readings, and whether a
-#: height equal to a plan size is a square section or a rotated view.
-QUESTION_FIELDS = ("contacts_view", "body_height_mm", "pad_layout", "height_equals_plan")
+#: candidates, the pad layout between candidate readings, whether a
+#: height equal to a plan size is a square section or a rotated view, and
+#: how to number the contacts of a side-based module whose sides and pinout
+#: are not one numbering (`_ask_side_numbering`, 2026-11-13), and which
+#: printed quote is the distance between the contact rows (`_ask_row_spacing`).
+QUESTION_FIELDS = ("contacts_view", "body_height_mm", "pad_layout", "height_equals_plan",
+                   "side_numbering", "row_spacing", "contact_style", "contact_nc")
 
 
 def question_key(field: str, values) -> str:
@@ -2560,12 +2916,96 @@ def _mirror_suffix(pads: dict) -> str:
     return _MIRROR_MARK + ",".join(sorted({_layout_digest(across), _layout_digest(down)}))
 
 
+#: Separator, in a "contacts_view" question key, of the layout's SHAPE
+#: signature (`_view_shape`), after the mirror digests: «~shape:<sig>». A key
+#: saved before 2026-11-13 evening has none.
+_SHAPE_MARK = "~shape:"
+
+
 def _contacts_view_key_parts(body: str) -> tuple:
     """(numbers-and-digest list body, set of mirror digests or None) of a "contacts_view" key body."""
+    body = body.partition(_SHAPE_MARK)[0]
     head, mark, tail = body.rpartition(_MIRROR_MARK)
     if not mark:
         return body, None
     return head, set(tail.split(","))
+
+
+def _view_shape(pads, tolerance: float) -> Optional[str]:
+    """The pad numbers in counter-clockwise order around their centroid, as one canonical text, or None.
+
+    A tolerance-insensitive feature of a numbered layout for the
+    "contacts_view" question (real run of 2026-11-13: two readings of one
+    relay drawing differed by 0.2 mm, the digest changed and the user's
+    saved «bottom» was asked again). The cyclic order of the pads around
+    their centroid does not change with small reading differences, and it
+    REVERSES for the mirror image -- exactly what decides whether a drawing
+    is seen from above or below. None when the order is not stable: fewer
+    than three pads, a pad within `tolerance` of the centroid, two pads
+    whose directions a shift of `tolerance` could swap, or an order that
+    reads the same mirrored (then it cannot tell the two views apart).
+    """
+    points = [(str(number), float(x), float(y)) for number, (x, y) in pads]
+    if len(points) < 3:
+        return None
+    cx = sum(x for _n, x, _y in points) / len(points)
+    cy = sum(y for _n, _x, y in points) / len(points)
+    polar = []
+    for number, x, y in points:
+        radius = math.hypot(x - cx, y - cy)
+        if radius <= tolerance:
+            return None
+        polar.append((math.atan2(y - cy, x - cx), radius, number))
+    polar.sort()
+    for index, (angle, radius, _number) in enumerate(polar):
+        next_angle, next_radius, _next = polar[(index + 1) % len(polar)]
+        gap = (next_angle - angle) % (2 * math.pi)
+        # Two readings each off by `tolerance` move a direction by at most
+        # 2 * tolerance / radius: closer directions could swap.
+        if gap * min(radius, next_radius) <= 2 * tolerance:
+            return None
+    order = [number for _angle, _radius, number in polar]
+
+    def canonical(sequence):
+        """The smallest rotation of a cyclic sequence, joined."""
+        return min(",".join(sequence[i:] + sequence[:i]) for i in range(len(sequence)))
+
+    forward, backward = canonical(order), canonical(order[::-1])
+    return None if forward == backward else forward
+
+
+def _mirrored_shape(shape: str) -> str:
+    """The shape signature of the mirror image of a layout with signature `shape`."""
+    order = shape.split(",")[::-1]
+    return min(",".join(order[i:] + order[:i]) for i in range(len(order)))
+
+
+def _saved_view_by_shape(answers: dict, numbers, shape: Optional[str]):
+    """A saved "contacts_view" answer for the same pads with the same layout shape, or None.
+
+    Matches only keys that carry a shape signature (`_SHAPE_MARK`) for the
+    SAME pad numbers. Equal shape: the same side, the saved value applies.
+    A mirrored shape is a reading of the other face: never applied (the
+    question is asked). Two saved answers that disagree settle nothing.
+    """
+    if not shape:
+        return None
+    wanted = sorted(str(number) for number in numbers)
+    found = set()
+    for key, value in answers.items():
+        if not isinstance(key, str) or not key.startswith("contacts_view:"):
+            continue
+        body, mark, saved_shape = key.partition(_SHAPE_MARK)
+        if not mark or saved_shape != shape or value not in ("top", "bottom"):
+            continue
+        head, _mirrors = _contacts_view_key_parts(body.partition(":")[2])
+        # The key lists the pad numbers plus ONE layout digest.
+        from collections import Counter
+        entries, numbers = Counter(head.split("|")), Counter(wanted)
+        if numbers - entries or sum((entries - numbers).values()) != 1:
+            continue
+        found.add(value)
+    return next(iter(found)) if len(found) == 1 else None
 
 
 def _layout_digest_of(body: str, other: str):
@@ -2637,7 +3077,21 @@ def answers_contradict(key: str, value, other_key: str, other_value) -> bool:
         if mirrored:
             return str(value) == str(other_value)
         return str(value) != str(other_value)
-    if field in ("pad_layout", "body_height_mm"):
+    if field == "pad_layout":
+        # The identity `_saved_layout_choice` uses (S4): near-equal placements
+        # are one layout, so a newer answer supersedes them.
+        offered, other_offered = body.split("|"), other_body.split("|")
+        if _same_layout_choice(value, other_value):
+            return False
+        return (any(_same_layout_choice(value, option) for option in other_offered)
+                or any(_same_layout_choice(other_value, option) for option in offered))
+    if field == "contact_nc":
+        # Two saved role assignments that give one terminal two roles.
+        first, second = _assignment_of(value), _assignment_of(other_value)
+        if first is None or second is None:
+            return False
+        return any(pin in second and second[pin] != role for pin, role in first.items())
+    if field == "body_height_mm":
         chosen, other_chosen = _answer_identity(field, value), _answer_identity(field, other_value)
         offered = {_answer_identity(field, option) for option in body.split("|")}
         other_offered = {_answer_identity(field, option) for option in other_body.split("|")}
@@ -2709,11 +3163,39 @@ def _ask(data: dict, field: str, text: str, options: list, evidence=None, candid
                        else [option["value"] for option in options]) + key_suffix
     answers = data.get("_answers") if isinstance(data.get("_answers"), dict) else {}
     allowed = {str(option["value"]): option["value"] for option in options}
+    if field == "contacts_view" and key not in answers:
+        # A key of the format before the shape signature (same numbers, same
+        # digests) still answers the same question.
+        legacy = key.partition(_SHAPE_MARK)[0]
+        if legacy != key and legacy in answers and str(answers[legacy]) in allowed:
+            if not contradicting_answers(answers, legacy):
+                return allowed[str(answers[legacy])]
+        if _SHAPE_MARK in key:
+            reused = _saved_view_by_shape(
+                answers, [value for value in (key_values or ()) if value][:-1],
+                key.partition(_SHAPE_MARK)[2])
+            if reused is not None and reused in allowed:
+                return allowed[reused]
+    if field == "pad_layout" and key not in answers:
+        # The choice of a LAYOUT is about that layout, not about the others
+        # on offer (TEL real run, 2026-11-13: a new losing main reading
+        # changed the key and the saved choice of the same dedicated layout
+        # was ignored). A saved answer whose chosen layout digest is offered
+        # again applies, whatever the other options; old keys work the same.
+        reused = _saved_layout_choice(answers, options)
+        if reused is not None:
+            return reused
     # An answer saved under the same key without the suffix (a project saved
     # before the suffix existed) answers the same question.
-    saved = key if key in answers or not key_suffix else key[:-len(key_suffix)]
+    saved = (key if key in answers or not key_suffix
+             else key[:-len(key_suffix)].partition(_SHAPE_MARK)[0])
     if saved in answers and str(answers[saved]) in allowed:
         if not contradicting_answers(answers, saved):
+            # Reported in the result (`ExtractedParams.answered_questions`):
+            # a saved answer applied here records no question, and the
+            # window must still know which question of THIS analysis it
+            # settled (side numbering: the component check, 2026-11-13).
+            data.setdefault("_answered", {})[saved] = allowed[str(answers[saved])]
             return allowed[str(answers[saved])]
         # Two saved answers that cannot both be true: neither decides.
         text = text + " " + tx("(Domanda riproposta: le risposte salvate per questo progetto si "
@@ -2726,6 +3208,48 @@ def _ask(data: dict, field: str, text: str, options: list, evidence=None, candid
         data.setdefault("_candidates", {})[key] = {str(value): payload
                                                    for value, payload in candidates.items()}
     return None
+
+
+def _saved_layout_choice(answers: dict, options: list):
+    """The current "pad_layout" option whose layout a saved answer chose, or None.
+
+    A saved answer counts when its key is a "pad_layout" question, its value
+    was one of that question's options, and no other saved answer
+    contradicts it (`contradicting_answers`). Its chosen layout is the
+    digest of the value (`_answer_identity`); an option of the current
+    question with the same digest is returned. Two saved answers choosing
+    two different layouts both on offer settle nothing (None): the question
+    is asked again. Options whose value is not a layout (the pad-hole
+    question's) never match.
+
+    The layout is its digest AND where its pads sit on the body
+    (`_placement_mark`, night real run 2026-11-14): a saved choice applies
+    to an option of the same digest whose placement agrees within the
+    reading tolerance the values carry, with the same view and body
+    orientation (`_same_layout_choice`). A saved value without a placement
+    (stored before) cannot be compared: it applies only under its own
+    question key (`_ask`), never here.
+    """
+    offered = []
+    for option in options:
+        value = str(option["value"])
+        # «Keep blocked» is no layout: reused only under its own question key.
+        if ":" in value and not value.startswith((PAD_HOLE_KIND + ":", LAYOUT_BLOCK_KIND + ":",
+                                                  HOLE_OR_TERMINAL_KIND + ":")):
+            offered.append((_layout_value_parts(value), option["value"]))
+    chosen = set()
+    for saved_key, saved_value in answers.items():
+        if not isinstance(saved_key, str) or not saved_key.startswith("pad_layout:"):
+            continue
+        offered_then = saved_key.partition(":")[2].split("|")
+        if str(saved_value) not in offered_then or contradicting_answers(answers, saved_key):
+            continue
+        if _layout_value_parts(saved_value)[1] is None:
+            continue
+        for _parts, value in offered:
+            if _same_layout_choice(saved_value, value):
+                chosen.add(value)
+    return next(iter(chosen)) if len(chosen) == 1 else None
 
 
 def _question_evidence(data: dict) -> Optional[dict]:
@@ -2769,6 +3293,527 @@ def _set_program_source(data: dict, field: str, source: str) -> None:
     over the declared ones when the result is built.
     """
     data.setdefault("_program_sources", {})[field] = source
+
+
+def _sides_and_pinout_report(data) -> Optional[tuple]:
+    """(normalized sides, report) of a castellated answer with a pinout, or None.
+
+    The sides are numbered exactly as the extraction will number them
+    (`_castellated_sides` on a copy: missing first_pin assigned, names of the
+    wrong length dropped). None for another layout, for sides the
+    normalization refuses (the validation reports those itself) and when
+    `pinout_coherence.side_pinout_report` does not apply (no pinout).
+    """
+    sides = _normalized_sides_copy(data)
+    if sides is None:
+        return None
+    report = pinout_coherence.side_pinout_report(sides, data.get("pinout"))
+    return (sides, report) if report["applicable"] else None
+
+
+def _normalized_sides_copy(data) -> Optional[list]:
+    """The castellated sides of `data` numbered as the extraction will number them, or None."""
+    if not isinstance(data, dict) or data.get("layout") != "castellated":
+        return None
+    try:
+        return _castellated_sides(copy.deepcopy(data.get("castellated_sides")))
+    except ExtractionError:
+        return None
+
+
+def _numbers_printed(data) -> Optional[bool]:
+    """The answer's declaration `pin_numbers_printed`: True, False, or None when absent.
+
+    None (an answer from before 2026-11-13, or a model that did not say) is
+    read as «printed»: the schema has always asked for the pin number «AS IT
+    IS PRINTED», so an answer that gave numbers claimed them printed. Only an
+    explicit False turns the side numbering into a convention question.
+    """
+    value = data.get("pin_numbers_printed") if isinstance(data, dict) else None
+    return value if isinstance(value, bool) else None
+
+
+def _side_pinout_summary(report: dict) -> str:
+    """The translated list of what does not match between sides and pinout (ranges compressed).
+
+    Entries declared off every side (a numbered centre pad) are named as
+    kept, never as missing pads (audit H2); undeclared ones as unexplained.
+    """
+    parts = []
+    declared = set(report.get("off_side_entries") or ())
+    shifted = [pin for pin in report.get("dropped") or () if pin not in declared]
+    if shifted and report.get("contradicted"):
+        parts.append(tx("voci del pinout senza pad: {pins}",
+                        pins=pinout_coherence.pin_ranges_text(shifted)))
+    if report.get("unexplained_entries") and not report.get("contradicted"):
+        parts.append(tx("voci del pinout senza pad e non dichiarate fuori dai lati: {pins}",
+                        pins=pinout_coherence.pin_ranges_text(report["unexplained_entries"])))
+    if report.get("off_side_entries"):
+        parts.append(tx("voci del pinout fuori dai lati, tenute: {pins}",
+                        pins=pinout_coherence.pin_ranges_text(report["off_side_entries"])))
+    if report.get("unnamed_pads"):
+        parts.append(tx("pad senza voce nel pinout: {pins}",
+                        pins=pinout_coherence.pin_ranges_text(report["unnamed_pads"])))
+    if report.get("contradictions"):
+        parts.append(tx("{count} etichette dei lati diverse dal nome del pinout dello stesso pad",
+                        count=len(report["contradictions"])))
+    for item in report.get("label_conflicts") or ():
+        parts.append(tx("le etichette del lato {label} mettono i nomi del pinout su altri contatti "
+                        "(pin {pins})", label=EDGE_LABELS.get(item["edge"], item["edge"]),
+                        pins=pinout_coherence.pin_ranges_text(item["pins"])))
+    return "; ".join(parts)
+
+
+def _note_label_conflicts(data: dict, progress=None) -> None:
+    """Say which sides' labels still place the pinout names elsewhere (after the one retry): names not moved.
+
+    The conflicts are those computed on the analysis' mapping
+    (`data["_label_conflicts"]`, written by `_apply_numbering_convention`
+    with the pins in the new numbering), else computed now on the answer's
+    own numbering. Kept in `data["_label_conflicts"]` for the result
+    (`ExtractedParams.label_conflicts`).
+    """
+    if not isinstance(data.get("_label_conflicts"), list):
+        sides = _normalized_sides_copy(data)
+        data["_label_conflicts"] = (pinout_coherence.strong_label_conflicts(
+            sides, data.get("pinout")) if sides else [])
+    for item in data["_label_conflicts"]:
+        line = tx("Etichette del lato {label} che mettono i nomi del pinout su altri contatti (pin "
+                  "{pins}): nomi lasciati come li ha dati l'analisi, da rivedere prima dell'uso.",
+                  label=EDGE_LABELS.get(item["edge"], item["edge"]),
+                  pins=pinout_coherence.pin_ranges_text(item["pins"]))
+        data["notes"] = (str(data.get("notes") or "") + "\n" + line).strip()
+        if progress:
+            progress(line)
+
+
+def _raise_on_side_pinout_contradiction(answer) -> None:
+    """Raise SidePinoutContradiction when a side-based answer's numbering is shifted.
+
+    Rule 1 (docs/pinout-coherence-plan.md, narrowed by the audits of
+    2026-11-13) is structural: pads carrying numbers the pinout lacks while
+    undeclared entries have no pad -- not when the answer declares that the
+    document prints no pin numbers (nothing to correct against). Also, in
+    both modes, a STRONG label contradiction
+    (`pinout_coherence.strong_label_conflicts`: at least two unique-name
+    labels on one side place the names on other contacts), with its own
+    correction text. Entries declared off the sides and weak or single label
+    agreements never cost a retry, nor do undeclared entries without a pad
+    (a free question instead), nor remark-like names (flagged only,
+    `_note_pinout_name_problems`, generality audit M2).
+    """
+    found = _sides_and_pinout_report(answer)
+    if found is None:
+        return
+    report = found[1]
+    # A shift has nothing to be corrected against when no number is printed.
+    shifted = report["contradicted"] and _numbers_printed(answer) is not False
+    conflicts = report["label_conflicts"]
+    if not shifted and not conflicts:
+        return
+    texts = ([_SIDE_PINOUT_CORRECTION] if shifted else []) + (
+        [_SIDE_LABEL_CORRECTION] if conflicts else [])
+    raise SidePinoutContradiction(_side_pinout_summary(report), raw=answer,
+                                  fallback=copy.deepcopy(answer), report=report,
+                                  correction="\n\n".join(texts))
+
+
+def _support_text(placement: dict) -> str:
+    """How a placement is supported: agreements on names that occur once, and on repeated names."""
+    return tx("{unique} su nomi unici, {repeated} su nomi ripetuti",
+              unique=placement.get("unique", 0), repeated=placement.get("repeated", 0))
+
+
+def _placements_text(sides, report: dict) -> str:
+    """The placement of every side, with its support («5 etichette su 22 concordano (2 su nomi unici, 3 su nomi ripetuti)»)."""
+    parts = []
+    for side in sides:
+        placement = report["alignment"].get(side["edge"])
+        if not placement:
+            continue
+        first = int(placement["first_pin"])
+        values = dict(label=EDGE_LABELS.get(side["edge"], side["edge"]), first=first,
+                      last=first + int(side["count"]) - 1, same=placement["same"],
+                      labelled=placement["labelled"], kinds=_support_text(placement))
+        line = (tx("lato {label}: pin {first}-{last} in ordine inverso, {same} etichette su "
+                   "{labelled} concordano col pinout ({kinds})", **values) if placement["reverse"]
+                else tx("lato {label}: pin {first}-{last}, {same} etichette su {labelled} "
+                        "concordano col pinout ({kinds})", **values))
+        others = report.get("contested_sides", {}).get(side["edge"])
+        if others:
+            line += " " + tx("(altre {count} collocazioni coerenti, sostenute solo da nomi "
+                             "ripetuti)", count=others)
+        parts.append(line)
+    return "; ".join(parts)
+
+
+def _renumber_doubts(sides, report: dict) -> str:
+    """Why a renumbering is offered without being recommended, translated, «; » separated."""
+    reasons = []
+    if not report.get("covers_pinout"):
+        reasons.append(tx("restano voci del pinout senza pad"))
+    if report.get("weak_sides"):
+        reasons.append(tx("sul lato {edges} concordano solo nomi che si ripetono nel pinout",
+                          edges=", ".join(EDGE_LABELS.get(edge, edge)
+                                          for edge in report["weak_sides"])))
+    if report.get("contested_sides"):
+        reasons.append(tx("sul lato {edges} anche altre collocazioni sono coerenti",
+                          edges=", ".join(EDGE_LABELS.get(edge, edge)
+                                          for edge in report["contested_sides"])))
+    return "; ".join(reasons)
+
+
+def _numbers_preview(pairs, limit: int = 3) -> str:
+    """«1=3V3, 2=3V3, 3=RST…»: the first `limit` (number, name) pairs, in number order."""
+    ordered = sorted(((str(number), str(name)) for number, name in pairs),
+                     key=lambda pair: pinout_coherence.pin_sort_key(pair[0]))
+    text = ", ".join(f"{number}={name or '?'}" for number, name in ordered[:limit])
+    return text + ("…" if len(ordered) > limit else "")
+
+
+#: Option of the "side_numbering" question: renumber the sides as the pinout.
+SIDE_NUMBERING_RENUMBER = "renumber"
+#: Option of the "side_numbering" question: keep the sides' numbering, the
+#: pinout becomes the side labels.
+SIDE_NUMBERING_KEEP = "keep_sides"
+#: Option of the "side_numbering" question: the unexplained entries are pads
+#: off the sides (an exposed pad); the sides' numbering stays.
+SIDE_NUMBERING_OFF_SIDE = "off_side_entries"
+#: Prefix of the "side_numbering" options that move the whole numbering by a
+#: constant («shift:-1»).
+SIDE_NUMBERING_SHIFT = "shift:"
+
+
+def _coherence_after_conflict(result, remaining: list, candidates: dict, notes: list) -> None:
+    """The side-numbering coherence step on a result whose numbering a live conflict answer settled (M4).
+
+    The same `_ask_side_numbering` the analysis runs after a saved answer,
+    on a scratch answer built from the result: its question (if any) joins
+    the open ones with its candidates, its notes join the result's.
+    """
+    scratch = {"layout": "castellated", "notes": "", "pinout": copy.deepcopy(result.pinout),
+               "castellated_sides": copy.deepcopy(result.castellated_sides),
+               "pin_numbers_printed": result.pin_numbers_printed}
+    _ask_side_numbering(scratch)
+    for question in scratch.get("_questions") or ():
+        if not any(open_question.get("key") == question["key"] for open_question in remaining):
+            remaining.append(question)
+    candidates.update(scratch.get("_candidates") or {})
+    notes.extend(line for line in scratch["notes"].splitlines() if line.strip())
+
+
+def _conflict_choice(sides, value, pinout=None) -> dict:
+    """What an answer to the numbering-conflict question does to the canonical sides (H1).
+
+    The result's sides already carry the provisional «moved» numbering:
+    SIDE_CONFLICT_MOVE keeps it, SIDE_CONFLICT_CONVENTION numbers them
+    counter-clockwise from the top-left corner (`pinout_coherence`), and
+    SIDE_CONFLICT_BLOCK changes nothing (the block stays). "unblock" tells
+    `apply_answers` whether the block goes.
+    """
+    if value == SIDE_CONFLICT_BLOCK:
+        return {"ok": True, "sides": [dict(side) for side in sides], "pinout": None,
+                "unblock": False,
+                "note": tx("Numeri dei pad in conflitto fra lati: lasciati bloccati per scelta "
+                           "dell'utente.")}
+    if value == SIDE_CONFLICT_MOVE:
+        return {"ok": True, "sides": [dict(side) for side in sides], "pinout": None,
+                "unblock": True,
+                "note": tx("Numeri dei pad in conflitto: lati numerati dopo gli altri, scelta "
+                           "dell'utente.")}
+    # The same rule as the saved answer (`_convention_outcome`): names follow
+    # their contacts, label conflicts translated (third review, H1).
+    outcome = _convention_outcome(sides, pinout, tx(
+        "Numerazione convenzionale (senso antiorario dall'angolo in alto a sinistra) scelta "
+        "dall'utente per numeri dei pad in conflitto fra lati: non quella del costruttore."))
+    if outcome is None:
+        return {"ok": False, "reason": tx("la numerazione convenzionale non si applica a questi "
+                                          "lati")}
+    return dict(outcome, ok=True, unblock=True)
+
+
+def _side_numbering_choice(sides, pinout, value, payload) -> dict:
+    """What a "side_numbering" answer does to normalized sides and a pinout, without writing.
+
+    @return {"ok": True, "sides": list, "pinout": list or None, "note": str},
+        or {"ok": False, "reason": str} when the situation is no longer the
+        one the question was about (the pad-label pairs of the payload differ)
+        or the change is not defined. One function for the saved answer
+        during the extraction and for `apply_answers`, so both give one result.
+    """
+    if value in (SIDE_CONFLICT_MOVE, SIDE_CONFLICT_CONVENTION, SIDE_CONFLICT_BLOCK):
+        return _conflict_choice(sides, value, pinout)
+    report = pinout_coherence.side_pinout_report(sides, pinout)
+    expected = payload.get("pairs") if isinstance(payload, dict) else None
+    changed = tx("lati o pinout cambiati dopo la domanda")
+    if value == SIDE_NUMBERING_RENUMBER:
+        if not report["renumberable"]:
+            return {"ok": False, "reason": tx("i lati non hanno piu' una sola collocazione "
+                                              "coerente nel pinout")}
+        renumbered = pinout_coherence.renumbered_sides(sides, report["alignment"])
+        if expected is not None and pinout_coherence.pad_label_pairs(renumbered) != expected:
+            return {"ok": False, "reason": changed}
+        return {"ok": True, "sides": renumbered, "pinout": None,
+                "note": tx("Contatti rinumerati come il pinout del documento, scelta "
+                           "dell'utente: {placements}.",
+                           placements=_placements_text(sides, report))}
+    if isinstance(value, str) and value.startswith(SIDE_NUMBERING_SHIFT):
+        delta = payload.get("delta") if isinstance(payload, dict) else None
+        if not isinstance(delta, int) or isinstance(delta, bool):
+            return {"ok": False, "reason": changed}
+        moved = pinout_coherence.shifted_sides(sides, delta)
+        if expected is not None and pinout_coherence.pad_label_pairs(moved) != expected:
+            return {"ok": False, "reason": changed}
+        after = pinout_coherence.side_pinout_report(moved, pinout)
+        # The entries the shift leaves without a pad are what the user called
+        # pads off the sides by choosing it: declared, never removed.
+        rest = after["unexplained_entries"]
+        return {"ok": True, "sides": moved,
+                "pinout": pinout_coherence.marked_off_side(pinout, rest) if rest else None,
+                "note": tx("Numerazione dei lati spostata di {delta} per scelta dell'utente; voci "
+                           "del pinout fuori dai lati: {pins}.", delta=f"{delta:+d}",
+                           pins=pinout_coherence.pin_ranges_text(
+                               after["off_side_entries"] + rest) or "-")}
+    if value == SIDE_NUMBERING_OFF_SIDE:
+        if expected is not None and pinout_coherence.pad_label_pairs(sides) != expected:
+            return {"ok": False, "reason": changed}
+        entries = report["unexplained_entries"]
+        return {"ok": True, "sides": [dict(side) for side in sides],
+                "pinout": pinout_coherence.marked_off_side(pinout, entries),
+                "note": tx("Voci del pinout {pins} tenute come pad fuori dai lati per scelta "
+                           "dell'utente.", pins=pinout_coherence.pin_ranges_text(entries))}
+    if value == SIDE_NUMBERING_KEEP:
+        if expected is not None and pinout_coherence.pad_label_pairs(sides) != expected:
+            return {"ok": False, "reason": changed}
+        declared = set(report["off_side_entries"])
+        shifted = [pin for pin in report["dropped"] if pin not in declared]
+        note = (tx("Numerazione dei lati tenuta per scelta dell'utente: il pinout e' quello delle "
+                   "etichette dei lati; voci del documento senza pad: {pins}.",
+                   pins=pinout_coherence.pin_ranges_text(shifted))
+                if shifted and report["contradicted"] else
+                tx("Numerazione dei lati tenuta per scelta dell'utente: il pinout e' quello delle "
+                   "etichette dei lati."))
+        return {"ok": True, "sides": [dict(side) for side in sides],
+                "pinout": pinout_coherence.kept_sides_pinout(sides, pinout), "note": note}
+    return {"ok": False, "reason": tx("risposta sconosciuta")}
+
+
+def _write_side_choice(data: dict, outcome: dict, progress=None) -> None:
+    """Write an accepted side or convention choice into the answer: first pin and direction by edge, pinout, note."""
+    by_edge = {side["edge"]: side for side in outcome["sides"]}
+    for entry in data.get("castellated_sides") or ():
+        target = by_edge.get(_side_edge(entry)) if isinstance(entry, dict) else None
+        if target is not None:
+            entry["first_pin"] = target["first_pin"]
+            entry["reverse"] = target["reverse"]
+    if outcome.get("pinout") is not None:
+        data["pinout"] = outcome["pinout"]
+    data["notes"] = (str(data.get("notes") or "") + "\n" + outcome["note"]).strip()
+    if progress:
+        progress(outcome["note"])
+
+
+def _note_label_differences(data: dict, report: dict, progress=None) -> None:
+    """Say, without blocking, which side labels name another signal than the pinout on the same pad."""
+    if not report.get("contradictions"):
+        return
+    line = tx("Etichette dei lati diverse dal nome del pinout sugli stessi pad ({pins}): da "
+              "verificare; la numerazione non cambia.",
+              pins=pinout_coherence.pin_ranges_text(item["pin"] for item in report["contradictions"]))
+    data["notes"] = (str(data.get("notes") or "") + "\n" + line).strip()
+    if progress:
+        progress(line)
+
+
+def _ask_side_numbering(data: dict, progress=None) -> None:
+    """Ask how to number the contacts when the sides and the pinout are not one numbering.
+
+    Run on the CANONICAL answer (view from above, after
+    `_canonicalize_answer`) of a castellated module, so a saved answer and
+    `apply_answers` work in one frame. When the answer declares that the
+    document prints no pin numbers (`pin_numbers_printed` False) nothing is
+    asked: the fixed convention is applied (`_apply_numbering_convention`,
+    user decision 2026-11-13). Otherwise a question
+    «side_numbering» is recorded only for a STRUCTURAL doubt
+    (`report["needs_question"]`: a shifted numbering, or pinout entries
+    without a pad that the answer does not declare off the sides); label
+    names that merely differ are noted, never asked (audit 2026-11-13, item
+    1). Key: the field and `pinout_coherence.report_digest`. Options:
+    - «renumber» -- every side has its placement on the pinout and no two
+      overlap; first and flagged `"recommended": True` only when
+      `report["recommended"]`, listed last with its doubts otherwise;
+    - «shift:<d>» -- every pad number moved by d puts each pad on an entry
+      and covers the unexplained ones (`pinout_coherence.uniform_shifts`),
+      with the first numbers it gives; entries it leaves without a pad are
+      then declared off the sides;
+    - «off_side_entries» -- ALWAYS offered when undeclared entries have no
+      pad (audit H1): they are pads off the sides (an exposed pad): declared,
+      nothing renumbered;
+    - «keep_sides» (shifted numbering only) -- the sides' numbering stays and
+      the pinout becomes the side labels.
+    A saved answer is applied at once to the answer's sides or pinout.
+    """
+    if _numbers_printed(data) is False:
+        _apply_numbering_convention(data, progress)
+        return
+    if data.get("_numbering_conflict"):
+        # A numbering conflict is unsettled -- its question open, kept
+        # blocked, or the correction failed (third review, M3): the
+        # provisional numbering is no reading to judge the pinout against.
+        return
+    if data.pop("_conflict_convention", False):
+        # The user chose the convention for a numbering conflict (H1).
+        _apply_numbering_convention(data, progress, note=tx(
+            "Numerazione convenzionale (senso antiorario dall'angolo in alto a sinistra) scelta "
+            "dall'utente per numeri dei pad in conflitto fra lati: non quella del costruttore."))
+        return
+    found = _sides_and_pinout_report(data)
+    if found is None:
+        return
+    sides, report = found
+    if not report["needs_question"]:
+        _note_label_differences(data, report, progress)
+        return
+    pinout = data.get("pinout")
+    names = dict(pinout_coherence.document_pinout_entries(pinout))
+    summary = _side_pinout_summary(report)
+    candidates = {}
+    renumber = None
+    renumber_pairs = None
+    if report["renumberable"] and not report["already_aligned"]:
+        placements = _placements_text(sides, report)
+        renumber = {"label": (tx("Rinumera i contatti come il pinout (consigliata): {placements}.",
+                                 placements=placements) if report["recommended"] else
+                              tx("Rinumera i contatti come il pinout (da verificare: {doubts}): "
+                                 "{placements}.", placements=placements,
+                                 doubts=_renumber_doubts(sides, report))),
+                    "value": SIDE_NUMBERING_RENUMBER}
+        if report["recommended"]:
+            # The declared flag the window highlights (never read from the
+            # wording), set exactly when the report recommends it.
+            renumber["recommended"] = True
+        renumber_pairs = pinout_coherence.pad_label_pairs(
+            pinout_coherence.renumbered_sides(sides, report["alignment"]))
+        candidates[SIDE_NUMBERING_RENUMBER] = {"pairs": renumber_pairs}
+    shifts = []
+    for delta in pinout_coherence.uniform_shifts(sides, pinout):
+        moved = pinout_coherence.shifted_sides(sides, delta)
+        pairs = pinout_coherence.pad_label_pairs(moved)
+        if pairs == renumber_pairs:
+            continue
+        rest = pinout_coherence.side_pinout_report(moved, pinout)["unexplained_entries"]
+        preview = _numbers_preview((number, names.get(number, "")) for number, _label in pairs)
+        label = tx("Sposta tutta la numerazione dei lati di {delta}: {preview}",
+                   delta=f"{delta:+d}", preview=preview)
+        if rest:
+            label += " " + tx("(le voci {pins} restano pad fuori dai lati)",
+                              pins=pinout_coherence.pin_ranges_text(rest))
+        value = f"{SIDE_NUMBERING_SHIFT}{delta:+d}"
+        shifts.append({"label": label, "value": value})
+        candidates[value] = {"pairs": pairs, "delta": delta}
+    current = pinout_coherence.pad_label_pairs(sides)
+    extra = []
+    if report["unexplained_entries"]:
+        entries = report["unexplained_entries"]
+        extra.append({"label": tx("Le voci {pins} ({names}) sono pad fuori dai lati (per esempio un "
+                                  "pad esposto): tienile, la numerazione dei lati non cambia.",
+                                  pins=pinout_coherence.pin_ranges_text(entries),
+                                  names=", ".join(names.get(pin, "") or "?" for pin in entries)),
+                      "value": SIDE_NUMBERING_OFF_SIDE})
+        candidates[SIDE_NUMBERING_OFF_SIDE] = {"pairs": current}
+    if report["contradicted"]:
+        declared = set(report["off_side_entries"])
+        shifted = [pin for pin in report["dropped"] if pin not in declared]
+        extra.append({"label": (tx("Tieni la numerazione dei lati: il pinout diventa quello delle "
+                                   "etichette dei lati e le voci del documento senza pad ({pins}) "
+                                   "non entrano nel simbolo.",
+                                   pins=pinout_coherence.pin_ranges_text(shifted))),
+                      "value": SIDE_NUMBERING_KEEP})
+        candidates[SIDE_NUMBERING_KEEP] = {"pairs": current}
+    if renumber is not None and report["recommended"]:
+        options = [renumber] + shifts + extra
+    else:
+        options = shifts + extra + ([renumber] if renumber is not None else [])
+    text = tx("Numerazione dei contatti: i lati e il pinout del documento non sono una sola "
+              "numerazione ({summary}). Quale numerazione usare?", summary=summary)
+    key_values = [pinout_coherence.report_digest(sides, pinout)]
+    chosen = _ask(data, "side_numbering", text, options, _question_evidence(data),
+                  candidates=candidates, key_values=key_values)
+    if chosen is None:
+        if progress:
+            progress(tx("Lati e pinout non sono una sola numerazione ({summary}): domanda "
+                        "all'utente prima di scrivere il footprint.", summary=summary))
+        return
+    outcome = _side_numbering_choice(sides, pinout, chosen, candidates.get(str(chosen)))
+    if not outcome["ok"]:
+        # Not applied after all: it must not be reported as settled.
+        (data.get("_answered") or {}).pop(question_key("side_numbering", key_values), None)
+        return
+    _write_side_choice(data, outcome, progress)
+
+
+def _apply_numbering_convention(data: dict, progress=None, note: Optional[str] = None) -> None:
+    """Number the contacts with the fixed convention when the document prints no pin numbers.
+
+    User decision (2026-11-13): no question. On a module whose document
+    prints no pin numbers «pin 1» has no electrical meaning: the numbers only
+    link the symbol pins to the footprint pads. One convention is applied,
+    counter-clockwise from the top-left corner seen from above
+    (`pinout_coherence.convention_numbers`, the DIP rule). Every name stays on
+    the physical contact the ANALYSIS gave it (its numbering of the contacts
+    and its pinout numbers, `pinout_coherence.convention_pinout`); the side
+    labels never move a name. Entries no contact carries are kept after the
+    contacts (declared off the sides, or named in a note to verify), never
+    dropped. Runs on the canonical answer (view from above). `note`
+    replaces the opening sentence when the convention was chosen for another
+    reason (a numbering conflict, `_settle_numbering_conflict`).
+    """
+    sides = _normalized_sides_copy(data)
+    if not sides:
+        return
+    outcome = _convention_outcome(sides, data.get("pinout"), note or tx(
+        "Il documento non stampa i numeri dei pin: numerazione convenzionale (primo contatto "
+        "incontrato girando in senso antiorario dall'angolo in alto a sinistra), non quella del "
+        "costruttore."))
+    if outcome is None:
+        return
+    data["_label_conflicts"] = outcome["label_conflicts"]
+    _write_side_choice(data, outcome, progress)
+
+
+def _convention_outcome(sides, pinout, note: str) -> Optional[dict]:
+    """The fixed convention applied to normalized canonical sides and a pinout: ONE rule for every path.
+
+    Used by the analysis (`_apply_numbering_convention`) and by a live answer
+    to the numbering-conflict question (`_conflict_choice`), so both give the
+    same sides, the same pinout and the same label conflicts (third review,
+    H1: the live answer renumbered the sides and left the names on the old
+    numbers).
+
+    @return {"sides", "pinout" (rows or None), "label_conflicts", "note"},
+        or None when the convention does not fit the sides.
+    """
+    numbers = pinout_coherence.convention_numbers(sides)
+    numbered = pinout_coherence.sides_with_numbers(sides, numbers)
+    if numbered is None:
+        return None
+    # The labels are judged against the ANALYSIS' mapping, before the
+    # renumbering, and the contacts keep their identity under the new
+    # numbers (final audit M3): every side's conflict survives.
+    conflicts = pinout_coherence.translated_conflicts(
+        pinout_coherence.strong_label_conflicts(sides, pinout), sides, numbers)
+    rows, unattached, clashes = pinout_coherence.convention_pinout(sides, pinout, numbers)
+    if unattached:
+        note += " " + tx("Voci del pinout senza contatto nell'analisi, numerate dopo i contatti e da "
+                         "verificare: {pins}.", pins=", ".join(
+                             f"{number} {name}".strip() for number, name in
+                             pinout_coherence.document_pinout_entries(pinout)
+                             if number in unattached))
+    if clashes:
+        note += " " + tx("Voci {pins} dichiarate fuori dai lati con lo stesso numero di un "
+                         "contatto: tenute fuori dai lati, numerate dopo i contatti.",
+                         pins=pinout_coherence.pin_ranges_text(clashes))
+    return {"sides": numbered, "pinout": rows or None, "label_conflicts": conflicts, "note": note}
 
 
 def read_body_dimensions(documents, *, model, call, prompt=None, progress=None,
@@ -3817,6 +4862,45 @@ def _holes_confirm(verdict) -> bool:
     return getattr(verdict, "status", None) == "confirmed"
 
 
+def _confirmation_is_weak(verdict, pads) -> bool:
+    """True for a confirmation that rests only on centre-line marks or only on a KiCad library footprint.
+
+    A mark may be a datum on the axes (`_hole_text`), a library footprint is
+    a footprint of the part number, not the drawing: neither is a drawn hole
+    of THIS document, so neither earns the «recommended» flag (audit
+    2026-11-13, item 4). Without a confirming verdict (none, a hole check
+    that failed, a conflict) it is weak too (audit L4). The order of the
+    options is not changed.
+    """
+    # No verdict, a failed hole check or anything but a confirmation never
+    # earns the flag (audit L4).
+    if verdict is None or not _holes_confirm(verdict) or isinstance(verdict, _WitnessConflict):
+        return True
+    if getattr(verdict, "source", None) == "library":
+        return True
+    marks = getattr(verdict, "marks_used", None)
+    return bool(pads) and isinstance(marks, int) and marks > 0 and marks >= len(pads)
+
+
+def _flag_sole_confirmed(options: list, ranks: dict, basis: Optional[dict] = None) -> None:
+    """Mark `"recommended": True` on the one option the drawn holes confirm, in place.
+
+    The window highlights an option only through this declared flag, never
+    from its wording. It reuses the existing verdict (`_verdict_rank` 0,
+    which already puts that option first) and adds no rule of its own: with
+    one choice only there is nothing to recommend, and when two or more
+    options are confirmed the holes do not single one out, so none is flagged.
+    `basis` maps an option value to (verdict, pads); a confirmation that
+    rests only on centre-line marks or a library footprint is not flagged
+    (`_confirmation_is_weak`).
+    """
+    confirmed = [option for option in options if ranks.get(option["value"], 1) == 0]
+    if len(options) > 1 and len(confirmed) == 1:
+        verdict, pads = (basis or {}).get(confirmed[0]["value"], (None, None))
+        if not _confirmation_is_weak(verdict, pads):
+            confirmed[0]["recommended"] = True
+
+
 def _verdict_rank(verdict, pads: Optional[dict] = None) -> int:
     """Order of a layout option by its drawn-hole verdict: 0 confirmed, 1 not checkable, 2 refuted.
 
@@ -3948,6 +5032,15 @@ def _pad_block_remedy(pins) -> str:
 #: the payload's `source` of a "pad_layout" question, like a reading's key.
 HOLES_SOURCE = "holes"
 
+#: Source of a layout the program RECOMBINES axis by axis from two readings
+#: that fail on different axes (`_axis_recombinations`): not a reading.
+RECOMBINED_SOURCE = "recombined"
+
+#: Value prefix of the «keep blocked» option of a last-resort pad-layout
+#: question (`_block_or_ask`, `last_resort`): nothing is written, the pads
+#: are typed by hand.
+LAYOUT_BLOCK_KIND = "layout_block"
+
 
 def _reading_source(key: str) -> str:
     """The name of one reading in the messages."""
@@ -3956,7 +5049,10 @@ def _reading_source(key: str) -> str:
             "dedicated": tx("lettura dedicata"),
             # Not a reading: a layout the drawn holes confirm, offered beside
             # the readings they contradict (`_hole_backed_layouts`).
-            HOLES_SOURCE: tx("disposizione confermata dai fori disegnati")}[key]
+            HOLES_SOURCE: tx("disposizione confermata dai fori disegnati"),
+            # Not a reading either: each axis taken from the reading whose
+            # chain on that axis passes (`_axis_recombinations`).
+            RECOMBINED_SOURCE: tx("ricombinazione per assi delle due letture")}[key]
 
 
 def _hole_verdicts(readings, holes) -> str:
@@ -4190,6 +5286,93 @@ def _layout_digest(pads: dict) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:8]
 
 
+#: Separator, in a "pad_layout" option value, of where the pads sit on the
+#: body (`_placement_mark`):
+#: «<sources>:<layout digest>~at<x>,<y>,<tolerance>/<view>/<orientation>».
+_PLACEMENT_MARK = "~at"
+
+
+def _placement_mark(payload: dict, tolerance: float) -> str:
+    """What a chosen layout is beyond its offsets, as a suffix of its option value.
+
+    The layout digest (`_layout_digest`) keeps the pads' offsets from each
+    other only: two readings whose rows sit 0.5 mm apart on the body (an edge
+    quote misread, TEL real run of 2026-11-14) have one digest, and a saved
+    choice of the first was applied to the second without a question. The
+    mark adds, so that a saved choice is about the same footprint:
+    - the position, mm, of the first pad -- the lowest pad number compared as
+      text, whatever its type (an np_thru_hole pad with a number counts like
+      any other; every payload pin carries a number) -- from the body centre
+      when the payload places the body by its quotes («body_center»), else
+      from the centre of the pad field, where the generator centres the
+      body on such a layout (origin «custom» and any other);
+    - the reading tolerance of the drawing's unit (`_reading_tolerance`),
+      so an inch drawing is compared with its own rounding;
+    - the declared view («top», «bottom», «unknown»): a choice saved for a
+      top view is not one for a bottom view of the same offsets;
+    - the body orientation: «swapped» when the candidate exchanges the body
+      sizes (`exchange_body`), else «asis».
+    "" for a payload without pins.
+    """
+    pins = [pin for pin in payload.get("pins") or () if isinstance(pin, dict)
+            and _optional_number(pin.get("x_mm")) is not None
+            and _optional_number(pin.get("y_mm")) is not None]
+    if not pins:
+        return ""
+    first = min(pins, key=lambda pin: str(pin.get("number")))
+    if payload.get("origin") == "body_center":
+        cx = cy = 0.0
+    else:
+        xs = [float(pin["x_mm"]) for pin in pins]
+        ys = [float(pin["y_mm"]) for pin in pins]
+        cx, cy = (min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2
+    x, y = float(first["x_mm"]) - cx + 0.0, float(first["y_mm"]) - cy + 0.0
+    view = payload.get("view") if payload.get("view") in ("top", "bottom") else "unknown"
+    orientation = "swapped" if payload.get("exchange_body") else "asis"
+    return f"{_PLACEMENT_MARK}{x:.2f},{y:.2f},{tolerance:.3f}/{view}/{orientation}"
+
+
+def _layout_value_parts(value):
+    """(digest, mark) of a "pad_layout" option value.
+
+    `mark` is (x, y, tolerance, view, orientation) of `_placement_mark`, or
+    None on a value without one (stored before the mark existed, or another
+    kind of option).
+    """
+    identity = str(value).rsplit(":", 1)[-1]
+    digest, sep, mark = identity.partition(_PLACEMENT_MARK)
+    if not sep:
+        return digest, None
+    parts = mark.split("/")
+    try:
+        x, y, tolerance = (float(part) for part in parts[0].split(","))
+    except ValueError:
+        return digest, None
+    if len(parts) != 3:
+        return digest, None
+    return digest, (x, y, tolerance, parts[1], parts[2])
+
+
+def _same_layout_choice(first, second) -> bool:
+    """Whether two "pad_layout" option values stand for the same footprint (saved-answer identity).
+
+    Same digest, and either both without a mark (two values stored before
+    the mark, compared as they always were) or both with one: same view,
+    same body orientation and a first-pad position within the larger of the
+    two tolerances. A value with a mark and one without are never the same:
+    the older one cannot say where its pads sat.
+    """
+    digest, mark = _layout_value_parts(first)
+    other_digest, other_mark = _layout_value_parts(second)
+    if digest != other_digest:
+        return False
+    if mark is None or other_mark is None:
+        return mark is None and other_mark is None
+    tolerance = max(mark[2], other_mark[2]) + 1e-9
+    return (mark[3:] == other_mark[3:] and abs(mark[0] - other_mark[0]) <= tolerance
+            and abs(mark[1] - other_mark[1]) <= tolerance)
+
+
 def _candidate_payload(data: dict, keys, pads: dict, spans: dict, centred: bool, view,
                        factor: float, exchange: Optional[dict] = None,
                        main_frame: Optional[bool] = None) -> dict:
@@ -4259,6 +5442,23 @@ def _candidate_payload(data: dict, keys, pads: dict, spans: dict, centred: bool,
                         for number, (x, y) in sorted(placed.items(), key=lambda item: item[0])],
                "origin": origin, "view": view if view in ("top", "bottom") else None,
                "notes": notes}
+    if source == "dedicated" and isinstance(data.get("_reading_leads"), dict):
+        # The terminals of that reading go with its layout (D-a), mm, with
+        # their rounding (the comparison of `_adopted_reading_pad`).
+        leads = {str(number): {"lead": dict(entry["lead"]),
+                               "rounding_mm": entry.get("rounding_mm")}
+                 for number, entry in data["_reading_leads"].items()
+                 if isinstance(entry, dict) and isinstance(entry.get("lead"), dict)}
+        if leads:
+            payload["leads"] = leads
+    if source == "dedicated" and isinstance(data.get("_dedicated_holes"), dict):
+        # Its printed holes too: a printed hole is never re-estimated (M2).
+        holes = {str(number): {"drill_mm": entry["drill_mm"],
+                               "drill_length_mm": entry.get("drill_length_mm")}
+                 for number, entry in data["_dedicated_holes"].items()
+                 if isinstance(entry, dict) and entry.get("drill_mm") is not None}
+        if holes:
+            payload["holes"] = holes
     if exchange:
         payload["exchange_body"] = exchange
     return payload
@@ -4272,6 +5472,8 @@ def _write_candidate(data: dict, pins: list, payload: dict, factor: float) -> No
     candidate says so and nothing exchanged them yet.
     """
     geometry = data["package_geometry"]
+    # Whose layout is adopted: its terminals go with it (D-a).
+    data["_layout_source"] = payload.get("source")
     exchange = payload.get("exchange_body")
     if isinstance(exchange, dict) and not data.get("_body_axes_measured"):
         _exchange_body_sizes(data, exchange["measured_mm"], exchange["evidence"])
@@ -4293,9 +5495,71 @@ def _write_candidate(data: dict, pins: list, payload: dict, factor: float) -> No
         _adopt_view(data, payload["view"], tx("scelta dell'utente"))
 
 
+def _coincident_pads(pads: dict, tolerance: float) -> list:
+    """The pairs of DIFFERENT pad numbers a layout puts on one point (closer than `tolerance`, mm).
+
+    Two terminals cannot share a centre: such a layout fails the pad rules
+    whatever its sizes (the footprint check later says «non possono essere
+    tutti veri»), so it is not a candidate a user could choose. `tolerance`
+    is the reading tolerance: closer than that, two readings would call the
+    two points one.
+    """
+    items = sorted(((str(number), xy) for number, xy in pads.items()
+                    if isinstance(xy, (list, tuple)) and len(xy) == 2 and None not in xy),
+                   key=lambda item: item[0])
+    pairs = []
+    for index, (first, (x1, y1)) in enumerate(items):
+        for second, (x2, y2) in items[index + 1:]:
+            if math.hypot(x1 - x2, y1 - y2) < tolerance:
+                pairs.append((first, second))
+    return pairs
+
+
+#: Reasons of a drawn-hole verdict that had NOTHING to compare the layout
+#: with (drawing_holes.LayoutCheck): too few or too many pads, no image, no
+#: line drawing, no round hole, too few circles. Only these -- with no
+#: verdict and a confirmation -- leave a reading unweakened; every other
+#: non-confirmation weakens it, the «cannot judge» ones included
+#: (low_resolution, search_limit, page_skewed, unanchored): the check looked
+#: at circles and could not confirm (generality audit 2026-11-13, item 1).
+_NOTHING_TO_COMPARE = ("too_few_pads", "too_many_pads", "no_image", "not_a_drawing",
+                       "no_round_holes", "too_few_circles")
+
+
+def _witness_weakens(verdict) -> bool:
+    """True when the drawn holes looked at the layout and did not confirm it.
+
+    Real SRD run (2026-11-13): an agreed same-model layout off by 0.2 mm on
+    the rows was flagged recommended while the holes said «può essere una
+    coincidenza». Only no verdict, a confirmation, or a check that had
+    nothing to compare (`_NOTHING_TO_COMPARE`) leave it unweakened; any other
+    non-confirmation -- a refusal, a conflict, a «cannot judge» -- weakens.
+    """
+    if verdict is None or _holes_confirm(verdict):
+        return False
+    if isinstance(verdict, _WitnessConflict) or isinstance(verdict, _HoleFailure):
+        return isinstance(verdict, _WitnessConflict)
+    return getattr(verdict, "reason", None) not in _NOTHING_TO_COMPARE
+
+
+def _weakening_text(verdict, pads: dict) -> str:
+    """What the drawn holes said against a layout: the verdict, the farthest pad and the error, if known."""
+    text = tx("i fori disegnati non confermano questa disposizione ({holes})",
+              holes=_hole_text(verdict, pads))
+    misplaced = getattr(verdict, "misplaced_pad", None)
+    if misplaced is not None and str(misplaced) in {str(n) for n in pads}:
+        text += "; " + tx("il pad {pad} e' il piu' lontano dai fori", pad=misplaced)
+    error, tolerance = getattr(verdict, "max_error_mm", None), getattr(verdict, "tolerance_mm", None)
+    if isinstance(error, (int, float)) and isinstance(tolerance, (int, float)):
+        text += "; " + tx("scarto massimo {error:.2f} mm, tolleranza {tolerance:.2f} mm",
+                          error=error, tolerance=tolerance)
+    return text
+
+
 def _block_or_ask(data: dict, pins: list, readings: list, holes, factor: float, message: str,
                   progress, remark: str = "", extras=(), contradicted: bool = False,
-                  offer: Optional[dict] = None) -> None:
+                  offer: Optional[dict] = None, agreed: bool = False,
+                  last_resort=None) -> None:
     """Ask which complete layout is right when there are at least two, else block.
 
     `readings` are the (key, pads, spans, centred) tuples at hand; only the
@@ -4329,6 +5593,29 @@ def _block_or_ask(data: dict, pins: list, readings: list, holes, factor: float, 
     proposal. When no choice between complete layouts is possible, before
     the hard block, `_offer_pad_set_change` may turn it into ONE question
     that adds or removes pads; None (default) offers nothing.
+
+    A layout that puts two different pads on one point (`_coincident_pads`)
+    is never offered: it fails the pad rules whatever the user answers (TEL
+    real run, 2026-11-13: pads 9 and 10 of the main reading at one point).
+    When that leaves exactly ONE layout, it is asked as a confirmation and
+    flagged `"recommended": True`, never adopted by itself: a model reading
+    is not a measure without an independent agreeing reading or a witness.
+
+    `agreed` (real run of 2026-11-13, TEL with gpt-5.6-sol): the readings
+    AGREE but are not independent (one model read twice) and no witness can
+    check them. That one layout is asked as a confirmation flagged
+    `"recommended": True` -- never adopted silently, never a block without
+    a question. A layout the drawn holes refute is still excluded, so the
+    block stays only when no layout is valid. The flag is set ONLY when no
+    witness weakens the layout (`_witness_weakens`, real SRD run): with a
+    weakening verdict the question has no recommendation and its text says
+    what the holes said, the farthest pad and the error.
+
+    `last_resort` [(key, pads, spans, centred, fault)] (night real run
+    2026-11-14): readings excluded elsewhere (a chain the body contradicts).
+    When the hard block would stand, the question is asked instead with
+    every complete reading -- the refuted ones too, each saying what is
+    wrong -- and «keep blocked, type the pads by hand»; no recommendation.
     """
     listed = [_pad_number_text(pin.get("number")) for pin in pins if isinstance(pin, dict)]
     numbers = set(listed)
@@ -4339,7 +5626,13 @@ def _block_or_ask(data: dict, pins: list, readings: list, holes, factor: float, 
     candidates_allowed = len(listed) == len(numbers)
     extras = [extra for extra in extras
               if candidates_allowed and set(extra["pads"]) == numbers and extra["pads"]]
-    refuted = []
+    # Only a layout the holes CONFIRM keeps the refuted readings in the
+    # question (audit A1 below): a hole-backed layout is confirmed by
+    # construction, a recombination only when its own verdict confirms it
+    # (generality audit 2026-11-14, M2).
+    confirmed_extra = any(extra.get("source", HOLES_SOURCE) == HOLES_SOURCE
+                          or _holes_confirm(holes(extra["pads"])) for extra in extras)
+    refuted, impossible = [], []
     for key, pads, spans, centred in readings:
         if not candidates_allowed or set(pads) != numbers or not pads:
             continue
@@ -4348,8 +5641,13 @@ def _block_or_ask(data: dict, pins: list, readings: list, holes, factor: float, 
         # offering it would replace the block with a choice between wrong
         # answers, remembered in the project (generality audit 2026-11-05,
         # A1). An unverifiable or «distorted» verdict refutes nothing.
-        if not extras and not contradicted and _losing_verdict(holes(pads), pads, ("no_match",)):
+        if (not confirmed_extra and not contradicted
+                and _losing_verdict(holes(pads), pads, ("no_match",))):
             refuted.append(key)
+            continue
+        coincident = _coincident_pads(pads, tolerance)
+        if coincident:
+            impossible.append((key, coincident))
             continue
         twin = next((entry for entry in distinct
                      if not _offset_disagreements(entry[1], pads, sorted(numbers), tolerance)),
@@ -4377,8 +5675,17 @@ def _block_or_ask(data: dict, pins: list, readings: list, holes, factor: float, 
                for entry in distinct):
             continue
         backed[len(distinct)] = extra
-        distinct.append([[HOLES_SOURCE], extra["pads"], extra["spans"], extra["centred"]])
-    if len(distinct) < (1 if contradicted else 2):
+        distinct.append([[extra.get("source", HOLES_SOURCE)], extra["pads"], extra["spans"],
+                         extra["centred"]])
+    if impossible:
+        excluded = tx("Disposizioni escluse dalla domanda perche' mettono due pad nello stesso "
+                      "punto: {sources}.", sources="; ".join(
+                          f"{_reading_source(key)} ({', '.join(f'{a}-{b}' for a, b in pairs)})"
+                          for key, pairs in impossible))
+        remark = remark + " " + excluded
+        message = message + " " + excluded
+    if len(distinct) < (1 if contradicted or impossible or agreed or last_resort is not None
+                        else 2):
         if refuted:
             remark = remark + " " + tx("Disposizioni escluse dalla domanda perche' smentite dai fori "
                                        "disegnati: {sources}.",
@@ -4397,18 +5704,24 @@ def _block_or_ask(data: dict, pins: list, readings: list, holes, factor: float, 
         if withheld and _offer_relevant(pins, offer):
             remark = remark + " " + tx("Disposizione della lettura dedicata non proposta: "
                                        "{reasons}.", reasons="; ".join(withheld))
+        if last_resort is not None and candidates_allowed and _ask_last_resort(
+                data, pins, readings, holes, factor, message + remark, progress, last_resort,
+                numbers):
+            return
         _block(data, message + remark, progress)
         return
-    options, candidates, ranks = [], {}, {}
+    options, candidates, ranks, basis, bases = [], {}, {}, {}, []
     for index, (keys, pads, spans, centred) in enumerate(distinct):
         value = "+".join(keys) + ":" + _layout_digest(pads)
+        bases.append(value)
         view = next((holes.views.get(key) for key in keys if holes.views.get(key) in ("top", "bottom")),
                     None)
         extra = backed.get(index)
         if extra is not None:
-            # A layout the holes confirm: its option says where it comes
-            # from and which pad differs from the readings.
-            label = tx("{sources} -- {evidence} -- {pads}", sources=_reading_source(HOLES_SOURCE),
+            # A layout the holes confirm (or a recombination of the readings):
+            # its option says where it comes from and what the holes said.
+            label = tx("{sources} -- {evidence} -- {pads}",
+                       sources=_reading_source(extra.get("source", HOLES_SOURCE)),
                        evidence=extra["label"], pads=_pad_summary(pads))
         else:
             # Every reading's option says what the drawn holes said about it
@@ -4417,7 +5730,10 @@ def _block_or_ask(data: dict, pins: list, readings: list, holes, factor: float, 
                        sources=", ".join(_reading_source(k) for k in keys),
                        holes=_hole_text(holes(pads), pads), pads=_pad_summary(pads))
         options.append({"label": label, "value": value})
-        ranks[value] = 0 if extra is not None else _verdict_rank(holes(pads), pads)
+        ranks[value] = (0 if extra is not None and extra.get("source", HOLES_SOURCE) == HOLES_SOURCE
+                        else _verdict_rank(holes(pads), pads))
+        # What the confirmation rests on, for the «recommended» flag (item 4).
+        basis[value] = (holes(pads), pads)
         exchange = None
         if (getattr(holes(pads), "body_exchanged", False)
                 and not getattr(holes, "axes_adopted", True)):
@@ -4431,22 +5747,66 @@ def _block_or_ask(data: dict, pins: list, readings: list, holes, factor: float, 
             candidates[value] = _candidate_payload(data, keys, pads, spans, centred, view, factor,
                                                    exchange)
             continue
-        # The holes say where, never from which side: no view goes with it.
-        payload = _candidate_payload(data, keys, pads, spans, centred, None, factor, exchange,
-                                     main_frame=extra["main_frame"])
-        payload["source"] = HOLES_SOURCE
+        # The holes say where, never from which side: no view goes with a
+        # hole-backed layout; a recombination carries the view its readings
+        # declare (they never declare two different ones, M1).
+        payload = _candidate_payload(data, keys, pads, spans, centred, extra.get("view"), factor,
+                                     exchange, main_frame=extra["main_frame"])
+        payload["source"] = extra.get("source", HOLES_SOURCE)
         if extra["pixels"]:
             for entry in payload["pins"]:
                 if entry["number"] == extra["moved"]:
                     entry["source"] = MEASURED_PIXELS_SOURCE
         candidates[value] = payload
+    # Every value carries where its pads sit on the body (`_placement_mark`):
+    # a saved choice is about that placement too (F2).
+    renamed = {value: value + _placement_mark(payload, _reading_tolerance(factor))
+               for value, payload in candidates.items()}
+    for option in options:
+        option["value"] = renamed[option["value"]]
+    ranks = {renamed[value]: rank for value, rank in ranks.items()}
+    basis = {renamed[value]: entry for value, entry in basis.items()}
+    candidates = {renamed[value]: payload for value, payload in candidates.items()}
+    values_by_index = [renamed[value] for value in bases]
     # Ordered by what the holes said: confirmed, then not checkable, then
     # refuted; ties keep the readings' order. Only the order and the labels
     # change: the question key is built from the SORTED option values
     # (`question_key`), so a saved answer still applies.
     options.sort(key=lambda option: ranks.get(option["value"], 1))
-    if len(distinct) == 1:
-        # Only with `contradicted`: one layout to confirm, not a choice. The
+    _flag_sole_confirmed(options, ranks, basis)
+    unrecommendable = {values_by_index[index] for index in range(len(distinct))
+                       if index in backed and backed[index].get("recommendable") is False}
+    for option in options:
+        if option["value"] in unrecommendable:
+            # A recombination whose readings order the numbers differently (M5).
+            option.pop("recommended", None)
+    weakened = []
+    if agreed:
+        for keys, pads, _spans, _centred in distinct:
+            verdict = holes(pads)
+            if HOLES_SOURCE not in keys and _witness_weakens(verdict):
+                weakened.append(_weakening_text(verdict, pads))
+        if weakened:
+            message = message + " " + tx("Controllare il disegno prima di confermare: {details}.",
+                                         details="; ".join(weakened))
+    if (impossible or (agreed and not weakened)) and len(options) == 1:
+        # The only layout left once the impossible ones were excluded, or
+        # the one layout two dependent readings agree on that no witness
+        # weakens: the declared flag says so, the user still confirms it.
+        options[0]["recommended"] = True
+    blocking = last_resort is not None and not any(o.get("recommended") for o in options)
+    if blocking:
+        # Nothing recommended among readings that failed: «keep blocked» is
+        # always one of the answers (M2), never a forced choice.
+        block_value = f"{LAYOUT_BLOCK_KIND}:blocked"
+        options.append({"label": tx("Lascia bloccato: inserisco le posizioni a mano in «Piazzole "
+                                    "del componente THT»"), "value": block_value})
+        candidates[block_value] = {"kind": LAYOUT_BLOCK_KIND}
+        text = tx("{message} Nessuna lettura e' confermata: quale disposizione corrisponde al "
+                  "disegno, oppure lasciarla bloccata?", message=message)
+    elif len(distinct) == 1:
+        # With `contradicted`, `agreed`, or once impossible layouts were
+        # excluded: one layout to confirm, not a choice. The
         # message already opens with «Posizioni dei pad NON confermate»
         # (`_refuse_contradicted_agreement`): no second «Posizioni dei pad:»
         # in front of it (round 7b, F4).
@@ -4459,14 +5819,17 @@ def _block_or_ask(data: dict, pins: list, readings: list, holes, factor: float, 
         text = tx("Posizioni dei pad: {message} Quale disposizione corrisponde al disegno?",
                   message=message)
     chosen = _ask(data, "pad_layout", text, options, _question_evidence(data), candidates)
+    if chosen is not None and candidates[chosen].get("kind") == LAYOUT_BLOCK_KIND:
+        _keep_blocked(data, message + remark, progress)
+        return
     if chosen is not None:
         _write_candidate(data, pins, candidates[chosen], factor)
         if "exchange_body" not in candidates[chosen]:
             # A saved answer keeps this layout during the extraction: a body
             # reading follows, and a confirmation as given may be a measure
             # of the body's orientation, as on every other path (A6).
-            kept = next(pads for keys, pads, _spans, _centred in distinct
-                        if "+".join(keys) + ":" + _layout_digest(pads) == chosen)
+            kept = next(pads for index, (keys, pads, _spans, _centred) in enumerate(distinct)
+                        if values_by_index[index] == chosen)
             _align_body_axes(data, holes, kept)
         _settle(data, tx("Posizioni dei pad scelte dall'utente fra le letture ({source}); da "
                          "verificare sul disegno.",
@@ -4551,6 +5914,8 @@ def _settle_by_holes(data: dict, pins: list, readings: list, holes, factor: floa
             return "blocked"
     spans, centred = next((s, c) for k, _p, s, c in readings if k == key)
     _align_body_axes(data, holes, pads, progress)
+    # Whose layout is adopted: its terminals go with it (D-a).
+    data["_layout_source"] = key
     if key != "main":
         _write_chain_pads(data, pins, {"pads": pads, "spans": spans, "centred": centred}, factor)
     view = holes.views.get(key) or "unknown"
@@ -5265,6 +6630,7 @@ def _withdraw_dedicated_holes(data: dict) -> None:
     transcribed go the same way: they confirm no terminal.
     """
     data.pop("_dedicated_leads", None)
+    data.pop("_reading_leads", None)
     holes = data.pop("_dedicated_holes", None)
     if holes:
         data["notes"] = (str(data.get("notes") or "") + "\n" + tx(
@@ -5288,8 +6654,154 @@ def _body_on_page(geometry: dict, factor: float, exchanged: bool):
     return (width, length) if exchanged else (length, width)
 
 
+#: Request of the targeted re-read of ONE axis of the dedicated pad reading
+#: (`read_axis_chain`): the contradiction found and the axis, never a value
+#: to obtain.
+_AXIS_CHAIN_REQUEST = (
+    "Your transcription of the dimension chains along {axis} contradicts the drawing: {problem}. "
+    "Transcribe again ONLY the dimension chains along {axis} of the numbered holes or lands, as "
+    "they are printed, with each quote between the stops it really connects, from body edge to "
+    "body edge where the drawing prints those quotes, and call the tool.{other}")
+
+
+def read_axis_chain(documents, axis: str, problem: str, *, model, call, prompt=None,
+                    progress=None) -> Optional[dict]:
+    """@brief One paid re-read of the dimension chains along ONE axis, stating the contradiction found.
+
+    @param documents Image documents of `numbering_documents`.
+    @param axis The axes to re-read: "x", "y" or "xy".
+    @param problem The contradiction found, in English (`_axis_problem_text`),
+        quoted in the request.
+    @param model Model of the re-read (the pad-positions step's reader).
+    @param call The logged, cancellable call wrapper of the analysis.
+    @param prompt Profile text of the pad-positions system prompt (None: default).
+    @param progress Optional log callback.
+    @return {"chains", "midpoints", "factor"} of that axis only, or None when
+        the call failed or the answer is unusable.
+    @throws ExtractionCancelled When the user cancels during the call.
+    """
+    try:
+        blocks = []
+        for index, path in enumerate(documents):
+            blocks.append({"type": "text", "text": f"FILE {index}: {path.name}"})
+            blocks.append(_file_to_content_block(path, model))
+        blocks.append({"type": "text", "text": _AXIS_CHAIN_REQUEST.format(
+            axis=" and ".join(axis.upper()), problem=problem,
+            other=" Leave the chains along the other axis empty." if len(axis) == 1 else "")})
+        sent = effective_text("pad_positions_prompt", {"pad_positions_prompt": prompt})
+        with prompt_sending({"pad_positions_prompt": sent}):
+            data = call(model=model, system_prompt=sent, content_blocks=blocks,
+                        tool=_pad_positions_tool(), max_tokens=PAD_POSITIONS_MAX_TOKENS,
+                        has_pdf=False)
+    except ExtractionCancelled:
+        raise
+    except (OpenRouterError, ToolArgumentsError, ExtractionError) as exc:
+        if progress:
+            progress(tx("Rilettura dell'asse {axis} non riuscita ({exc}).",
+                        axis="/".join(axis.upper()), exc=exc))
+        return None
+    if not isinstance(data, dict):
+        return None
+    data = without_private_keys(data)
+    factor = _declared_unit_factor(data)
+    if factor is None:
+        return None
+    chains = [chain for chain in data.get("chains") or ()
+              if isinstance(chain, dict) and str(chain.get("axis")).lower() in axis]
+    midpoints = [point for point in data.get("midpoints") or ()
+                 if isinstance(point, dict) and str(point.get("axis")).lower() in axis]
+    return {"chains": chains, "midpoints": midpoints, "factor": factor} if chains else None
+
+
+def _axis_problem_text(geometry: dict, reading: dict, failing, factor: float) -> str:
+    """The contradiction of a chain reading, in English, for the targeted re-read (`read_axis_chain`).
+
+    In English (the prompts are, 2026-11-12) and WITHOUT numbers: the body
+    size is the main answer's reading, and giving it as a target would make
+    the re-read a copy of that value instead of an independent reading
+    (generality audit 2026-11-14, M3). It names the axis and says whether its
+    edge-to-edge sum disagrees with the body outline or its chains disagree
+    with each other.
+    """
+    spans = reading.get("spans") or {}
+    parts = []
+    for axis in sorted(failing):
+        if spans.get(axis) is not None:
+            parts.append(f"along {axis.upper()} the quotes from body edge to body edge do not add "
+                         f"up to the body outline")
+        else:
+            parts.append(f"the chains along {axis.upper()} contradict each other")
+    return "; ".join(parts)
+
+
+def _axis_order(pads: dict, index: int, tolerance: float) -> list:
+    """The pad numbers in order along one axis, numbers within `tolerance` grouped as ties.
+
+    @param index 0 for X, 1 for Y.
+    @return [sorted tuple of numbers] from the smallest coordinate up.
+    """
+    groups, last = [], None
+    for number, value in sorted(((n, xy[index]) for n, xy in pads.items()), key=lambda e: e[1]):
+        if last is not None and value - last <= tolerance:
+            groups[-1].append(number)
+        else:
+            groups.append([number])
+        last = value
+    return [tuple(sorted(group)) for group in groups]
+
+
+def _same_axis_orders(first: dict, second: dict, tolerance: float) -> bool:
+    """Whether two readings put the pad numbers in the same order on BOTH axes (ties included).
+
+    The drawn holes check positions, never numbers: a recombination is
+    recommended only when the two readings it is made of agree on which
+    number comes after which along each axis, so that the numbering rests on
+    two readings and not on the one the axis was taken from.
+    """
+    return all(_axis_order(first, index, tolerance) == _axis_order(second, index, tolerance)
+               for index in (0, 1))
+
+
+def _axis_recombinations(sources: list, failing: dict, numbers: set) -> list:
+    """The layouts that take each axis from a reading the body does not contradict on that axis.
+
+    «Not contradicted» is all that is known: a chain reading's axis passes
+    when its edge-to-edge sum agrees with the body (`_chain_contradictions`);
+    the main answer's coordinates carry no chain the body could check, so
+    they are never known to fail. The drawn holes decide, never this list.
+
+    @param sources [(key, pads, spans)] of the readings, pads {number: (x, y)}.
+    @param failing {key: set of axes the body contradicts} of each reading.
+    @param numbers The pad numbers every layout must place.
+    @return [(pads, spans, axis_from)] for every combination of one reading
+        per axis that is NOT a reading itself: `axis_from` {"x": key, "y":
+        key}, `spans` the per-axis spans and edges of those readings.
+    @note Structural: the two axes of a dimensioned drawing are read from two
+        independent chains, so a reading wrong on Y can still be right on X.
+        No layout is accepted here: the caller asks the drawn holes.
+    """
+    usable = [(key, pads, spans or {}) for key, pads, spans in sources if set(pads) == numbers]
+    found = []
+    for x_key, x_pads, x_spans in usable:
+        if "x" in failing.get(x_key, set()):
+            continue
+        for y_key, y_pads, y_spans in usable:
+            if y_key == x_key or "y" in failing.get(y_key, set()):
+                continue
+            pads = {number: (x_pads[number][0], y_pads[number][1]) for number in numbers}
+            x_edges = (x_spans.get("edges") or {}).get("x")
+            y_edges = (y_spans.get("edges") or {}).get("y")
+            # Only the axes whose reading carries edge quotes: an absent axis
+            # is placed by the writer's other rules (`_write_chain_pads`).
+            edges = {axis: value for axis, value in (("x", x_edges), ("y", y_edges)) if value}
+            spans = {"x": x_spans.get("x"), "y": y_spans.get("y"), "edges": edges}
+            found.append((pads, spans, {"x": x_key, "y": y_key}))
+    return found
+
+
 def apply_dedicated_pads(data: dict, reading: Optional[dict], progress=None,
-                         check_layout=None, measure_layout=None, same_model: bool = False) -> None:
+                         check_layout=None, measure_layout=None, same_model: bool = False,
+                         axis_reread=None) -> None:
     """@brief Confront the dedicated pad reading with the explicit pads of the main answer.
 
     @param data Main answer with `package_geometry` pins, still in drawing
@@ -5310,6 +6822,25 @@ def apply_dedicated_pads(data: dict, reading: Optional[dict], progress=None,
         provider was not ready and fell back): two readings of one model
         are not independent, so their agreement is ONE reading and confirms
         nothing without a witness (review 2026-11-04, H6); the note says so.
+    @param axis_reread Optional callable(axes, problem) -> `read_axis_chain`
+        result: ONE targeted paid re-read of an axis whose chain the body
+        contradicts, when no axis-wise recombination is confirmed (night
+        real run 2026-11-14). None re-reads nothing.
+    @note Readings that place the pads ALIKE but declare different views
+        (model benchmark 2026-11-14): the geometry is one reading of the
+        drawing and the side is the doubt -- both declarations are withdrawn
+        and the side is asked (`_require_declared_view`, its own wording),
+        never a block without a question.
+    @note Readings that fail on DIFFERENT axes (night real run 2026-11-14,
+        a relay whose main answer had X wrong and whose dedicated reading
+        had Y wrong): the layout taking each axis from the reading whose
+        chain on it passes is offered as an option of the pad-layout
+        question -- recommended when the drawn holes confirm it, without
+        recommendation when they cannot check it -- never adopted by itself.
+        When none is confirmed and `axis_reread` is given, the failing axis
+        is read once more; and if nothing settles the pads, the question
+        offers the readings with what is wrong in each plus «keep blocked»:
+        never a block without a question.
     @note Rules, the same for every part: the two readings choose their own
         origins, so SIGNED OFFSETS between pads of the same number are
         compared, both in millimetres, within _reading_tolerance
@@ -5394,6 +6925,13 @@ def apply_dedicated_pads(data: dict, reading: Optional[dict], progress=None,
         # only when the dedicated reading ran, so «it saw no callout» and
         # «it did not run» stay apart.
         data["_dedicated_holes"] = dict(reading.get("holes") or {})
+        # Every terminal it transcribed, independent or not: a pad that
+        # declares NO terminal of its own takes one from here as a terminal
+        # READ ONCE (estimated), never as a confirmation (real case
+        # SRD-05VDC-SL-C, 2026-11-13: the main answer declared no terminal,
+        # the dedicated reading of the same model transcribed «2-Ø0.6»,
+        # «2-1*0.4», «1.1 x 0.3», and the pads were blocked).
+        data["_reading_leads"] = dict(reading.get("leads") or {})
         if not same_model:
             # The terminal sections it transcribed, the SECOND reading of a
             # pad's terminal (`_confirmed_lead_word`). One model reading
@@ -5455,6 +6993,21 @@ def apply_dedicated_pads(data: dict, reading: Optional[dict], progress=None,
     disagreements = _offset_disagreements(main, dedicated, common, tolerance)
     views_differ = (main_view in ("top", "bottom") and reading["view"] in ("top", "bottom")
                     and main_view != reading["view"])
+    if (views_differ and not disagreements and len(common) >= 2
+            and set(main) == set(dedicated)):
+        # The two readings place the pads alike on the page and only DECLARE
+        # different sides (model benchmark 2026-11-14: «nessuno scostamento»
+        # and a block without a question). The geometry is one reading of the
+        # drawing; the side is the doubt: both declarations are withdrawn,
+        # the readings go on as one view, and the side is asked
+        # (`_require_declared_view`), without a recommendation.
+        _withdraw_view(data, tx("le due letture concordano sulla disposizione dei pad ma "
+                                "dichiarano viste diverse ({main} e {dedicated})",
+                                main=main_view, dedicated=reading["view"]))
+        data["_views_withdrawn"] = True
+        main_view = data.get("contacts_view")
+        reading = dict(reading, view="unknown")
+        views_differ = False
     problems, exchanged = ([], False) if repeated else _chain_contradictions(geometry, reading,
                                                                               factor)
     holes = _HoleVerdicts(check_layout, _body_on_page(geometry, factor, exchanged),
@@ -5481,6 +7034,83 @@ def apply_dedicated_pads(data: dict, reading: Optional[dict], progress=None,
                               candidate):
         data["_body_axes_printed"] = True
     if problems:
+        failing = set(reading.get("_failing_axes") or ("x", "y"))
+        # The main answer's own side: its chain candidate when it has one
+        # (with the spans its chains checked), else its coordinates.
+        main_key, main_pads, main_spans = (
+            ("chains", candidate["pads"], candidate["spans"]) if candidate is not None
+            else ("main", main, {}))
+        # A chain candidate passed its own body check when it was built
+        # (`_place_pins_from_chains`); the main coordinates carry no chain the body
+        # could contradict, so neither side is known to fail on an axis.
+        main_failing = set()
+        at_hand = [main] + [pads for _key, pads, _spans, _centred in own] + [dedicated]
+        recombined = []
+        # Two DECLARED views that differ make one reading the other's mirror
+        # image on one axis: an axis of each would mix two faces (M1).
+        declared_view = next((view for view in (main_view, reading["view"])
+                              if view in ("top", "bottom")), None)
+        ordered = _same_axis_orders(main_pads, dedicated, tolerance)
+        if not repeated and not views_differ and set(main_pads) == set(dedicated):
+            for pads, spans, axis_from in _axis_recombinations(
+                    [(main_key, main_pads, main_spans), ("dedicated", dedicated,
+                                                         reading.get("spans") or {})],
+                    {main_key: main_failing, "dedicated": failing}, set(dedicated)):
+                if any(set(other) == set(pads) and not _offset_disagreements(
+                        other, pads, sorted(pads), tolerance) for other in at_hand):
+                    # The same layout as a reading at hand: nothing new.
+                    continue
+                verdict = holes(pads)
+                if _losing_verdict(verdict, pads, ("no_match",)):
+                    # Refuted on an observable page: not offered, as a
+                    # reading the holes refute (`_block_or_ask`).
+                    continue
+                recombined.append({
+                    "pads": pads, "spans": spans, "centred": _centred(spans, False),
+                    "main_frame": False, "moved": None, "pixels": False,
+                    "source": RECOMBINED_SOURCE, "view": declared_view,
+                    # Recommended only when the two readings order the pad
+                    # numbers alike on both axes (M5): the holes see no number.
+                    "recommendable": ordered,
+                    "label": tx("asse X da «{x_source}», asse Y da «{y_source}»: {holes}",
+                                x_source=_reading_source(axis_from["x"]),
+                                y_source=_reading_source(axis_from["y"]),
+                                holes=_hole_text(verdict, pads)) + ". " + tx(
+                        "I fori danno le posizioni, non i numeri dei pad ne' la vista "
+                        "dichiarata ({view}): controllarli sul disegno.",
+                        view=declared_view or "unknown")})
+        # A reading the drawn holes already confirm settles the pads by the
+        # usual rule (`_settle_by_holes`): no re-read is paid for then.
+        settled = any(_holes_confirm(holes(pads)) for pads in at_hand[:-1] if pads)
+        if not recombined and not settled and axis_reread is not None and not repeated \
+                and reading.get("raw_chains") is not None and not data.get("_axis_reread"):
+            # One targeted paid re-read of the failing axes (at most once per
+            # analysis), only when no recombination could be offered.
+            data["_axis_reread"] = True
+            axis = "".join(sorted(failing))
+            problem = "; ".join(problems[:3])
+            if progress:
+                progress(tx("Catena di quote lungo {axis} contraddetta dal disegno ({problem}): una "
+                            "sola rilettura a pagamento di quell'asse.", axis="/".join(axis.upper()),
+                            problem=problem))
+            fresh = axis_reread(axis, _axis_problem_text(geometry, reading, failing, factor))
+            if fresh and fresh.get("factor") == reading.get("raw_factor"):
+                chains = [chain for chain in reading["raw_chains"]
+                          if str(chain.get("axis")).lower() not in failing] + list(fresh["chains"])
+                midpoints = [point for point in reading.get("raw_midpoints") or ()
+                             if str(point.get("axis")).lower() not in failing] + list(
+                                 fresh["midpoints"])
+                solved = pads_from_chains(chains, fresh["factor"], midpoints,
+                                          reading.get("pad_sizes"))
+                retry = dict(reading, **solved, raw_chains=chains, raw_midpoints=midpoints)
+                retry.pop("_failing_axes", None)
+                apply_dedicated_pads(data, retry, progress, check_layout=check_layout,
+                                     measure_layout=measure_layout, same_model=same_model,
+                                     axis_reread=None)
+                return
+            if progress:
+                progress(tx("Rilettura dell'asse {axis}: nessuna catena utilizzabile.",
+                            axis="/".join(axis.upper())))
         # The drawing contradicts the transcribed chains: at least one quote
         # was read or attributed wrongly, so the dedicated reading is out;
         # only the drawn holes can still confirm the main answer. Its hole
@@ -5489,8 +7119,15 @@ def apply_dedicated_pads(data: dict, reading: Optional[dict], progress=None,
         why = tx("le quote del disegno non tornano: {problems}. Lettura per catene di quote "
                  "({dedicated_view}): {dedicated}", problems="; ".join(problems[:6]),
                  dedicated_view=reading["view"], dedicated=_pad_summary(dedicated) or tx("nessuno"))
+        # A recombination is offered beside the readings, never adopted:
+        # recommended only when the drawn holes confirm it
+        # (`_flag_sole_confirmed`). Without one, the last resort offers the
+        # readings with their faults instead of the hard block.
         _unconfirmed(data, pins, [("main", main, {}, False)] + own, holes, factor,
-                     progress, why + _unread_main_remark(pins), "")
+                     progress, why + _unread_main_remark(pins), "", extras=recombined,
+                     last_resort=[("dedicated", dedicated, reading.get("spans") or {},
+                                   _centred(reading.get("spans") or {}, False),
+                                   "; ".join(problems[:3]))])
         return
     remarks = []
     if repeated:
@@ -5591,11 +7228,16 @@ def apply_dedicated_pads(data: dict, reading: Optional[dict], progress=None,
                 # chain reading (the program's sums, body placed by its edge
                 # quotes); without a witness it stays unconfirmed.
                 spans = reading.get("spans") or {}
-                _unconfirmed(data, pins, [("dedicated", dedicated, spans,
-                                           _centred(spans, exchanged))], holes, factor,
-                             progress, tx(
+                agreed_readings = [("dedicated", dedicated, spans, _centred(spans, exchanged))]
+                # A layout the drawn holes MEASURE (one pad moved onto its
+                # hole at the verified scale) is offered beside it, when the
+                # measurer can build one (`_hole_backed_layouts`).
+                measured = _hole_backed_layouts(agreed_readings, holes, set(dedicated),
+                                                {"singled": []})
+                _unconfirmed(data, pins, agreed_readings, holes, factor, progress, tx(
                     "le due letture concordano ma vengono dallo stesso modello: valgono come una "
-                    "sola lettura, senza conferma indipendente"), remark)
+                    "sola lettura, senza conferma indipendente"), remark, agreed=True,
+                    extras=measured)
                 return
             verdict = holes(main)
             contradiction = _agreement_contradicted(main, holes)
@@ -5669,11 +7311,88 @@ def apply_dedicated_pads(data: dict, reading: Optional[dict], progress=None,
                   + " " + tx("Nessuna delle due e' stata scelta."), progress, remark, offer=offer)
 
 
-def _unconfirmed(data, pins, readings, holes, factor, progress, why, remark, offer=None) -> None:
+def _keep_blocked(data: dict, message: str, progress) -> None:
+    """The pads stay blocked because the user chose «keep blocked» (a saved answer).
+
+    Not `_block`: that one says no question could close the case, false here.
+    """
+    data["_pin_map_conflict"] = message + " " + tx("Lasciate bloccate per scelta dell'utente.")
+    data["_numbering_note"] = data["_pin_map_conflict"]
+    if progress:
+        progress(data["_pin_map_conflict"])
+
+
+def _ask_last_resort(data, pins, readings, holes, factor, message, progress, last_resort,
+                     numbers) -> bool:
+    """The pad-layout question of the last resort: every complete reading with its fault, plus «keep blocked».
+
+    Replaces the hard block «Nessuna domanda puo' chiudere il caso» (night
+    real run 2026-11-14): the readings the drawn holes refute and those whose
+    chains the body contradicts are offered, each with what is wrong, and
+    nothing is recommended; «keep blocked» leaves the pads to be typed by
+    hand. A saved answer is applied at once. False when no complete reading
+    exists (the caller blocks).
+    """
+    tolerance = _reading_tolerance(factor)
+    entries, seen = [], []
+    for key, pads, spans, centred in readings:
+        # Two pads on one point fail the pad rules whatever the answer (L1).
+        if set(pads) == numbers and pads and not _coincident_pads(pads, tolerance):
+            entries.append((key, pads, spans or {}, bool(centred),
+                            _hole_text(holes(pads), pads)))
+    for key, pads, spans, centred, fault in last_resort:
+        if set(pads) == numbers and pads and not _coincident_pads(pads, tolerance):
+            entries.append((key, pads, spans or {}, bool(centred), fault))
+    options, candidates = [], {}
+    for key, pads, spans, centred, fault in entries:
+        if any(not _offset_disagreements(other, pads, sorted(numbers), tolerance) for other in seen):
+            continue
+        seen.append(pads)
+        payload = _candidate_payload(data, [key], pads, spans, centred, holes.views.get(key),
+                                     factor)
+        value = f"{key}:{_layout_digest(pads)}" + _placement_mark(payload, tolerance)
+        options.append({"label": tx("{source} (da verificare: {fault}): {pads}",
+                                    source=_reading_source(key), fault=fault,
+                                    pads=_pad_summary(pads)), "value": value})
+        candidates[value] = payload
+    if not options:
+        return False
+    block_value = f"{LAYOUT_BLOCK_KIND}:blocked"
+    options.append({"label": tx("Lascia bloccato: inserisco le posizioni a mano in «Piazzole del "
+                                "componente THT»"), "value": block_value})
+    candidates[block_value] = {"kind": LAYOUT_BLOCK_KIND}
+    text = tx("{message} Nessuna lettura e' confermata: quale disposizione corrisponde al disegno, "
+              "oppure lasciarla bloccata?", message=message)
+    chosen = _ask(data, "pad_layout", text, options, _question_evidence(data), candidates)
+    if chosen is None:
+        data.pop("_pin_map_conflict", None)
+        data["package_geometry"]["needs_review"] = True
+        data["_numbering_note"] = message
+        if progress:
+            progress(tx("Posizioni dei pad: nessuna lettura confermata, domanda all'utente fra le "
+                        "letture (con i loro errori) o il blocco."))
+        return True
+    if candidates[chosen].get("kind") == LAYOUT_BLOCK_KIND:
+        _keep_blocked(data, message, progress)
+        return True
+    _write_candidate(data, pins, candidates[chosen], factor)
+    _settle(data, tx("Posizioni dei pad scelte dall'utente fra le letture non confermate ({source}); "
+                     "da verificare sul disegno.",
+                     source=_reading_source(candidates[chosen]["source"])), progress)
+    return True
+
+
+def _unconfirmed(data, pins, readings, holes, factor, progress, why, remark, offer=None,
+                 agreed: bool = False, extras=(), last_resort=None) -> None:
     """Positions no second reading confirms: the drawn holes decide, the user is asked, or the generation is blocked.
 
     `offer` is the dedicated reading as a whole-layout proposal, handed to
     `_block_or_ask` (`_offer_pad_set_change`); None offers nothing.
+    `agreed` (readings that agree but are not independent) lets ONE layout
+    be asked as a recommended confirmation (`_block_or_ask`); `extras` are
+    layouts measured on the drawn holes offered beside it; `last_resort`
+    readings excluded elsewhere, offered with their fault rather than a
+    block without a question (`_block_or_ask`).
     """
     if _settle_by_holes(data, pins, readings, holes, factor, progress, why, remark):
         return
@@ -5682,7 +7401,7 @@ def _unconfirmed(data, pins, readings, holes, factor, progress, why, remark, off
                   own + tx("Posizioni dei pad NON confermate ({why}). Controllo dei fori "
                            "disegnati: {verdicts}.", why=why,
                            verdicts=_hole_verdicts(readings, holes)), progress, remark,
-                  offer=offer)
+                  offer=offer, agreed=agreed, extras=extras, last_resort=last_resort)
 
 
 def _independently_named_pads(reading: dict) -> set:
@@ -6066,7 +7785,8 @@ def _offer_pad_set_change(data: dict, pins: list, offer: dict, holes, factor: fl
         # Printed holes the read pads could not be matched to: the part's one
         # terminal must not stand in for them silently -- the holes are asked.
         payload["drills_uniform"] = False
-    value = "dedicated:" + _layout_digest(pads)
+    value = "dedicated:" + _layout_digest(pads) + _placement_mark(payload,
+                                                                  _reading_tolerance(factor))
     # The numbers that vanish (pinout and symbol entries go with them).
     vanishing = sorted(numbers - set(pads), key=_pad_number_key)
     changes = []
@@ -6112,8 +7832,9 @@ def _offer_pad_set_change(data: dict, pins: list, offer: dict, holes, factor: fl
         # A removal question -- pads removed, or positions lost under
         # convention (third re-audit, item 3) -- always lets the user keep
         # what the main answer read: answering never forces a removal.
-        keep_value = "main:" + _layout_digest(main)
         keep = _candidate_payload(data, ["main"], main, {}, False, data.get("contacts_view"), factor)
+        keep_value = "main:" + _layout_digest(main) + _placement_mark(keep,
+                                                                      _reading_tolerance(factor))
         keep["kind"] = _KEEP_MAIN
         options.append({"label": tx("Tieni la disposizione della risposta principale ({count} pad, "
                                     "fori disegnati: {holes}): {pads}", count=len(main),
@@ -6264,7 +7985,7 @@ def _change_pad_set(geometry: dict, payload: dict, part_lead=None, notes: Option
         "unfounded", "withheld", "part_lead", "lead_withheld", "slot_unoriented", "loose_blade",
         "land_capped", "land_model", "slot_turned", "thin_ring", "lead_contradicted",
         "lead_lifted", "widened", "part_narrow", "part_protected", "part_lifted", "part_widened",
-        "zero_hole", "lead_once", "lead_disagree")}
+        "zero_hole", "lead_once", "lead_disagree", "hole_once")}
     derived: dict = {}
     for number in added:
         if number in present:
@@ -6350,15 +8071,252 @@ def _drop_pinout_pads(owner, removed, renumbered: bool = False) -> None:
 #: asks every such question before it writes a footprint.
 PAD_HOLE_KIND = "pad_hole"
 
+#: `kind` of the payload of the question «is this printed diameter the hole
+#: or the terminal?» (`_ask_hole_or_terminal`), in the "pad_layout" field too.
+HOLE_OR_TERMINAL_KIND = "hole_or_terminal"
+
 
 def _pads_offered_for_removal(data: dict) -> set:
     """The pad numbers an open whole-layout question proposes to remove (`_offer_pad_set_change`)."""
     removed = set()
     for options in (data.get("_candidates") or {}).values():
         for payload in (options or {}).values() if isinstance(options, dict) else ():
-            if isinstance(payload, dict) and payload.get("kind") not in (PAD_HOLE_KIND, _KEEP_MAIN):
+            if isinstance(payload, dict) and payload.get("kind") not in (
+                    PAD_HOLE_KIND, _KEEP_MAIN, HOLE_OR_TERMINAL_KIND):
                 removed.update(_pad_number_text(n) for n in payload.get("remove") or ())
     return removed
+
+
+def _same_callout(pin: dict, drill: float, lead_diameter: float,
+                  unit_cap: float = CHAIN_QUOTE_ROUNDING_MM[1.0]) -> bool:
+    """Whether a read hole and a round terminal are one printed value read twice (H1).
+
+    `_one_printed_value` with the margin of the coarser of the two KNOWN
+    roundings (the pin's `_callout_roundings`: the hole's and the terminal's
+    transcriptions); a rounding that is not known counts as the drawing
+    unit's usual precision `unit_cap` (CHAIN_QUOTE_ROUNDING_MM of its unit:
+    0.05 mm, 0.127 mm for inches). Final night5 audit, M1: a floor of 0.05
+    mm made «Ø0.80» and «Ø0.85» -- two distinct values -- «one value read
+    twice». A hole smaller than a DIFFERENT terminal is a real
+    contradiction, not this.
+    """
+    roundings = pin.get("_callout_roundings") or (0.0, 0.0)
+    margin = max(float(roundings[0] or 0.0) or unit_cap, float(roundings[1] or 0.0) or unit_cap)
+    return _one_printed_value(drill, lead_diameter, margin)
+
+
+def _ask_hole_or_terminal(data: dict, found: dict, derived: dict, notes: list) -> None:
+    """Ask whether a printed diameter is the hole or the terminal, when a read hole does not take its terminal.
+
+    Night4 real run (2026-11-14): the dedicated reading filed a callout
+    «Ø0.8*4» as the HOLE (the night before, the same drawing's callout was
+    filed as the TERMINAL) while the main answer read 0.8 as the terminal:
+    two readings of possibly the same printed value, and the program only
+    noted that the terminal does not pass the hole. Per printed diameter
+    (the pads of `found["hole_or_terminal"]` grouped by it), one question
+    in the "pad_layout" field -- the window asks it before writing a
+    footprint -- with two options, none recommended:
+    - «foro»: the printed value is the hole: kept, provenance "read";
+    - «terminale»: it is the terminal: the hole derived from it as usual
+      (`_lift_pad_hole`, estimated) with its land.
+    The key holds the printed value and the pads, so a saved answer applies
+    at once to the same callout. Until the answer the hole stays, marked
+    estimated, and the question blocks the footprint.
+    """
+    entries = found.get("hole_or_terminal") or []
+    groups = {}
+    for pin, drill, lead, lifted in entries:
+        # Grouped by the hole AND the terminal read (L1).
+        groups.setdefault((round(float(drill), 4), round(float(lead), 4)), []).append((pin, lifted))
+    for (drill, lead), members in sorted(groups.items()):
+        pads = sorted((_pad_number_text(pin.get("number")) or "?" for pin, _l in members),
+                      key=_pad_number_key)
+        group = ",".join(pads)
+        # The conflict note this question settles: said now, removed by the
+        # answer (`apply_answers`, "supersedes"; night5 D-b).
+        conflict = tx("ATTENZIONE pad {numbers}: il terminale dichiarato non passa nel foro letto "
+                      "dal disegno. Foro non modificato: terminale o foro letti male, da "
+                      "verificare sul disegno.", numbers=", ".join(pads))
+        # What the «terminal» answer writes, computed on copies (mm).
+        changes = {}
+        for pin, lifted in members:
+            copy_pin = copy.deepcopy(pin)
+            scratch = {id(copy_pin): derived[id(pin)]} if id(pin) in derived else {}
+            _lift_pad_hole(copy_pin, lifted, scratch)
+            changes[_pad_number_text(pin.get("number")) or "?"] = {
+                key: copy_pin.get(key) for key in ("drill_mm", "pad_length_mm", "pad_width_mm",
+                                                   "shape", "sources")}
+        hole_value = f"{HOLE_OR_TERMINAL_KIND}:{group}@{drill:g}/{lead:g}=hole"
+        lead_value = f"{HOLE_OR_TERMINAL_KIND}:{group}@{drill:g}/{lead:g}=terminal"
+        options = [{"label": tx("Il foro: Ø{drill:.2f} mm e' il foro dei pad {pads}",
+                                drill=drill, pads=", ".join(pads)), "value": hole_value},
+                   {"label": tx("Il terminale: il foro dei pad {pads} si ricava dal terminale "
+                                "(Ø{hole:.2f} mm, stimato)", pads=", ".join(pads),
+                                hole=max(change["drill_mm"] for change in changes.values())),
+                    "value": lead_value}]
+        candidates = {hole_value: {"kind": HOLE_OR_TERMINAL_KIND, "pads": pads, "choice": "hole",
+                                   "supersedes": [conflict]},
+                      lead_value: {"kind": HOLE_OR_TERMINAL_KIND, "pads": pads,
+                                   "choice": "terminal", "changes": changes,
+                                   "supersedes": [conflict]}}
+        text = (tx("Pad {pads}: Ø{drill:.2f} mm del disegno e' il foro o il terminale? Letto come "
+                   "foro non lascia passare il terminale letto per gli stessi pad: le due letture "
+                   "possono riguardare la stessa quota.", pads=", ".join(pads), drill=drill)
+                if abs(drill - lead) < 1e-9 else
+                tx("Pad {pads}: Ø{drill:.2f} mm letto come foro e Ø{lead:.2f} mm letto come "
+                   "terminale sono la stessa quota letta due volte? E' il foro o il terminale?",
+                   pads=", ".join(pads), drill=drill, lead=lead))
+        # An answer saved under the first key (grouped by the hole only,
+        # night4) is about the same printed value: it still applies.
+        legacy = {f"{HOLE_OR_TERMINAL_KIND}:{group}@{drill:g}={choice}": value
+                  for choice, value in (("hole", hole_value), ("terminal", lead_value))}
+        answers = data.get("_answers") if isinstance(data.get("_answers"), dict) else {}
+        chosen = legacy.get(str(answers.get(question_key("pad_layout", list(legacy)))))
+        if chosen is None:
+            chosen = _ask(data, "pad_layout", text, options, _question_evidence(data), candidates)
+        if chosen is None:
+            notes.append(conflict)
+            continue
+        if candidates[chosen]["choice"] == "hole":
+            for pin, _lifted in members:
+                sources = dict(pin.get("sources") or {})
+                sources["drill_mm"] = "read"
+                # The terminal read is the doubtful value now (M2).
+                if isinstance(pin.get("lead"), dict):
+                    sources["lead"] = "contradicted"
+                pin["sources"] = sources
+            notes.append(tx("Pad {pads}: Ø{drill:.2f} mm e' il foro, scelto dall'utente; il "
+                            "terminale letto e' da verificare sul disegno.",
+                            pads=", ".join(pads), drill=drill))
+            continue
+        for pin, lifted in members:
+            number = _pad_number_text(pin.get("number")) or "?"
+            found["lead_lifted"].append(number)
+            if _lift_pad_hole(pin, lifted, derived):
+                found["widened"].append(number)
+
+
+def _adopted_reading_pad(lead, lead_rounding: float, adopted_lead, adopted_hole):
+    """What the reading whose layout was adopted decides for one pad: (terminal, printed hole).
+
+    The ONE decision of both paths (final night5 audit, M2): `_resolve_one_pad`
+    during the analysis and `_apply_reading_leads` when the layout is chosen
+    later.
+    - terminal: the adopted reading's when it transcribed one that is not
+      the pad's own (`_same_lead`, the same rounding rule), else None (keep);
+    - hole: the adopted reading's PRINTED hole as (drill, slot side or
+      None), else None. A printed hole is never replaced by one estimated
+      from a terminal.
+
+    @param lead The pad's terminal (mm), or None.
+    @param lead_rounding Rounding of its transcription, 0.0 when unknown.
+    @param adopted_lead The adopted reading's entry for the pad's terminal
+        ({"lead", "rounding_mm"}), or None.
+    @param adopted_hole The adopted reading's printed hole of the pad
+        ({"drill_mm", "drill_length_mm", "rounding_mm"}), or None.
+    """
+    terminal = None
+    if (isinstance(lead, dict) and isinstance(adopted_lead, dict)
+            and isinstance(adopted_lead.get("lead"), dict)
+            and not _same_lead(lead, lead_rounding, adopted_lead)):
+        terminal = dict(adopted_lead["lead"])
+    hole = None
+    if isinstance(adopted_hole, dict) and adopted_hole.get("drill_mm") is not None:
+        hole = (adopted_hole["drill_mm"], adopted_hole.get("drill_length_mm"))
+    return terminal, hole
+
+
+def _apply_reading_leads(geometry: dict, leads: dict, notes: list, holes=None) -> None:
+    """Give the pads of a chosen layout the terminals and printed holes of the reading it comes from (D-a).
+
+    Per pad, `_adopted_reading_pad` decides (the rule of the analysis too):
+    a different terminal is taken, "estimated" (two readings disagree); the
+    reading's PRINTED hole is taken when it differs from the pad's (round,
+    or a slot oriented to the pad), "estimated" for the same reason; without
+    one, a hole the pad's own reading printed ("read") stays, and only a
+    hole that was not printed is derived from the new terminal
+    (`_lift_pad_hole`). One note lists the changes.
+
+    @param leads {pad: terminal entry {"lead", "rounding_mm"}, or a bare
+        terminal mapping} of the adopted reading, mm.
+    @param holes {pad: printed hole {"drill_mm", "drill_length_mm"}} of the
+        adopted reading, mm, or None.
+    """
+    changed = []
+    for pin in geometry.get("pins") or ():
+        number = _pad_number_text(pin.get("number")) if isinstance(pin, dict) else ""
+        entry = leads.get(number)
+        if isinstance(entry, dict) and "lead" not in entry:
+            entry = {"lead": entry}
+        old = pin.get("lead") if isinstance(pin, dict) else None
+        terminal, hole = _adopted_reading_pad(old, 0.0, entry, _dedicated_hole(holes, number))
+        if terminal is None and hole is None:
+            continue
+        sources = dict(pin.get("sources") or {})
+        if terminal is not None:
+            pin["lead"] = terminal
+            sources["lead"] = "estimated"
+            changed.append(tx("pad {pad}: {dedicated} (risposta principale {main})", pad=number,
+                              dedicated=_lead_text_mm(terminal), main=_lead_text_mm(old)))
+        pin["sources"] = sources
+        if pin.get("pad_type") != "thru_hole":
+            continue
+        current = _optional_number(pin.get("drill_mm"), positive=True)
+        if hole is not None:
+            first, second = hole
+            if current is None or not _one_printed_value(current, first, CHAIN_QUOTE_ROUNDING_MM[1.0]):
+                placed = ((first, None) if second is None or abs(second - first)
+                          <= _PRINTED_HOLE_TOLERANCE_MM else _slot_along_pad(pin, first, second))
+                if placed is not None:
+                    pin["drill_mm"], length = placed
+                    if length is None:
+                        pin.pop("drill_length_mm", None)
+                    else:
+                        pin["drill_length_mm"] = length
+                    sources["drill_mm"] = "estimated"
+                    pin["sources"] = sources
+                    changed.append(tx("pad {pad}: foro {hole} stampato dalla lettura adottata",
+                                      pad=number, hole=_hole_text_mm(first, second)))
+        elif terminal is not None and sources.get("drill_mm") != "read":
+            _lift_pad_hole(pin, estimated_round_pad(terminal).drill_mm, {})
+    if changed:
+        notes.append(tx("Terminali presi dalla lettura dedicata, di cui e' stata adottata la "
+                        "disposizione: la risposta principale assegnava ai pad terminali diversi "
+                        "({details}). Valori STIMATI da verificare sul disegno.",
+                        details="; ".join(changed)))
+
+
+def _apply_hole_or_terminal_choice(geometry: dict, payload: dict, notes: list) -> Optional[str]:
+    """Apply a fresh «hole or terminal» answer to a result geometry (mm, a copy); the clash, or None."""
+    pads = set(payload.get("pads") or ())
+    for pin in geometry.get("pins") or ():
+        number = _pad_number_text(pin.get("number")) if isinstance(pin, dict) else ""
+        if number not in pads:
+            continue
+        if payload.get("choice") == "hole":
+            sources = dict(pin.get("sources") or {})
+            sources["drill_mm"] = "read"
+            # The terminal read is the doubtful value now (M2).
+            if isinstance(pin.get("lead"), dict):
+                sources["lead"] = "contradicted"
+            pin["sources"] = sources
+            continue
+        change = (payload.get("changes") or {}).get(number) or {}
+        for key, value in change.items():
+            if value is None:
+                pin.pop(key, None)
+            else:
+                pin[key] = copy.deepcopy(value)
+        pin.pop("drill_length_mm", None)
+    if payload.get("choice") == "hole":
+        notes.append(tx("Pad {pads}: il diametro stampato e' il foro, scelto dall'utente; il "
+                        "terminale letto e' da verificare sul disegno.",
+                        pads=", ".join(sorted(pads, key=_pad_number_key))))
+        return None
+    notes.append(tx("Pad {pads}: il diametro stampato e' il terminale, scelto dall'utente: foro e "
+                    "piazzola ricavati dal terminale, valori STIMATI da verificare.",
+                    pads=", ".join(sorted(pads, key=_pad_number_key))))
+    return _cross_pad_problem(geometry)
 
 
 def _apply_pad_hole_choice(geometry: dict, payload: dict, notes: list) -> list:
@@ -6901,6 +8859,12 @@ def _mirror_equivalent(pads: list, tolerance: float) -> bool:
     return False
 
 
+def _shape_suffix(pads, tolerance: float) -> str:
+    """«~shape:<sig>» for a "contacts_view" key, or "" when the shape is not stable (`_view_shape`)."""
+    shape = _view_shape(pads, tolerance)
+    return _SHAPE_MARK + shape if shape else ""
+
+
 def _require_declared_view(data: dict, progress=None) -> None:
     """Ask the side of a single part whose pad view is still unknown when a wrong guess would mirror it.
 
@@ -6914,11 +8878,26 @@ def _require_declared_view(data: dict, progress=None) -> None:
     sees in a second was a hard block) -- a saved answer is applied at once
     -- unless the numbered layout is mirror-equivalent (_mirror_equivalent),
     in which case both views give the same footprint and a note says so.
-    Until the answer the pads stay as read, the view unknown; an existing
-    pad block keeps its own reason and the question is recorded beside it.
+    Until the answer the pads stay as read, the view unknown.
+
+    The side waits for the pad layout only while a "pad_layout" question
+    offers layouts (night real run 2026-11-14: the side of a layout nobody
+    accepted was asked first). A side saved for the provisional layout
+    still applies. Otherwise the side is settled per candidate, in the
+    drawing frame and with the saved answers (`_candidate_view_outcome`):
+    a saved side becomes the candidate's view, a question goes with it as
+    "view_question" (the «keep blocked» option carries the provisional
+    layout's), and `apply_answers` asks it after the choice. With a hard
+    block and no layout question the side is asked now, as before.
     """
     if data.get("contacts_view") in ("top", "bottom"):
         return
+    layout_open = [question["key"] for question in data.get("_questions") or ()
+                   if question.get("field") == "pad_layout"
+                   and any(isinstance(p, dict) and ("pins" in p or p.get("kind") == LAYOUT_BLOCK_KIND)
+                           for p in ((data.get("_candidates") or {}).get(question["key"]) or {})
+                           .values())]
+    deferred = bool(layout_open)
     geometry = data.get("package_geometry")
     pins = geometry.get("pins") if isinstance(geometry, dict) else None
     if not isinstance(pins, (list, tuple)):
@@ -6941,6 +8920,10 @@ def _require_declared_view(data: dict, progress=None) -> None:
             "sua immagine speculare, il footprint e' lo stesso da sopra e da sotto.")).strip()
         return
     chosen = _ask(data, "contacts_view", tx(
+        "Le due letture dichiarano viste diverse (dall'alto e dal basso) per la stessa "
+        "disposizione dei pad, che non e' simmetrica: se il disegno e' una vista dal basso il "
+        "footprint risulta SPECCHIATO. Da quale lato e' disegnata la disposizione dei pad?")
+        if data.get("_views_withdrawn") else tx(
         "Il documento non dice se i pad sono visti dall'alto o dal basso e la loro disposizione "
         "numerata non e' simmetrica: se il disegno e' una vista dal basso il footprint risulta "
         "SPECCHIATO. Da quale lato e' disegnata la disposizione dei pad?"),
@@ -6953,16 +8936,70 @@ def _require_declared_view(data: dict, progress=None) -> None:
         _question_evidence(data), key_values=[number for number, _xy in pads]
         + [_layout_digest(dict(pads))],
         # The digests of the layout's two mirror images, so that two saved
-        # answers for mirror-image readings can be told consistent (E6).
-        key_suffix=_mirror_suffix(dict(pads)))
+        # answers for mirror-image readings can be told consistent (E6); then
+        # the layout's shape, so that a re-reading off by a few tenths still
+        # finds the saved side (real run 2026-11-13, `_view_shape`).
+        key_suffix=_mirror_suffix(dict(pads)) + _shape_suffix(
+            pads, _reading_tolerance(factor)))
     if chosen is not None:
         _adopt_view(data, chosen, tx("scelta dell'utente"))
+        return
+    if deferred:
+        # Withdrawn: the layout is not settled; each candidate carries the
+        # side of ITS layout, asked after the pad-layout answer.
+        provisional = next((question for question in data.get("_questions") or ()
+                            if question.get("field") == "contacts_view"), None)
+        data["_questions"] = [question for question in data.get("_questions") or ()
+                              if question.get("field") != "contacts_view"]
+        for key in layout_open:
+            for payload in (data.get("_candidates") or {}).get(key, {}).values():
+                if not isinstance(payload, dict):
+                    continue
+                if payload.get("kind") == LAYOUT_BLOCK_KIND:
+                    if provisional is not None:
+                        payload["view_question"] = dict(provisional)
+                elif "pins" in payload and payload.get("view") not in ("top", "bottom"):
+                    _candidate_view_outcome(data, payload)
+        message = tx("Vista dei terminali non dichiarata: il lato si decide dopo la scelta della "
+                     "disposizione dei pad (dalla vista della disposizione scelta o con una "
+                     "domanda).")
+        data["notes"] = (str(data.get("notes") or "") + "\n" + message).strip()
+        if progress:
+            progress(message)
         return
     message = tx("Vista dei terminali non dichiarata e disposizione non simmetrica: il lato e' "
                  "chiesto all'utente; fino alla risposta i pad restano come letti.")
     data["notes"] = (str(data.get("notes") or "") + "\n" + message).strip()
     if progress:
         progress(message)
+
+
+def _candidate_view_outcome(data: dict, payload: dict) -> None:
+    """Settle the side of ONE pad-layout candidate as `_require_declared_view` would for its layout.
+
+    The candidate's pins are in mm in the drawing frame, the frame of the
+    extraction's own side questions, so the key is the one a saved side
+    answer was stored under; the saved answers (data["_answers"]) apply. A
+    saved side becomes the payload's "view" (with a note); a side to ask
+    becomes its "view_question"; a mirror-equivalent layout only a note.
+    """
+    scratch = {"contacts_view": None, "drawing_unit": "mm", "notes": "",
+               "package_geometry": {"pins": [dict(pin) for pin in payload.get("pins") or ()]},
+               "_answers": data.get("_answers"),
+               "_question_documents": data.get("_question_documents")}
+    _require_declared_view(scratch)
+    notes = [line for line in scratch["notes"].splitlines() if line.strip()]
+    if scratch.get("contacts_view") in ("top", "bottom"):
+        payload["view"] = scratch["contacts_view"]
+        notes.append(tx("Vista dei terminali ({view}) scelta dall'utente.",
+                        view=scratch["contacts_view"]))
+    questions = [q for q in scratch.get("_questions") or () if q.get("field") == "contacts_view"]
+    if questions:
+        payload["view_question"] = questions[0]
+        # The note «the side is asked» belongs to the moment it is asked.
+        notes = []
+    if notes:
+        payload["notes"] = list(payload.get("notes") or ()) + notes
 
 
 def _layout_checker(documents, library=None, view_of=None, tolerance_mm=None):
@@ -7091,11 +9128,13 @@ def _pad_reading_model(pad_model, main_model: str, component_family, progress,
     chosen = (pad_model or "").strip()
     if component_family not in SINGLE_COMPONENT_FAMILIES or not chosen or chosen == main_model:
         return main_model
-    from .providers import PROVIDER_DEEPSEEK, ProviderError, ensure_providers_ready, provider_of
-    from .openrouter import deepseek_declared_text_only
-    if provider_of(chosen) == PROVIDER_DEEPSEEK and deepseek_declared_text_only(chosen):
-        # The reading is made on drawing images: a text-only reader would be
-        # refused at the call and the generation blocked for nothing.
+    from .providers import ProviderError, ensure_providers_ready, provider_of
+    from .openrouter import IMAGES_NOT_READ, image_capability
+    if image_capability(chosen) == IMAGES_NOT_READ:
+        # The reading is made on drawing images: a reader DECLARED text-only
+        # (either provider, the rule of `prompt_models.usable_model`) would be
+        # refused at the call and the generation blocked for nothing; an
+        # undeclared capability never refuses it.
         if progress:
             progress(tx("Modello della lettura delle posizioni dei pad {pad_model} non "
                         "utilizzabile ({exc}): legge il modello principale {model}.",
@@ -7212,6 +9251,10 @@ def _chain_contradictions(geometry: dict, reading: dict, factor: float) -> tuple
     if (kind == BODY_QUOTE_KINDS[0] and failing == ["x", "y"]
             and not off("x", sizes["y"]) and not off("y", sizes["x"])):
         return problems, True
+    # Which axes the body contradicts, for the axis-wise recombination
+    # (`_axis_recombinations`); a self-contradiction of the chains names no
+    # axis and counts as both.
+    reading["_failing_axes"] = (["x", "y"] if reading.get("problems") else list(failing))
     for axis in failing:
         problems.append(tx(
             "lungo {axis} le quote da bordo a bordo sommano {span:.2f} mm, ma il corpo "
@@ -7409,7 +9452,8 @@ DEFAULT_SINGLE_SYSTEM_PROMPT = (
     "text_color_hex and edge_fillets. Fill in pinout with the function of every terminal if the "
     "document gives it in a table or shows it in an electrical schematic next to the pinout "
     "(coil, common, NC, NO, anode, cathode...): a function derived from the symbol must be written and "
-    "flagged in notes as derived. When the document shows the electrical role of a "
+    "flagged in notes as derived; for a drawn switch contact also declare in pinout[].symbol_contact "
+    "what the drawing shows for each of its terminals. When the document shows the electrical role of a "
     "terminal, declare it in pinout[].function (coil, common, nc, no; other for the rest) and, "
     "if the relay has several contacts, in pinout[].contact the printed label of the contact: the "
     "program draws coil and contacts from those roles, never from the name of the component. Write in "
@@ -7488,6 +9532,10 @@ SUPERSEDED_SINGLE_PROMPT_DIGESTS = frozenset({
     # must be self-consistent, else pads with pad_chains, and a marking is
     # never a terminal.
     "bf708c59329d60d496b67f1a0c82d7651c9c59a3c0c3ba658e00edbd7dc4aca5",
+    # 2026-11-14 (night real runs): NC and NO of a drawn relay contact were
+    # swapped between two readings; now the observation symbol_contact is
+    # asked beside the function, and the program derives the role from it.
+    "c95f0dbc652bb3353dad27ad92c3a17e867905ab9f52f0da0634fc9299bb0abd",
 })
 #: Digests of former pin-numbering defaults.
 SUPERSEDED_NUMBERING_PROMPT_DIGESTS = frozenset({
@@ -7718,7 +9766,7 @@ def single_answer_to_data(answer: dict) -> dict:
         # The terminal, the printed hole callout, a printed slot side and the
         # pad's own provenance travel raw (drawing units) to the program's
         # rule, `_resolve_pad_terminals`, which converts and judges them.
-        for key in ("lead", "hole_callout", "drill_length_mm", "value_sources"):
+        for key in ("lead", "hole_callout", "drill_length_mm", "value_sources", "lead_fit"):
             if entry.get(key) is not None:
                 pin[key] = entry[key]
         pins.append(pin)
@@ -7983,6 +10031,29 @@ def _place_pins_from_chains(data: dict, chains, midpoints=None) -> None:
     data["_numbering_note"] = data["_pin_map_conflict"]
 
 
+def _deferred_view_question(result, payload: dict, answers: dict, remaining: list,
+                            notes: list) -> None:
+    """Open the side question a pad-layout candidate carries, or apply its answer when given.
+
+    `payload["view_question"]` was built on that candidate's layout in the
+    drawing frame (`_candidate_view_outcome`); an answer to its key in
+    `answers` sets `source_view` at once, otherwise the question is added to
+    the open ones (once).
+    """
+    question = payload.get("view_question")
+    if not isinstance(question, dict) or not question.get("key"):
+        return
+    allowed = {str(option["value"]): option["value"] for option in question.get("options") or ()}
+    geometry = result.package_geometry if isinstance(result.package_geometry, dict) else None
+    answer = answers.get(question["key"]) if isinstance(answers, dict) else None
+    if geometry is not None and answer is not None and str(answer) in allowed:
+        geometry["source_view"] = allowed[str(answer)]
+        notes.append(tx("Vista dei terminali ({view}) scelta dall'utente.", view=allowed[str(answer)]))
+        return
+    if not any(q.get("key") == question["key"] for q in remaining):
+        remaining.append(dict(question))
+
+
 def apply_answers(params: ExtractedParams, answers: dict) -> ExtractedParams:
     """@brief Apply the user's answers to the structured questions of a result, without a paid call.
 
@@ -8013,7 +10084,25 @@ def apply_answers(params: ExtractedParams, answers: dict) -> ExtractedParams:
           chosen layout could not be applied. A layout that would put the
           pads of a valid footprint on each other is refused the same way;
         - "height_equals_plan": "keep" leaves the height, "clear" removes it
-          (a rotated view: the agreed number was a plan size).
+          (a rotated view: the agreed number was a plan size);
+        - "side_numbering": «renumber» gives every castellated side the
+          first_pin and direction of its placement on the pinout,
+          «shift:<d>» moves every pad number by d, «off_side_entries»
+          declares the unexplained entries pads off the sides, «keep_sides»
+          keeps the numbering and makes the pinout the side labels
+          (`_side_numbering_choice`);
+        - "row_spacing": the chosen printed quote becomes `row_spacing_mm`
+          with provenance USER_SOURCE; «estimate» keeps the estimate;
+        - "contact_style": the side of the key's edge takes the chosen style;
+        - "contact_nc": the chosen WHOLE role assignment («1=common,2=nc,3=no»)
+          is written on the pins it names and on no other; «none» applies
+          nothing (roles to be corrected by hand); the group's witness becomes
+          «user» or «manual» and `contact_function_witness` the weakest group's
+          (`_confront_contact_functions`);
+        - "numbering_convention" (a question no longer asked, 2026-11-13):
+          an old saved answer is ignored with a note and the question closed. Applied only when the sides still pair
+          pads and labels as when the question was asked (the candidate's
+          pairs); otherwise the question stays open with a note.
         The same semantics apply during an extraction given `answers=`
         (`_ask`), so a saved answer and a fresh one lead to one result.
     """
@@ -8022,6 +10111,9 @@ def apply_answers(params: ExtractedParams, answers: dict) -> ExtractedParams:
         return result
     remaining, notes = [], []
     candidates = dict(result.candidates or {})
+    # The payloads as offered, for the notes an applied answer settles (D-b).
+    offered = copy.deepcopy(candidates)
+    settled_extra: list = []
     for question in result.questions or ():
         key = question.get("key")
         if key not in answers:
@@ -8056,6 +10148,37 @@ def apply_answers(params: ExtractedParams, answers: dict) -> ExtractedParams:
             payload = (candidates.get(key) or {}).get(str(value))
             if not isinstance(payload, dict):
                 remaining.append(question)
+                continue
+            if payload.get("kind") == LAYOUT_BLOCK_KIND:
+                # «Keep blocked» of a last-resort question: nothing written,
+                # the block stays, the question is closed.
+                line = tx("Posizioni dei pad lasciate bloccate per scelta dell'utente: "
+                          "inserirle a mano in «Piazzole del componente THT».")
+                notes.append(line)
+                if line not in (result.pin_map_conflict or ""):
+                    result.pin_map_conflict = (line if not result.pin_map_conflict
+                                               else result.pin_map_conflict + "\n" + line)
+                candidates.pop(key, None)
+                # The side of the provisional pads, deferred with the layout:
+                # pending again, as before the deferral (M4).
+                _deferred_view_question(result, payload, answers, remaining, notes)
+                continue
+            if payload.get("kind") == HOLE_OR_TERMINAL_KIND:
+                # «Is the printed diameter the hole or the terminal?» (G2).
+                if geometry is None:
+                    remaining.append(question)
+                    continue
+                target = copy.deepcopy(geometry)
+                applied_notes = []
+                clash = _apply_hole_or_terminal_choice(target, payload, applied_notes)
+                if clash:
+                    notes.append(tx("Disposizione dei pad scelta non applicabile: {exc}",
+                                    exc=clash))
+                    remaining.append(question)
+                    continue
+                result.package_geometry = geometry = target
+                notes.extend(applied_notes)
+                candidates.pop(key, None)
                 continue
             # The question about pads without a hole (`_ask_pad_holes`)
             # shares this field (the window asks every "pad_layout" question
@@ -8109,6 +10232,11 @@ def apply_answers(params: ExtractedParams, answers: dict) -> ExtractedParams:
                 target["origin"] = payload.get("origin") or "custom"
                 if payload.get("view") in ("top", "bottom"):
                     target["source_view"] = payload["view"]
+                if isinstance(payload.get("leads"), dict) or isinstance(payload.get("holes"), dict):
+                    # The terminals and printed holes of the reading whose
+                    # layout is chosen (D-a, M2).
+                    _apply_reading_leads(target, payload.get("leads") or {}, notes,
+                                         payload.get("holes"))
             target["needs_review"] = True
             exchange = payload.get("exchange_body")
             exchange = exchange if isinstance(exchange, dict) else None
@@ -8203,6 +10331,9 @@ def apply_answers(params: ExtractedParams, answers: dict) -> ExtractedParams:
                 notes.append(tx("Posizioni dei pad scelte dall'utente fra le letture ({source}); "
                                 "da verificare sul disegno.",
                                 source=_reading_source(payload.get("source") or "main")))
+                # The side was deferred until a layout was chosen
+                # (`_require_declared_view`): asked now on the chosen one.
+                _deferred_view_question(result, payload, answers, remaining, notes)
         elif field_name == "height_equals_plan":
             if value == "clear":
                 result.body_height_mm = None
@@ -8215,10 +10346,99 @@ def apply_answers(params: ExtractedParams, answers: dict) -> ExtractedParams:
                                 "misura in pianta (vista ruotata, scelta dell'utente)."))
             else:
                 notes.append(tx("Altezza del corpo confermata dall'utente: sezione quadrata."))
+        elif field_name == "side_numbering" and result.castellated_sides:
+            outcome = _side_numbering_choice(result.castellated_sides, result.pinout, value,
+                                             (candidates.get(key) or {}).get(str(value)))
+            if not outcome["ok"]:
+                # The question stays open and says why (never a silent no-op).
+                notes.append(tx("Numerazione dei contatti scelta non applicabile: {exc}",
+                                exc=outcome["reason"]))
+                remaining.append(question)
+                continue
+            result.castellated_sides = outcome["sides"]
+            if outcome.get("unblock"):
+                # The numbering-conflict block goes with the answer (H1).
+                result.pin_map_conflict = None
+            if outcome["pinout"] is not None:
+                result.pinout = outcome["pinout"] or None
+            # The numbering changed: the label conflicts are those of the new
+            # one -- as the convention path translated them, when it did.
+            result.label_conflicts = (outcome["label_conflicts"] if "label_conflicts" in outcome
+                                      else pinout_coherence.strong_label_conflicts(
+                                          result.castellated_sides, result.pinout)) or None
+            notes.append(outcome["note"])
+            if value == SIDE_CONFLICT_MOVE:
+                # As after a saved «move» (third review, M4): the moved
+                # numbering is judged against the pinout and the coherence
+                # question is asked when it is needed.
+                _coherence_after_conflict(result, remaining, candidates, notes)
+        elif field_name == "row_spacing":
+            notes.append(_apply_row_spacing_choice(result, value))
+        elif field_name == "contact_nc" and result.pinout:
+            payload = (candidates.get(key) or {}).get(str(value))
+            if not isinstance(payload, dict):
+                remaining.append(question)
+                continue
+            groups = dict(result.contact_function_groups or {})
+            assignment = payload.get("assignment")
+            if value == CONTACT_NONE:
+                # Nothing applied: the roles stay to be corrected by hand.
+                groups[payload.get("group")] = "manual"
+                notes.append(tx("Funzioni NC/NO lasciate alla correzione a mano nella tabella "
+                                "Pinout."))
+            elif isinstance(assignment, dict):
+                result.pinout = copy.deepcopy(result.pinout)
+                # Only the roles the user chose, on the pins they name (H1).
+                _apply_contact_assignment(result.pinout, assignment)
+                groups[payload.get("group")] = "user"
+                notes.append(tx("Funzioni del contatto scelte dall'utente: {assignment}.",
+                                assignment=_assignment_text(assignment)))
+            else:
+                remaining.append(question)
+                continue
+            result.contact_function_groups = groups
+            result.contact_function_witness = _weakest_witness(groups.values())
+            if result.contact_function_witness != "asked":
+                settled_extra.append(_CONTACT_ASKED_NOTE())
+            # The self-check after the answer (G1).
+            result.pin_role_conflicts = pin_role_conflicts(result.pinout) or None
+            if result.pin_role_conflicts:
+                notes.append(_role_conflict_note(result.pin_role_conflicts))
+        elif field_name == "contact_style" and result.castellated_sides:
+            # The key lists the edge among the offered styles (sorted).
+            edge = next((part for part in str(key).partition(":")[2].split("|")
+                         if part in EDGES), "")
+            sides = [dict(side) for side in result.castellated_sides]
+            note = _apply_contact_style_choice(sides, edge, value)
+            if note is None:
+                remaining.append(question)
+                continue
+            result.castellated_sides = sides
+            notes.append(note)
+        elif field_name == "numbering_convention":
+            # The question was dropped (user decision 2026-11-13): the fixed
+            # convention applies by itself. An answer saved for it before
+            # then is ignored, said, and the question is closed.
+            notes.append(tx("Risposta salvata sulla numerazione dei contatti ignorata: senza "
+                            "numeri stampati si applica da sola la numerazione convenzionale."))
         else:
             remaining.append(question)
             continue
         candidates.pop(key, None)
+    # The conflict notes an applied answer settles leave the result (night5
+    # real run, D-b: «the terminal does not pass the hole» stayed after the
+    # user said the printed value was the terminal). A payload names them
+    # in "supersedes"; an answer that was not applied settles nothing.
+    settled = set(settled_extra)
+    for question in result.questions or ():
+        key = question.get("key")
+        if key in answers and not any(kept is question for kept in remaining):
+            payload = (offered.get(key) or {}).get(str(answers[key]))
+            if isinstance(payload, dict):
+                settled.update(str(line) for line in payload.get("supersedes") or ())
+    if settled and result.notes:
+        result.notes = "\n".join(line for line in str(result.notes).splitlines()
+                                 if line.strip() not in settled)
     result.questions = remaining
     result.candidates = candidates or None
     if notes:
@@ -8937,6 +11157,41 @@ class ExtractedParams:
     #: What `apply_answers` needs to apply a chosen option without a paid call:
     #: {question key: {str(option value): payload}}; payloads are JSON-able.
     candidates: Optional[dict] = None
+    #: The saved answers this extraction applied by itself
+    #: (`extract_pin_header_params(answers=...)`): {question key: value}.
+    #: Such a question is not in `questions`; None when none was applied
+    #: (default, so results built elsewhere stay valid). The window reads
+    #: the «side_numbering» key from here (2026-11-13).
+    answered_questions: Optional[dict] = None
+    #: The answer's declaration `pin_numbers_printed` (2026-11-13): True when
+    #: the documents print the pin numbers, False when the numbers are a
+    #: convention (no «document» claim may then be made about them), None
+    #: when the answer did not say (read as printed, `_numbers_printed`).
+    pin_numbers_printed: Optional[bool] = None
+    #: Outcome of the one targeted re-read of the terminals and hole callouts
+    #: (`_reread_missing_terminals`, 2026-11-13): "found", "nothing", or None
+    #: when no re-read was made. Only "nothing" allows a message to say that
+    #: reading the same drawing again did not find the values.
+    terminal_reread: Optional[str] = None
+    #: Sides whose labels place the pinout names on other contacts than the
+    #: analysis did, strongly, after the one corrective retry (2026-11-13):
+    #: [{"edge", "pins", "named", "first_pin", "reverse"}], pins in the
+    #: SETTLED numbering of the result (translated when the fixed convention
+    #: renumbered the contacts). None or empty: no such side. The names were
+    #: not moved; the component check reports them («da rivedere»).
+    label_conflicts: Optional[list] = None
+    #: How the NC/NO roles of drawn switch contacts are witnessed
+    #: (`_confront_contact_functions`, 2026-11-14): one of CONTACT_WITNESSES,
+    #: or None when the part has no switch contact. «single» and «same_model»
+    #: rest on one model's reading; «asked» has an open «contact_nc» question.
+    contact_function_witness: Optional[str] = None
+    #: {contact group: witness} behind `contact_function_witness`, so that an
+    #: answer recomputes the weakest (L9); None without switch contacts.
+    contact_function_groups: Optional[dict] = None
+    #: Pins whose name is a switch-role word contradicting their function
+    #: (`pin_role_conflicts`, night4 real run 2026-11-14): to review in the
+    #: Pinout table; None when there is none.
+    pin_role_conflicts: Optional[list] = None
     #: The main answer as the model gave it, brought to the main shape
     #: (`single_answer_to_data`) and deep-copied before any validation or
     #: dedicated reading: the input of `reread_body_height` and
@@ -9054,7 +11309,8 @@ class AnswerShapeError(ExtractionError):
         numbers is not this error and is never retried blindly.
     """
 
-    def __init__(self, message: str, *, raw=None, fallback: Optional[dict] = None):
+    def __init__(self, message: str, *, raw=None, fallback: Optional[dict] = None,
+                 correction: Optional[str] = None):
         """@brief Build the error, keeping the unusable arguments for the log.
 
         @param message Translated diagnostic text.
@@ -9063,9 +11319,13 @@ class AnswerShapeError(ExtractionError):
             main shape, or None: used only when the corrective retry is
             broken too, so a paid answer is not lost (a self-contradicting
             grid keeps its printed numbers without positions).
+        @param correction The English text appended to the retried request,
+            naming the structural rule the answer broke (never a value);
+            None sends `_SHAPE_CORRECTION`, the rule of the single-part tool.
         """
         super().__init__(message)
         self.fallback = fallback
+        self.correction = correction
         import json
         try:
             self.raw = json.dumps(raw, ensure_ascii=False, sort_keys=True, default=repr)
@@ -9075,6 +11335,72 @@ class AnswerShapeError(ExtractionError):
 
 class _GridContradiction(ExtractionError):
     """A declared grid of `report_single_component` that contradicts itself (`_grid_as_pads`)."""
+
+
+class SidePinoutContradiction(AnswerShapeError):
+    """@brief A side-based answer whose pad numbering and pinout are not one numbering.
+
+    @note Rule 1 of docs/pinout-coherence-plan.md, structural (no name rule):
+        a pinout entry with no pad, or a pad the pinout does not name
+        (`pinout_coherence.side_pinout_report`, "contradicted"). The whole
+        answer is the `fallback`: it is usable, only its numbering is in
+        doubt, so a second contradictory answer is kept (the newer one) and
+        the doubt becomes the question «side_numbering».
+    """
+
+    def __init__(self, message: str, *, raw=None, fallback: Optional[dict] = None,
+                 report: Optional[dict] = None, correction: Optional[str] = None):
+        """@brief Build the error with the corrective text of the side numbering.
+
+        @param message Translated diagnostic text.
+        @param raw The answer as the model sent it.
+        @param fallback The whole answer (kept if the retry contradicts too).
+        @param report The `side_pinout_report` that found the contradiction.
+        @param correction The corrective text; None sends `_SIDE_PINOUT_CORRECTION`.
+        """
+        super().__init__(message, raw=raw, fallback=fallback,
+                         correction=correction or _SIDE_PINOUT_CORRECTION)
+        self.report = report or {}
+
+
+def _pinout_name_problems(answer) -> Optional[dict]:
+    """The remark-like pin names of an answer: {"remarks": [(pin, name)]}, or None when there are none.
+
+    `remarks` are the entries whose name reads as a remark
+    (`pinout_coherence.remark_named_pins`, declared heuristic with known
+    false positives such as «NC (not connected)»). The count of entries
+    against contacts is deliberately not part of it: an undeclared entry
+    without a pad gets the free «side_numbering» question.
+    """
+    if not isinstance(answer, dict):
+        return None
+    remarks = pinout_coherence.remark_named_pins(answer.get("pinout"))
+    return {"remarks": remarks} if remarks else None
+
+
+def _pinout_name_summary(problems: dict) -> str:
+    """The remark-like names in words (translated), quoted as given."""
+    return tx("nomi con commenti invece del solo segnale: {names}",
+              names=", ".join(f"«{name}»" for _pin, name in problems.get("remarks") or ()))
+
+
+def _note_pinout_name_problems(data: dict, progress=None) -> None:
+    """Say which pin names of the kept answer still read as remarks: nothing stripped.
+
+    Called on the answer the extraction keeps. Remark-like names never cost
+    a paid retry (generality audit M2: the heuristic has known false
+    positives); the names stay as the model gave them and the component
+    check flags them («Nomi dei pin», importance 2) until they are edited.
+    """
+    problems = _pinout_name_problems(data)
+    if not problems:
+        return
+    line = tx("Pinout da rivedere: {summary}. Nomi lasciati come li ha dati l'analisi: nella scheda "
+              "«Simbolo elettrico» lascia nel nome solo il segnale come e' stampato.",
+              summary=_pinout_name_summary(problems))
+    data["notes"] = (str(data.get("notes") or "") + "\n" + line).strip()
+    if progress:
+        progress(line)
 
 
 #: Text appended to the retried request after an AnswerShapeError: it restates
@@ -9090,6 +11416,40 @@ _SHAPE_CORRECTION = (
     "at a position of the grid -- and never together with pads; when the distances between the "
     "terminals are not all multiples of one pitch, list the terminals in pads and transcribe the "
     "dimension chains in pad_chains.")
+
+
+#: Text appended to the retried request after a SidePinoutContradiction: the
+#: structural rule that ties the numbering of the castellated sides to the
+#: pinout, never a value (no count, number or name of THIS answer), so it
+#: holds for any side-based module.
+_SIDE_PINOUT_CORRECTION = (
+    "CORRECTION: in the previous answer the pad numbers of castellated_sides and the pin numbers "
+    "of pinout look shifted against each other: some contacts of the sides carry numbers that no "
+    "pinout entry has, while some pinout entries match no contact. Where the pinout and the sides "
+    "describe the same physical contacts, they must use ONE numbering: give each side the numbers "
+    "the pinout gives its contacts. For each side, first_pin is the pinout number of the contact "
+    "with the LOWEST number on that side, count is its number of contacts, and reverse is true "
+    "when the numbers DECREASE in the order in which pin_names lists the contacts along the edge. "
+    "Check every contact: its pin_names label and the name of the pinout entry with its number "
+    "should name the same signal. If a pinout entry is not a contact of any side (for example a "
+    "pad inside the board outline), keep it in pinout exactly as the document gives it and say "
+    "so with off_side true on that entry: never remove, renumber or move a pinout entry to make "
+    "the numbering fit. Declare pin_numbers_printed: true only if the documents print the pin "
+    "numbers, false if they show only names or labels and the numbers are a numbering you chose. "
+    "Do not change the labels, their order or the counts unless the documents show they were "
+    "wrong. Call the tool again with the complete answer.")
+
+
+#: Text appended to the retried request when the side labels place the
+#: pinout names on other contacts than the answer, strongly
+#: (`pinout_coherence.strong_label_conflicts`). A structural rule, never a
+#: value, so it holds for any side-based module.
+_SIDE_LABEL_CORRECTION = (
+    "CORRECTION: on at least one side the silkscreen or printed labels in pin_names name pinout "
+    "entries that your numbering puts on other contacts. Assign each pinout name to the contact "
+    "whose printed or silkscreen label matches it; never move a name onto a contact whose label "
+    "contradicts it. Keep the pinout entries that are not contacts of any side, with off_side "
+    "true. Call the tool again with the complete answer.")
 
 
 #: Bound of the rejected main answer written to the log, in characters: the
@@ -10197,6 +12557,8 @@ def _canonicalize_answer(data: dict) -> None:
     # answer already converted keeps it (the early return above).
     data.pop("_measured_lands", None)
     data.pop("_measured_holes", None)
+    # The photo's per-edge contact-style doubts are the program's too.
+    data.pop(PHOTO_CONTACT_STYLES_KEY, None)
     notes: list[str] = []
     layout = data.get("layout") or "matrix"
 
@@ -10219,6 +12581,9 @@ def _canonicalize_answer(data: dict) -> None:
     # The precision of each transcribed pad hole is known only in the
     # drawing's own unit and digits: recorded before the conversion (G6).
     _record_pad_hole_precision(data, _UNIT_TO_MM[unit], notes)
+    # The drawing's own unit, for the rounding of a transcription whose
+    # precision is unknown (`_one_printed_value`): the unit's usual cap.
+    data["_source_unit_factor"] = _UNIT_TO_MM[unit]
     if unit != "mm":
         _convert_units(data, _UNIT_TO_MM[unit])
         notes.append(tx("Quote lette in {unit} e convertite in millimetri (x {factor:g}).",
@@ -11028,7 +13393,20 @@ def extract_pin_header_params(
         # Keys beginning with «_» are the program's working state; the
         # model must not be able to set them (review V3-5).
         answer = without_private_keys(answer)
-        return single_answer_to_data(answer) if single_part else answer
+        # The label-name mark is the program's (`pinout_coherence.LABEL_NAME_KEY`):
+        # a model cannot set it on its own pinout entries (final audit L7).
+        for entry in answer.get("pinout") or () if isinstance(answer, dict) else ():
+            if isinstance(entry, dict):
+                entry.pop(pinout_coherence.LABEL_NAME_KEY, None)
+        if single_part:
+            return single_answer_to_data(answer)
+        # A side-based answer whose sides and pinout are not one numbering
+        # earns the one corrective retry (plan 2026-11-13, item B). Pin names
+        # that read as remarks never do: they are flagged only
+        # (`_note_pinout_name_problems`, generality audit M2), until the
+        # schema separates names from remarks.
+        _raise_on_side_pinout_contradiction(answer)
+        return answer
     try:
         try:
             data = main_call()
@@ -11041,11 +13419,16 @@ def extract_pin_header_params(
             # (ok, go ahead)). Refusals, network and credit do not pass here.
             _log_unreadable_arguments(exc, progress, 1)
             check_cancel()
+            side_numbering = isinstance(exc, SidePinoutContradiction)
             if progress:
                 progress(tx("Analisi dei documenti: la risposta del modello non era un JSON "
                             "leggibile (testo nel log AI, riga AI_RESPONSE_UNREADABLE); un solo "
                             "nuovo tentativo a pagamento con la stessa richiesta.")
                          if isinstance(exc, ToolArgumentsError) else
+                         tx("Analisi dei documenti: numerazione dei lati e pinout non sono una "
+                            "sola numerazione ({exc}); un solo nuovo tentativo a pagamento, con "
+                            "la richiesta e la regola che li lega.", exc=exc)
+                         if side_numbering else
                          tx("Analisi dei documenti: la risposta del modello non aveva la forma "
                             "richiesta ({exc}; testo nel log AI, riga AI_RESPONSE_UNREADABLE); un "
                             "solo nuovo tentativo a pagamento, con la richiesta e l'indicazione "
@@ -11053,14 +13436,37 @@ def extract_pin_header_params(
             try:
                 # A broken shape is repeated as often as not when the SAME
                 # request is sent again (deepseek-flash, real calls of
-                # 2026-10-31): the retry names the schema rule it broke.
-                data = main_call(_SHAPE_CORRECTION if isinstance(exc, AnswerShapeError) else None)
-            except ToolArgumentsError as second:
+                # 2026-10-31): the retry names the schema rule it broke --
+                # the error's own rule when it carries one (side numbering).
+                data = main_call((exc.correction or _SHAPE_CORRECTION)
+                                 if isinstance(exc, AnswerShapeError) else None)
+            except (ToolArgumentsError, OpenRouterError) as second:
+                if not side_numbering:
+                    if not isinstance(second, ToolArgumentsError):
+                        raise
+                    _log_unreadable_arguments(second, progress, 2)
+                    raise ExtractionError(
+                        tx("Anche il nuovo tentativo ha restituito argomenti illeggibili; il testo "
+                           "delle due risposte e' nel log AI (righe AI_RESPONSE_UNREADABLE). {exc}",
+                           exc=second)) from second
+                # The first answer was complete and readable, only its
+                # numbering in doubt: a failed retry never loses it.
+                if isinstance(second, ToolArgumentsError):
+                    _log_unreadable_arguments(second, progress, 2)
+                data = exc.fallback
+                if progress:
+                    progress(tx("Analisi dei documenti: il nuovo tentativo non e' riuscito ({exc}); "
+                                "si tiene la prima risposta, la numerazione dei lati verra' "
+                                "chiesta.", exc=second))
+            except SidePinoutContradiction as second:
                 _log_unreadable_arguments(second, progress, 2)
-                raise ExtractionError(
-                    tx("Anche il nuovo tentativo ha restituito argomenti illeggibili; il testo "
-                       "delle due risposte e' nel log AI (righe AI_RESPONSE_UNREADABLE). {exc}",
-                       exc=second)) from second
+                # Two contradictory answers: the newer one is kept whole, the
+                # doubt becomes the question «side_numbering» in the validation.
+                data = second.fallback if isinstance(second.fallback, dict) else exc.fallback
+                if progress:
+                    progress(tx("Analisi dei documenti: anche il nuovo tentativo non lega lati e "
+                                "pinout in una sola numerazione ({exc}); si tiene la risposta piu' "
+                                "recente e la numerazione dei lati verra' chiesta.", exc=second))
             except AnswerShapeError as second:
                 _log_unreadable_arguments(second, progress, 2)
                 # Two broken shapes: the usable part of the answer (a
@@ -11081,7 +13487,10 @@ def extract_pin_header_params(
                                 "della griglia.", exc=second))
             else:
                 if progress:
-                    progress(tx("Analisi dei documenti: il nuovo tentativo e' leggibile; si usa "
+                    progress(tx("Analisi dei documenti: nel nuovo tentativo lati e pinout sono una "
+                                "sola numerazione; si usa quello.")
+                             if side_numbering else
+                             tx("Analisi dei documenti: il nuovo tentativo e' leggibile; si usa "
                                 "quello."))
     except OpenRouterError as exc:
         raise ExtractionError(str(exc)) from exc
@@ -11100,6 +13509,11 @@ def extract_pin_header_params(
     # reading», H6). Written after `without_private_keys`, so a model answer
     # can never set it (RAW_MAIN_MODEL_KEY).
     data["_raw_main"][RAW_MAIN_MODEL_KEY] = main_model
+    if not single_part:
+        # Names holding remarks stay as given and are said, never stripped
+        # and never retried (user, 2026-11-13; generality audit M2); after
+        # `_raw_main`, which keeps the answer as the model gave it.
+        _note_pinout_name_problems(data, progress)
     if step_models is None:
         # Before 2026-11-12: one dedicated reader, the profile's pad_model,
         # for both the pad positions and the body quotes.
@@ -12021,6 +14435,345 @@ def _sanitise_printed_quotes(data: dict, progress) -> None:
                               for q in data["printed_vertical_quotes"]) or "-"))
 
 
+#: Values of ExtractedParams.contact_function_witness: two models agree, the
+#: user chose the roles, two readings of one model agree, one reading only
+#: (or partly), the user will correct them by hand («none»), the readings
+#: disagree and the user is asked.
+CONTACT_WITNESSES = ("two_models", "user", "same_model", "single", "manual", "asked")
+
+#: Strength of each witness (lower is stronger): the overall witness of a
+#: part is the weakest of its contact groups.
+_WITNESS_RANK = {"two_models": 0, "user": 0, "same_model": 1, "single": 2, "manual": 2,
+                 "asked": 3}
+
+#: Value of the «none of these» option of a "contact_nc" question: nothing is
+#: applied, the main answer's roles stay to be corrected by hand.
+CONTACT_NONE = "none"
+
+#: Switch roles: the terminals the NC/NO witness looks at.
+_SWITCH_ROLES = ("common", "nc", "no")
+
+
+def _CONTACT_ASKED_NOTE() -> str:  # noqa: N802 - a translated constant, read at call time
+    """The note of an open «contact_nc» question, settled by its answer (`apply_answers`)."""
+    return tx("Funzioni NC/NO: le letture non concordano, la scelta e' chiesta all'utente; fino "
+              "alla risposta restano quelle della risposta principale.")
+
+
+def _weakest_witness(witnesses) -> Optional[str]:
+    """The weakest of contact-group witnesses (`_WITNESS_RANK`), None for none."""
+    witnesses = [w for w in witnesses if w in _WITNESS_RANK]
+    return max(witnesses, key=lambda w: _WITNESS_RANK[w]) if witnesses else None
+
+
+def _switch_role(function, observed):
+    """(role, contradiction) of one terminal in one reading.
+
+    The role is the one the program derives from the observation
+    (`SYMBOL_CONTACT_ROLES`) when there is one, else the declared function.
+    A declared function different from the observed role is a contradiction
+    inside that reading.
+    """
+    derived = SYMBOL_CONTACT_ROLES.get(observed)
+    if derived is not None and function is not None and function != derived:
+        return derived, True
+    return derived or function, False
+
+
+def _role_text(role) -> str:
+    """A role as an option shows it (NC, NO, COM, COIL...), «non letta» when absent."""
+    return {"nc": "NC", "no": "NO", "common": "COM"}.get(role, str(role).upper() if role else tx(
+        "non letta"))
+
+
+def _assignment_value(assignment: dict) -> str:
+    """«1=common,2=nc,3=no»: an assignment of roles as an option value, pins in their order."""
+    return ",".join(f"{pin}={assignment[pin]}" for pin in sorted(assignment, key=_pad_number_key))
+
+
+def _assignment_of(value) -> Optional[dict]:
+    """The {pin: role} of an option value made by `_assignment_value`; None for any other value."""
+    if not isinstance(value, str) or value == CONTACT_NONE or "=" not in value:
+        return None
+    assignment = {}
+    for part in value.split(","):
+        pin, sep, role = part.partition("=")
+        if not sep or not pin or role not in PINOUT_FUNCTIONS:
+            return None
+        assignment[pin] = role
+    return assignment
+
+
+def _assignment_text(assignment: dict) -> str:
+    """«1=COM, 2=NC, 3=NO» for an option label."""
+    return ", ".join(f"{pin}={_role_text(assignment[pin])}"
+                     for pin in sorted(assignment, key=_pad_number_key))
+
+
+def _apply_contact_assignment(entries, assignment: dict) -> None:
+    """Write the chosen roles on the pins they name, and on no other pin.
+
+    A pin whose NAME is just the word of its old role («NC», «N.O.»,
+    «NC1», «Common»; `contact_roles.role_word_of`) takes the word of the new
+    role in the same style, contact number kept (night4 real run,
+    2026-11-14: the answer «2=NO, 3=NC» changed the functions and left the
+    names «NC»/«NO» on the wrong pins of the symbol). Any other name -- a
+    signal name, a label -- stays.
+    """
+    for entry in entries or ():
+        if isinstance(entry, dict):
+            pin = _pad_number_text(entry.get("pin"))
+            if pin in assignment:
+                old = entry.get("function")
+                entry["function"] = assignment[pin]
+                read = role_word_of(entry.get("name"))
+                if old != assignment[pin] and read is not None and read[0] == old:
+                    entry["name"] = renamed_role_word(entry["name"], assignment[pin])
+
+
+def pin_role_conflicts(entries) -> list:
+    """@brief The pins whose name is a switch-role word that contradicts their function.
+
+    @param entries A pinout (list of {"pin", "name", "function"}).
+    @return `contact_roles.role_conflicts` with the pins as text: the
+        self-check after every answer and derivation (night4 real run), the
+        same rule the component check applies.
+    """
+    return [dict(conflict, pin=_pad_number_text(conflict["pin"]))
+            for conflict in role_conflicts(entries)]
+
+
+def _role_conflict_note(conflicts) -> str:
+    """The note of pins whose role-word name contradicts their function."""
+    return tx("ATTENZIONE pin {pins}: il nome dice un ruolo del contatto diverso dalla funzione "
+              "assegnata; nomi e funzioni da verificare nella tabella Pinout.",
+              pins=", ".join(f"{c['pin']} ({c['name']} / {_role_text(c['function'])})"
+                             for c in conflicts))
+
+
+def _group_breaks_structure(roles: dict, known: bool) -> bool:
+    """Whether one reading's roles of one contact group cannot be a contact (M5).
+
+    A known group (a printed contact label or one drawn pivot) has at most
+    one common, one nc and one no, and an nc or no needs its common. An
+    unknown group (no label, no pivot declared) may hold several contacts:
+    nothing is checked there.
+    """
+    if not known:
+        return False
+    values = [role for role in roles.values() if role in _SWITCH_ROLES]
+    if any(values.count(role) > 1 for role in _SWITCH_ROLES):
+        return True
+    return any(role in ("nc", "no") for role in values) and "common" not in values
+
+
+def _confront_contact_functions(data: dict, progress=None) -> None:
+    """Check the switch roles of drawn contacts with every reading at hand; ask when they disagree.
+
+    Night real runs of 2026-11-14: one relay drawing read in two analyses
+    gave NC and NO swapped, and nothing checked them (the drawn holes see
+    geometry only). The readings, per terminal: the main answer's `pinout`
+    (declared `function`, observed `symbol_contact`, `contact_common`) and
+    the dedicated pad reading's `terminal_functions`
+    (`data["_dedicated_functions"]`, {pin: (function, observed, common)}).
+    The role of a terminal in a reading is the one the program derives from
+    the observation, else the declared function (`_switch_role`); a role
+    only observed is written as the function, with a note.
+
+    Groups (generality audit 2026-11-14, H2): the printed `contact` label,
+    else the drawn pivot (`contact_common`), else one group for every
+    switch terminal. Per group:
+    - every reading agrees, covers all its switch terminals and none breaks
+      the structure (`_group_breaks_structure`): kept, witness «two_models»
+      or «same_model»; partly covered: «single» (L8);
+    - one reading only: «single», with WHY the second is missing
+      (`data["_dedicated_functions_reason"]`, M7);
+    - a disagreement, a contradiction inside a reading, or a broken
+      structure: the question «contact_nc». Its options are WHOLE role
+      assignments of the group's terminals, one per reading claim
+      (deduplicated), plus «none: I correct them by hand» (CONTACT_NONE).
+      A choice writes the roles it names and nothing else (H1, H3); nothing
+      is recommended.
+    A saved answer is the user's fact (M4), keyed by the group and its
+    terminals: applied with a note when no current claim contradicts it on
+    any terminal it names, otherwise asked again with the saved assignment
+    among the options. The overall witness, `data["_contact_function_witness"]`,
+    is the weakest group's; `data["_contact_function_groups"]` keeps each
+    group's for `apply_answers` (L9).
+    @note «arm touches = NC» is a DECLARED HEURISTIC (M6): it assumes the
+        drawing shows the contact at rest (coil de-energised). A latching
+        relay drawn in its set state, an energised drawing or a maintained
+        switch are counter-examples; the schema asks the model to omit the
+        observation when the drawing states such a state, and the question
+        is how a disagreement surfaces.
+    """
+    pinout = data.get("pinout")
+    if not isinstance(pinout, list):
+        return
+    main = {}
+    for entry in pinout:
+        if not isinstance(entry, dict):
+            continue
+        pin = _pad_number_text(entry.get("pin"))
+        if not pin:
+            continue
+        function = entry.get("function") if entry.get("function") in PINOUT_FUNCTIONS else None
+        observed = (entry.get("symbol_contact")
+                    if entry.get("symbol_contact") in SYMBOL_CONTACT_ROLES else None)
+        common = _pad_number_text(entry.get("contact_common")) or None
+        if observed is not None and function is None:
+            # The program derives the role from what the model saw.
+            entry["function"] = SYMBOL_CONTACT_ROLES[observed]
+            data["notes"] = (str(data.get("notes") or "") + "\n" + tx(
+                "Funzione del pin {pin} ({role}) ricavata dal disegno del contatto.",
+                pin=pin, role=_role_text(entry["function"]))).strip()
+        main[pin] = (entry, function, observed, common)
+    raw = data.get("_dedicated_functions")
+    dedicated = {}
+    for pin, claim in (raw.items() if isinstance(raw, dict) else ()):
+        claim = tuple(claim) + (None,) * (3 - len(tuple(claim)))
+        dedicated[str(pin)] = claim[:3]
+    groups = {}
+    for pin, (entry, function, observed, common) in main.items():
+        role = _switch_role(function, observed)[0]
+        other = _switch_role(*dedicated.get(pin, (None, None, None))[:2])[0]
+        if role not in _SWITCH_ROLES and other not in _SWITCH_ROLES:
+            continue
+        label = str(entry.get("contact") or "").strip()
+        pivot = common or dedicated.get(pin, (None, None, None))[2]
+        group = (f"contact={label}" if label else f"pivot={pivot}" if pivot else "all")
+        groups.setdefault(group, []).append(pin)
+    if not groups:
+        return
+    answers = data.get("_answers") if isinstance(data.get("_answers"), dict) else {}
+    witnesses, reasons = {}, []
+    for group, pins in sorted(groups.items()):
+        pins = sorted(pins, key=_pad_number_key)
+        known = group != "all"
+        declared = {pin: main[pin][1] for pin in pins if main[pin][1] is not None}
+        derived, contradicted = {}, False
+        for pin in pins:
+            role, bad = _switch_role(main[pin][1], main[pin][2])
+            if role is not None:
+                derived[pin] = role
+            contradicted = contradicted or bad
+        second = {}
+        for pin in pins:
+            if pin in dedicated:
+                role, bad = _switch_role(*dedicated[pin][:2])
+                if role is not None:
+                    second[pin] = role
+                contradicted = contradicted or bad
+        broken = _group_breaks_structure(derived, known) or (
+            bool(second) and _group_breaks_structure(second, known))
+        disagree = any(derived.get(pin) != role for pin, role in second.items())
+        # Every claim at hand, for the options and for the saved answer.
+        claims = [(tx("risposta principale"), derived)]
+        if declared != derived and declared:
+            claims.append((tx("risposta principale, funzioni dichiarate"), declared))
+        if second:
+            claims.append((tx("lettura dedicata"), second))
+        key = question_key("contact_nc", [f"{group}:{','.join(pins)}"])
+        # Two saved answers that cannot both be true decide nothing.
+        saved = answers.get(key) if not contradicting_answers(answers, key) else None
+        saved_assignment = _assignment_of(saved)
+        if saved == CONTACT_NONE:
+            witnesses[group] = "manual"
+            reasons.append(tx("Funzioni NC/NO del contatto {pins}: lasciate alla correzione a mano "
+                              "nella tabella Pinout (scelta salvata).", pins=", ".join(pins)))
+            continue
+        if saved_assignment is not None:
+            # The user's fact first (M4): contradicted only when no current
+            # claim supports it on a terminal it names.
+            contradicted_saved = any(
+                all(claim.get(pin) not in (None, role) for _source, claim in claims)
+                and any(claim.get(pin) is not None for _source, claim in claims)
+                for pin, role in saved_assignment.items())
+            if not contradicted_saved:
+                _apply_contact_assignment(pinout, saved_assignment)
+                witnesses[group] = "user"
+                reasons.append(tx("Funzioni del contatto dalla scelta salvata dell'utente: "
+                                  "{assignment}.", assignment=_assignment_text(saved_assignment)))
+                continue
+            claims.append((tx("scelta salvata in precedenza"), saved_assignment))
+        elif not contradicted and not broken and not disagree:
+            if not second:
+                witnesses[group] = "single"
+                reasons.append(_single_reading_reason(data, main, pins))
+            elif set(second) >= {pin for pin, role in derived.items() if role in _SWITCH_ROLES}:
+                witnesses[group] = ("same_model" if data.get("_functions_same_model")
+                                    else "two_models")
+            else:
+                witnesses[group] = "single"
+                reasons.append(tx("la lettura dedicata copre solo i pin {pins}",
+                                  pins=", ".join(sorted(second, key=_pad_number_key))))
+            continue
+        options, seen = [], set()
+        for source, assignment in claims:
+            value = _assignment_value(assignment)
+            if not assignment or value in seen:
+                continue
+            seen.add(value)
+            options.append({"label": tx("{source}: {assignment}", source=source,
+                                        assignment=_assignment_text(assignment)),
+                            "value": value})
+        options.append({"label": tx("Nessuna delle due: correggo a mano nella tabella Pinout"),
+                        "value": CONTACT_NONE})
+        text = tx("Le letture del contatto disegnato non concordano ({why}). Quale assegnazione "
+                  "dei ruoli e' quella del disegno?",
+                  why="; ".join(why for why, flag in (
+                      (tx("le due letture assegnano ruoli diversi"), disagree),
+                      (tx("una lettura contraddice il contatto che descrive"), contradicted),
+                      (tx("una lettura assegna ruoli impossibili per un solo contatto"), broken),
+                      (tx("la scelta salvata non concorda con le letture"),
+                       saved_assignment is not None)) if flag))
+        payloads = {option["value"]: {"assignment": _assignment_of(option["value"]),
+                                      "group": group} for option in options}
+        data.setdefault("_questions", []).append({
+            "key": key, "field": "contact_nc", "text": text, "options": options,
+            "evidence": _question_evidence(data)})
+        data.setdefault("_candidates", {})[key] = payloads
+        witnesses[group] = "asked"
+    weakest = _weakest_witness(witnesses.values())
+    data["_contact_function_witness"] = weakest
+    data["_contact_function_groups"] = witnesses
+    conflicts = pin_role_conflicts(pinout)
+    if conflicts:
+        # A name that spells another role than the function (self-check).
+        reasons.append(_role_conflict_note(conflicts))
+    note = {"two_models": tx("Funzioni NC/NO concordi in due letture di modelli diversi."),
+            "same_model": tx("Funzioni NC/NO uguali in due letture dello stesso modello: non sono "
+                             "letture indipendenti, da controllare sul disegno."),
+            "single": tx("Funzioni NC/NO lette una sola volta, non verificate: controllarle sul "
+                         "disegno del contatto."),
+            "manual": None, "user": None,
+            "asked": _CONTACT_ASKED_NOTE()}[weakest]
+    lines = ([note] if note else []) + [tx("Motivo: {reason}.", reason=reason) if not
+                                        reason.endswith(".") else reason for reason in reasons]
+    for line in lines:
+        data["notes"] = (str(data.get("notes") or "") + "\n" + line).strip()
+        if progress:
+            progress(line)
+
+
+def _single_reading_reason(data: dict, main: dict, pins) -> str:
+    """Why a contact group's roles rest on one reading (generality audit M7)."""
+    reason = data.get("_dedicated_functions_reason")
+    if reason == "failed":
+        return tx("la lettura dedicata dei pad non e' riuscita")
+    if reason == "old_prompt":
+        return tx("il testo della lettura dedicata nel profilo non chiede le funzioni (prompt "
+                  "personalizzato o di una versione precedente)")
+    if reason == "no_symbol":
+        if any(main[pin][2] is not None for pin in pins):
+            # The main answer described the drawn contact; the second
+            # reading saw no symbol: said, not asked.
+            return tx("la risposta principale descrive il contatto disegnato, la lettura dedicata "
+                      "non ha visto il simbolo")
+        return tx("la lettura dedicata non ha visto un simbolo elettrico")
+    return tx("nessuna seconda lettura: la lettura dedicata dei pad non e' stata fatta")
+
+
 def _validate_main_response(data, content_blocks, diagnostic_call, model, system_prompt,
                             has_pdf, progress, numbering=None) -> None:
     """Sanitize and validate the main answer in place; ExtractionError when unusable.
@@ -12033,7 +14786,9 @@ def _validate_main_response(data, content_blocks, diagnostic_call, model, system
     Body dimensions are sanitized with a note; castellated sides that
     contradict themselves (count against pin_names, contacts longer than
     their edge) get one paid recount, numbering conflicts get one paid
-    repair, and the complete answer must then build ExtractedParams.
+    repair, sides that are still not one numbering with the pinout become
+    the question «side_numbering» (`_ask_side_numbering`), and the complete
+    answer must then build ExtractedParams.
     """
     if numbering:
         # What the structured questions need: the drawing names as evidence,
@@ -12081,6 +14836,8 @@ def _validate_main_response(data, content_blocks, diagnostic_call, model, system
                     system_prompt=system_prompt or _SYSTEM_PROMPT,
                     content_blocks=repair_blocks, tool=_openai_tool(),
                     max_tokens=16384, has_pdf=has_pdf)
+                if not isinstance(repaired, dict):
+                    raise ExtractionError(tx("risposta non strutturata"))
                 corrected = _castellated_sides(repaired.get("castellated_sides"), **dims)
                 # Normalized against normalized: the raw original may hold
                 # entries the normalization drops, or edges written
@@ -12107,8 +14864,18 @@ def _validate_main_response(data, content_blocks, diagnostic_call, model, system
                 data["notes"] = (str(data.get("notes") or "") + "\n" + warning).strip()
                 if progress:
                     progress(warning)
-            except (OpenRouterError, AttributeError) as repair_error:
-                raise ExtractionError(tx("Correzione numerazione non riuscita; analisi foto non avviata.")) from repair_error
+            except ExtractionCancelled:
+                raise
+            except OpenRouterError as repair_error:
+                # (ProviderError included.) The correction call itself failed (network, credit, cut by
+                # the budget, refused): not «the correction repeated the
+                # conflict». Blocked with the error and a retry remedy, never
+                # an exception out of the extractor (model benchmark 2026-11-14).
+                _settle_numbering_conflict(data, exc, progress, failure=repair_error)
+            except (ExtractionError, AttributeError) as repair_error:
+                # The correction repeated the conflict, changed sides or counts,
+                # or was no structured answer: the user is asked (audit H1).
+                _settle_numbering_conflict(data, exc, progress, repeated=repair_error)
     if (numbering and numbering.get("documents")
             and (data.get("layout") or "matrix") == "matrix" and not data.get("package_geometry")
             and numbering.get("component_family") != "aggregate_tht"):
@@ -12162,6 +14929,15 @@ def _validate_main_response(data, content_blocks, diagnostic_call, model, system
             documents, model=reader, call=diagnostic_call, progress=progress, prompt=pad_prompt,
             pad_sizes=_pad_sizes_mm(data["package_geometry"].get("pins"),
                                     _declared_unit_factor(data)))
+        # The switch roles the same call read from a drawn symbol: the
+        # second reading `_confront_contact_functions` compares.
+        data["_dedicated_functions"] = dict((reading or {}).get("functions") or {})
+        data["_functions_same_model"] = same_model
+        # Why the second reading of the roles may be missing (M7).
+        data["_dedicated_functions_reason"] = (
+            "no_call" if reading is None else "failed" if reading.get("failed")
+            else "old_prompt" if "terminal_functions" not in str(pad_prompt or "")
+            and pad_prompt is not None else "no_symbol")
 
         def view_of():
             # The main answer's view, or the dedicated one when the main left
@@ -12174,10 +14950,18 @@ def _validate_main_response(data, content_blocks, diagnostic_call, model, system
         # answer for the writers, removed right after.
         data["_outline_measurer"] = _outline_measurer(documents)
         try:
+            def axis_reread(axis, problem):
+                # ONE targeted paid re-read of the failing axis (task C2).
+                numbering["check_cancel"]()
+                numbering["announce"]("llm", reader)
+                return read_axis_chain(documents, axis, problem, model=reader,
+                                       call=diagnostic_call, prompt=pad_prompt, progress=progress)
+
             apply_dedicated_pads(data, reading, progress, check_layout=_layout_checker(
                 documents, numbering.get("library"), view_of,
                 _reading_tolerance(_declared_unit_factor(data))),
-                measure_layout=_layout_measurer(documents), same_model=same_model)
+                measure_layout=_layout_measurer(documents), same_model=same_model,
+                axis_reread=axis_reread)
         finally:
             data.pop("_outline_measurer", None)
         if reader != (numbering.get("pad_model_requested") or reader):
@@ -12219,6 +15003,11 @@ def _validate_main_response(data, content_blocks, diagnostic_call, model, system
                                                         call=diagnostic_call,
                                                         prompt=body_prompt, progress=progress),
                              progress, tie_break=tie_break)
+        # Pads still with neither a hole nor a terminal: ONE targeted
+        # re-read of the same drawing before they block (SRD real case).
+        _reread_missing_terminals(data, documents, reader, diagnostic_call, prompt=pad_prompt,
+                                  progress=progress, announce=numbering["announce"],
+                                  check_cancel=numbering["check_cancel"])
         body_requested = numbering.get("body_model_requested") or body_reader
         pad_note_says_it = (body_requested == numbering.get("pad_model_requested")
                             and body_reader == reader)
@@ -12261,6 +15050,12 @@ def _validate_main_response(data, content_blocks, diagnostic_call, model, system
             "pin sul disegno.")
         if progress:
             progress(data["_numbering_note"])
+    # The NC/NO roles of drawn switch contacts, with every reading at hand.
+    _confront_contact_functions(data, progress)
+    if data.get("layout") == "castellated":
+        # The printed quotes across the rows, in mm (the canonicalisation
+        # below converts only the fields it knows).
+        data["_row_quotes_mm"] = _row_quotes_mm(data)
     if (data.get("layout") or "matrix") in ("matrix", "castellated"):
         # After the numbering repair, which compares sides in the drawing's own
         # unit and view, and before the photo stage, which calibrates on the
@@ -12270,6 +15065,16 @@ def _validate_main_response(data, content_blocks, diagnostic_call, model, system
         if progress:
             for note in data["_canonical_notes"]:
                 progress(note)
+        if data.get("layout") == "castellated":
+            # Sides and pinout still not one numbering after the corrective
+            # retry, the recount and the repair, or a document that prints no
+            # pin numbers: the user decides (plan item B; round of
+            # 2026-11-13, items 1-3). On the canonical answer, the frame of
+            # `apply_answers`.
+            _ask_side_numbering(data, progress)
+            # Labels that still place the names elsewhere after the one
+            # retry: said, never acted on (names follow the analysis).
+            _note_label_conflicts(data, progress)
     # After the possible correction, so the lines describe the final sides:
     # unobserved contact style and estimated values go into the log at once,
     # and stay in the notes of the result (_params_from_tool_arguments).
@@ -13005,6 +15810,132 @@ def _optional_number(value, *, positive=False, integer=False):
     if integer and number != int(number):
         return None
     return int(number) if integer else number
+
+
+#: Values of the «side_numbering» question about a pad number two sides
+#: share after the one correction (`_settle_numbering_conflict`).
+SIDE_CONFLICT_MOVE = "conflict_move"
+SIDE_CONFLICT_CONVENTION = "conflict_convention"
+SIDE_CONFLICT_BLOCK = "conflict_block"
+
+
+def _conflict_moved_sides(raw_sides):
+    """(sides, conflicting edges, shared numbers) with the conflicting sides moved past the used ranges.
+
+    The sides keep their order and their declared `first_pin`/`reverse`;
+    a side whose declared range meets the range of an earlier side is a
+    conflicting side and starts, in listing order, after the highest number
+    used so far, keeping its direction. Sides that declare no `first_pin`
+    are left to `_castellated_sides`. The raw entries are copied, never
+    changed.
+    """
+    import copy as _copy
+    sides = [_copy.deepcopy(entry) for entry in raw_sides or ()]
+    used, conflicting, shared = set(), [], set()
+    declared = []
+    for entry in sides:
+        if not isinstance(entry, dict):
+            continue
+        first = _optional_number(entry.get("first_pin"), positive=True, integer=True)
+        count = _optional_number(entry.get("count"), positive=True, integer=True)
+        if first is None or count is None:
+            continue
+        numbers = set(range(first, first + count))
+        if numbers & used:
+            shared |= numbers & used
+            conflicting.append(entry)
+            continue
+        used |= numbers
+        declared.append(entry)
+    for entry in conflicting:
+        count = _optional_number(entry.get("count"), positive=True, integer=True) or 0
+        start = (max(used) if used else 0) + 1
+        entry["first_pin"] = start
+        used |= set(range(start, start + count))
+    edges = [str(entry.get("edge") or "").strip().lower() for entry in conflicting]
+    return sides, edges, sorted(shared)
+
+
+def _settle_numbering_conflict(data: dict, conflict, progress, *, failure=None,
+                               repeated=None) -> None:
+    """A pad number two sides share, after the one correction: a question, or a block. Never a guess.
+
+    Model benchmark 2026-11-14 and its generality audit (H1): the numbers are
+    printed (the document says so), so no numbering may be chosen silently.
+    The sides that do not conflict keep their declared numbers; the
+    conflicting ones are moved past the used ranges PROVISIONALLY (so the
+    analysis can finish) and the footprint is blocked (`_pin_map_conflict`):
+    - the correction call failed (`failure`: network, credit, budget,
+      refusal): the block says so, with the remedy «repeat the analysis»;
+    - the correction repeated the conflict (`repeated`): the structured
+      question «side_numbering» with three options, none recommended --
+      the moved sides (SIDE_CONFLICT_MOVE), the program's counter-clockwise
+      convention (SIDE_CONFLICT_CONVENTION, applied on the canonical sides),
+      or «keep blocked» (SIDE_CONFLICT_BLOCK). A saved answer applies at once.
+    """
+    moved, edges, shared = _conflict_moved_sides(data.get("castellated_sides"))
+    data["castellated_sides"] = moved
+    if _numbers_printed(data) is False:
+        # No printed numbers: the fixed convention numbers every contact
+        # anyway (`_ask_side_numbering`), so nothing is asked on top (M3).
+        return
+    # Marker of an unsettled conflict, removed by a «move»/«convention» answer.
+    data["_numbering_conflict"] = True
+    numbers = ", ".join(str(n) for n in shared) or "?"
+    sides_text = ", ".join(EDGE_LABELS.get(edge, edge) for edge in edges) or "?"
+    if failure is not None:
+        message = tx("Numeri dei pad in conflitto fra lati (numeri {numbers}; lati in conflitto: {sides}) e correzione "
+                     "non riuscita ({exc}): numerazione provvisoria, non verificata. Ripeti "
+                     "l'analisi per ritentare la correzione.", numbers=numbers, sides=sides_text,
+                     exc=str(failure).rstrip("."))
+        data["_pin_map_conflict"] = message
+        data["_numbering_note"] = message
+        if progress:
+            progress(message)
+        return
+    options = [
+        {"label": tx("{sides}: numerazione dopo gli altri lati (dal {first})", sides=sides_text,
+                     first=min(int(side.get("first_pin") or 0) for side in moved
+                               if isinstance(side, dict)
+                               and str(side.get("edge") or "").strip().lower() in edges)
+                     if edges else "?"),
+         "value": SIDE_CONFLICT_MOVE},
+        {"label": tx("Numerazione convenzionale del programma (senso antiorario dall'angolo in "
+                     "alto a sinistra), non quella del costruttore"),
+         "value": SIDE_CONFLICT_CONVENTION},
+        {"label": tx("Lascia bloccato: correggo la numerazione a mano"), "value": SIDE_CONFLICT_BLOCK}]
+    candidates = {option["value"]: {"kind": "conflict", "edges": edges, "numbers": shared}
+                  for option in options}
+    text = tx("Lati in conflitto: {sides}. Hanno numeri di pad di un altro lato ({numbers}) "
+              "anche dopo la richiesta di correzione ({why}). Come vanno numerati?",
+              sides=sides_text, numbers=numbers, why=str(repeated).rstrip("."))
+    chosen = _ask(data, "side_numbering", text, options, _question_evidence(data), candidates,
+                  key_values=[f"conflict:{','.join(edges)}:{numbers}"])
+    if chosen in (SIDE_CONFLICT_MOVE, SIDE_CONFLICT_CONVENTION):
+        data.pop("_numbering_conflict", None)
+    if chosen == SIDE_CONFLICT_MOVE:
+        note = tx("Numeri dei pad in conflitto: {sides} numerati dopo gli altri lati, scelta "
+                  "dell'utente.", sides=sides_text)
+    elif chosen == SIDE_CONFLICT_CONVENTION:
+        # Applied on the canonical sides (view from above), by the side
+        # numbering step (`_ask_side_numbering`).
+        data["_conflict_convention"] = True
+        note = tx("Numeri dei pad in conflitto: numerazione convenzionale, scelta dell'utente.")
+    else:
+        message = (tx("Numeri dei pad in conflitto fra lati (numeri {numbers}; lati in conflitto: {sides}): "
+                      "lasciati bloccati per scelta dell'utente.", numbers=numbers,
+                      sides=sides_text) if chosen == SIDE_CONFLICT_BLOCK else
+                   tx("Numeri dei pad in conflitto fra lati (numeri {numbers}; lati in conflitto: {sides}): "
+                      "numerazione provvisoria, la scelta e' chiesta all'utente.",
+                      numbers=numbers, sides=sides_text))
+        data["_pin_map_conflict"] = message
+        data["_numbering_note"] = message
+        if progress:
+            progress(message)
+        return
+    data["notes"] = (str(data.get("notes") or "") + "\n" + note).strip()
+    if progress:
+        progress(note)
 
 
 class _PinNumberConflict(ExtractionError):
@@ -14042,6 +16973,14 @@ def _params_from_tool_arguments(data: dict, *, trusted_components: bool = False)
                     if key in ("pitch_mm", "row_spacing_mm")] if unread_positions else []
 
     if layout == "castellated":
+        # The edges the photo measured without settling their contact style:
+        # one question each, before the sides are normalised (rule (a) may
+        # set a provisional style).
+        _ask_photo_contact_styles(data, notes)
+        # A row spacing nothing witnesses, or none, with through-hole rows
+        # (the photo's styles included, read only now): the printed quotes
+        # are offered (real runs 2026-11-13, ESP32).
+        _ask_row_spacing(data)
         sides = _castellated_sides(
             data.get("castellated_sides"),
             body_length=_optional_number(data.get("body_length_mm"), positive=True),
@@ -14103,6 +17042,9 @@ def _params_from_tool_arguments(data: dict, *, trusted_components: bool = False)
             hole_block = tx("Foro dei pad {pads} non stampato e terminale non dichiarato: nessun "
                             "footprint finche' il foro non e' letto dal disegno o scelto nella "
                             "domanda sui pad senza foro.", pads=", ".join(unread_holes))
+        if data.get("_terminal_reread") == "nothing":
+            # Said only when the re-read was actually made and found nothing.
+            hole_block += " " + tx("Riletto: nessuna quota di terminale o foro trovata.")
         pin_map_conflict = hole_block if not pin_map_conflict else pin_map_conflict + "\n" + hole_block
     if pads_footprint_dropped and unread_positions and not pin_map_conflict:
         # The dedicated pad reading normally blocks unconfirmed positions
@@ -14167,6 +17109,19 @@ def _params_from_tool_arguments(data: dict, *, trusted_components: bool = False)
         pin_length_3d_mm=_opt_float("pin_length_3d_mm"),
         edge_fillets=_validated_edge_fillets(data.get("edge_fillets"), notes),
         pinout=_validated_pinout(data.get("pinout"), notes),
+        pin_numbers_printed=_numbers_printed(data),
+        terminal_reread=(data["_terminal_reread"] if data.get("_terminal_reread")
+                         in ("found", "nothing") else None),
+        label_conflicts=(copy.deepcopy(data["_label_conflicts"])
+                         if isinstance(data.get("_label_conflicts"), list)
+                         and data["_label_conflicts"] else None),
+        contact_function_witness=(data["_contact_function_witness"]
+                                  if data.get("_contact_function_witness") in CONTACT_WITNESSES
+                                  else None),
+        contact_function_groups=(dict(data["_contact_function_groups"])
+                                 if isinstance(data.get("_contact_function_groups"), dict)
+                                 and data["_contact_function_groups"] else None),
+        pin_role_conflicts=pin_role_conflicts(data.get("pinout")) or None,
         pin_map=pin_map,
         body_offset_x_mm=_opt_float("body_offset_x_mm"),
         body_color_hex=data.get("body_color_hex") or None,
@@ -14181,6 +17136,9 @@ def _params_from_tool_arguments(data: dict, *, trusted_components: bool = False)
                    if isinstance(question, dict)],
         candidates=copy.deepcopy(data["_candidates"]) if isinstance(data.get("_candidates"), dict)
         else None,
+        answered_questions=(copy.deepcopy(data["_answered"])
+                            if isinstance(data.get("_answered"), dict) and data["_answered"]
+                            else None),
         raw_main=copy.deepcopy(data["_raw_main"]) if isinstance(data.get("_raw_main"), dict) else None,
         unread_pads=list(unread) if pads_footprint_dropped else None,
         unread_pad_geometry=unread_geometry,
@@ -14197,6 +17155,11 @@ def _params_from_tool_arguments(data: dict, *, trusted_components: bool = False)
         _drop_unread_row_spacing(params, notes)
         _apply_measured_lands(data, params, notes)
         _apply_measured_holes(data, params, notes)
+        # After the photo's styles (generality audit 2026-11-14, D1): the
+        # through-holes the outline-sized spacing would place are those of
+        # the styles the result carries, not of the declared ones.
+        _drop_board_outline_row_spacing(params, notes)
+        _settle_impossible_double_contacts(data, params, notes)
         _downgrade_sizes_wider_than_the_pitch(params, notes)
     else:
         _lift_drill_above_the_lead(params, notes)
@@ -14318,6 +17281,15 @@ def _validated_pinout(raw, notes: list) -> Optional[list[dict]]:
             else:
                 notes.append(tx("{key} scartato: valore non valido ({value!r}).",
                                 key=f"pinout[{index}].contact", value=contact))
+        # A terminal declared off every castellated side (an exposed pad):
+        # kept only as a true boolean, anything else means «not declared».
+        if entry.get("off_side") is True:
+            entry_out["off_side"] = True
+        # A name the program took from the side label (the analysis named
+        # that contact nothing, `pinout_coherence.convention_pinout`): kept
+        # marked, so it never counts as pinout evidence.
+        if entry.get(pinout_coherence.LABEL_NAME_KEY) is True:
+            entry_out[pinout_coherence.LABEL_NAME_KEY] = True
         valid.append(entry_out)
     return valid or None
 
@@ -14716,6 +17688,14 @@ def _resolve_pad_terminals(package_geometry, data: dict, notes: list, *, lift: b
     # contradicted it, an answer saved before it existed).
     dedicated_leads = (data.get("_dedicated_leads")
                        if isinstance(data.get("_dedicated_leads"), dict) else None)
+    # The terminals ANY dedicated reading transcribed (or the targeted
+    # re-read, `_reread_missing_terminals`): only for a pad with no terminal
+    # of its own, as a terminal read once.
+    reading_leads = (data.get("_reading_leads")
+                     if isinstance(data.get("_reading_leads"), dict) else None)
+    # Hole callouts read once by the targeted re-read: estimates.
+    reread_holes = (data.get("_reread_holes")
+                    if isinstance(data.get("_reread_holes"), dict) else None)
     pins = [pin for pin in geometry["pins"] if isinstance(pin, dict)]
     # One drill on every holed pad: the answer-level words and the one
     # part-level lead may stand for all of them. Different drills mean
@@ -14732,7 +17712,9 @@ def _resolve_pad_terminals(package_geometry, data: dict, notes: list, *, lift: b
         "unfounded", "withheld", "part_lead", "lead_withheld", "slot_unoriented", "loose_blade",
         "land_capped", "land_model", "slot_turned", "thin_ring", "lead_contradicted",
         "lead_lifted", "widened", "part_narrow", "part_protected", "part_lifted", "part_widened",
-        "zero_hole", "lead_once", "lead_disagree")}
+        "zero_hole", "lead_once", "lead_disagree", "hole_once", "lead_from_layout")}
+    # The terminals of the reading whose layout was adopted (D-a).
+    adopted_leads = (reading_leads if data.get("_layout_source") == "dedicated" else None)
     # The lands the program wrote, {id(pin): (pin, the land it replaced)}:
     # the only ones `_keep_derived_lands_apart` may take back or reduce.
     derived: dict = {}
@@ -14756,9 +17738,25 @@ def _resolve_pad_terminals(package_geometry, data: dict, notes: list, *, lift: b
         lead_allowed = uniform and bool(data.get("_added_lead_allowed", True))
         _resolve_one_pad(pin, fallback, dedicated, found,
                          None if added_pad and not lead_allowed else part_lead, uniform, derived,
-                         dedicated_leads)
+                         dedicated_leads, reading_leads, reread_holes, adopted_leads)
     if lift:
-        _judge_holes_against_leads(pins, part_lead, _part_lead_word(data, part_lead), found, derived)
+        _judge_holes_against_leads(
+            pins, part_lead, _part_lead_word(data, part_lead), found, derived,
+            CHAIN_QUOTE_ROUNDING_MM.get(data.get("_source_unit_factor") or 1.0,
+                                        CHAIN_QUOTE_ROUNDING_MM[1.0]))
+        # A read hole its terminal cannot pass: hole or terminal? (night4 G2)
+        _ask_hole_or_terminal(data, found, derived, notes)
+    for pin in pins:
+        pin.pop("_callout_roundings", None)
+    if found.get("press_fit_gross"):
+        notes.append(tx("ATTENZIONE pad {pads}: dichiarati a pressione, ma il foro e' meno della "
+                        "meta' del terminale: foro o terminale da verificare sul disegno.",
+                        pads=", ".join(found["press_fit_gross"])))
+    if found["lead_from_layout"]:
+        notes.append(tx("Terminali presi dalla lettura dedicata, di cui e' stata adottata la "
+                        "disposizione: la risposta principale assegnava ai pad terminali diversi "
+                        "({details}). Valori STIMATI da verificare sul disegno.",
+                        details="; ".join(found["lead_from_layout"])))
     # {id(pin): reason} of the pads no rule could settle (steps 3 and 4).
     unfit = _settle_lands_and_fit(pins, derived, found)
     if found["zero_hole"]:
@@ -14788,6 +17786,10 @@ def _resolve_pad_terminals(package_geometry, data: dict, notes: list, *, lift: b
     if found["only_main"]:
         notes.append(tx("Pad {pads}: foro stampato letto solo dalla risposta principale (la "
                         "lettura dedicata non lo riporta).", pads=", ".join(found["only_main"])))
+    if found["hole_once"]:
+        notes.append(tx("Pad {pads}: foro letto una sola volta (rilettura dei terminali), non "
+                        "confermato da una seconda lettura: stima, da verificare sul disegno.",
+                        pads=", ".join(found["hole_once"])))
     if found["only_dedicated"]:
         notes.append(tx("Pad {pads}: foro stampato letto solo dalla lettura dedicata, usato.",
                         pads=", ".join(found["only_dedicated"])))
@@ -15046,6 +18048,18 @@ def _is_zero(value) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and value == 0
 
 
+def _one_printed_value(first: float, second: float, margin: float) -> bool:
+    """Whether two transcriptions are ONE printed value read twice: the shared comparison.
+
+    Within the conversion noise (_PRINTED_HOLE_TOLERANCE_MM), or STRICTLY
+    inside `margin`, the rounding of the coarser transcription: «0.8» and
+    «0.82» can be one value printed as «0.8»; «0.80» and «0.85» are two.
+    Used by `_same_lead` and `_same_callout` (final night5 audit, M1).
+    """
+    difference = abs(float(first) - float(second))
+    return difference <= _PRINTED_HOLE_TOLERANCE_MM or difference < margin
+
+
 def _same_lead(lead: dict, rounding_mm: float, other: dict) -> bool:
     """Whether a pad's terminal is the terminal `other` the dedicated reading transcribed for it.
 
@@ -15064,9 +18078,8 @@ def _same_lead(lead: dict, rounding_mm: float, other: dict) -> bool:
     second = sorted(value for key, value in theirs.items() if key != "shape")
     margin = min(max(float(rounding_mm or 0.0), float(other.get("rounding_mm") or 0.0)),
                  max(CHAIN_QUOTE_ROUNDING_MM.values()))
-    return len(first) == len(second) and all(
-        abs(a - b) <= _PRINTED_HOLE_TOLERANCE_MM or abs(a - b) < margin
-        for a, b in zip(first, second))
+    return len(first) == len(second) and all(_one_printed_value(a, b, margin)
+                                             for a, b in zip(first, second))
 
 
 def _lead_text_mm(lead: dict) -> str:
@@ -15126,14 +18139,25 @@ def _confirmed_lead_word(lead: dict, word: str, rounding_mm: float, dedicated_le
 
 def _resolve_one_pad(pin: dict, fallback: dict, dedicated, found: dict, part_lead=None,
                      lead_on_model_drill: bool = True, derived: Optional[dict] = None,
-                     dedicated_leads=None) -> None:
+                     dedicated_leads=None, reading_leads=None, reread_holes=None,
+                     adopted_leads=None) -> None:
     """Apply step 1 of `_resolve_pad_terminals` to one pin dict, in place; `found` collects the pads per outcome.
 
     `part_lead` is `_part_lead(data)`; `lead_on_model_drill` False keeps it
     off a pad that carries a model drill (mixed drills); `derived` receives
     {id(pin): (pin, the land the program replaced)} for every land the
     program wrote; `dedicated_leads` are the terminals the dedicated reading
-    transcribed (`_confirmed_lead_word`), None without an independent one.
+    transcribed (`_confirmed_lead_word`), None without an independent one;
+    `reading_leads` the terminals any dedicated reading transcribed, used
+    only for a pad with no terminal of its own (main or part level), as a
+    terminal read ONCE: "estimated", the pad named in `found["lead_once"]`;
+    `reread_holes` the hole callouts of the targeted re-read, used only for
+    a pad with no printed hole otherwise, as a hole read ONCE: "estimated",
+    the pad named in `found["hole_once"]` (generality audit item 4);
+    `adopted_leads` the terminals of the reading whose LAYOUT was adopted
+    (the dedicated one, `data["_layout_source"]`), or None: a pad whose
+    terminal they give differently takes theirs, estimated, named in
+    `found["lead_from_layout"]` (night5 real run, D-a).
     """
     number = _pad_number_text(pin.get("number"))
     raw = pin.pop("value_sources", None)
@@ -15141,6 +18165,12 @@ def _resolve_one_pad(pin: dict, fallback: dict, dedicated, found: dict, part_lea
     pin.pop("hole_callout", None)
     rounding = _optional_number(pin.pop("_hole_rounding_mm", None), positive=True) or 0.0
     lead_rounding = _optional_number(pin.pop("_lead_rounding_mm", None), positive=True) or 0.0
+    # Kept for the hole-against-terminal judgement (`_same_callout`); removed
+    # by `_resolve_pad_terminals` once the judgement is done.
+    pin["_callout_roundings"] = (rounding, lead_rounding)
+    if pin.get("lead_fit") not in ("clearance", "press_fit"):
+        # A declared attribute only: anything else states nothing.
+        pin.pop("lead_fit", None)
     raw_lead = pin.pop("lead", None)
     if isinstance(raw_lead, dict) and all(value is None for value in raw_lead.values()):
         # An empty lead, or one with every field null (how a strict-mode
@@ -15183,7 +18213,20 @@ def _resolve_one_pad(pin: dict, fallback: dict, dedicated, found: dict, part_lea
             lead = None
             found["lead_dropped"].append(number or "?")
     lead_word = (_pad_word(raw, "lead") or "estimated") if lead else None
-    if lead is not None:
+    # The layout adopted is the dedicated reading's: its terminal goes with
+    # its positions (night5 real run, 2026-11-14: positions from one reading,
+    # terminals from the other assigned them to the wrong pads), as an
+    # estimate -- two readings disagree on it. The one decision of both paths.
+    adopted_terminal, adopted_hole = _adopted_reading_pad(
+        lead, lead_rounding, _dedicated_hole(adopted_leads, number),
+        _dedicated_hole(dedicated, number) if adopted_leads is not None else None)
+    if adopted_terminal is not None:
+        found["lead_from_layout"].append(tx(
+            "pad {pad}: {dedicated} (risposta principale {main})", pad=number or "?",
+            dedicated=_lead_text_mm(adopted_terminal), main=_lead_text_mm(lead)))
+        lead = adopted_terminal
+        lead_word = "estimated"
+    elif lead is not None:
         # A terminal read once is not a measure: the word the model declares
         # stands only when the dedicated reading transcribed the same one.
         lead_word = _confirmed_lead_word(lead, lead_word, lead_rounding, dedicated_leads, number,
@@ -15209,6 +18252,19 @@ def _resolve_one_pad(pin: dict, fallback: dict, dedicated, found: dict, part_lea
             sources["drill_mm"] = "read"
         else:
             sources["drill_mm"] = "estimated"
+            if adopted_hole is not None:
+                # Two printed holes disagree and the dedicated layout was
+                # adopted: its printed hole goes with it (M2), an estimate.
+                first, second = adopted_hole
+                placed = ((first, None) if second is None or abs(second - first)
+                          <= _PRINTED_HOLE_TOLERANCE_MM else _slot_along_pad(pin, first, second))
+                if placed is not None:
+                    drill, length = placed
+                    pin["drill_mm"] = drill
+                    if length is None:
+                        pin.pop("drill_length_mm", None)
+                    else:
+                        pin["drill_length_mm"] = length
             seen = (_hole_text_mm(other["drill_mm"], other.get("drill_length_mm"))
                     if other_printed else tx("due valori diversi"))
             found["disagree"].append(tx("pad {pad}: risposta principale {main}, lettura dedicata "
@@ -15231,15 +18287,28 @@ def _resolve_one_pad(pin: dict, fallback: dict, dedicated, found: dict, part_lea
                 printed_hole = _slot_along_pad(pin, first, second)
                 if printed_hole is None:
                     found["slot_unoriented"].append(f"{number} ({_hole_text_mm(first, second)})")
-        if printed_hole is not None:
-            drill, length = printed_hole
+        once = None
+        if printed_hole is None:
+            # A callout only the one-off re-read transcribed: read once.
+            other_once = _dedicated_hole(reread_holes, number)
+            if isinstance(other_once, dict) and other_once.get("drill_mm") is not None:
+                first, second = other_once["drill_mm"], other_once.get("drill_length_mm")
+                if second is None or abs(second - first) <= _PRINTED_HOLE_TOLERANCE_MM:
+                    once = (first, None)
+        if printed_hole is not None or once is not None:
+            drill, length = printed_hole if printed_hole is not None else once
             pin["drill_mm"] = drill
             if length is None:
                 pin.pop("drill_length_mm", None)
             else:
                 pin["drill_length_mm"] = length
-            sources["drill_mm"] = "read"
-            found["only_dedicated"].append(number)
+            if printed_hole is not None:
+                sources["drill_mm"] = "read"
+                found["only_dedicated"].append(number)
+                pin["_callout_roundings"] = (float(other.get("rounding_mm") or 0.0), lead_rounding)
+            else:
+                sources["drill_mm"] = "estimated"
+                found["hole_once"].append(number)
         else:
             if pin.get("drill_length_mm") is not None:
                 # A slot is never an estimate (contract: only when printed).
@@ -15259,6 +18328,20 @@ def _resolve_one_pad(pin: dict, fallback: dict, dedicated, found: dict, part_lea
                                                      dedicated_leads, number, found)
                 lead, lead_word = terminal, terminal_word
                 found["part_lead"].append(number)
+            if terminal is None and pad_type == "thru_hole" and drill is None:
+                # No terminal from the main answer: the one a dedicated
+                # reading transcribed for this pad, read once -> estimated.
+                other = _dedicated_hole(reading_leads, number)
+                if isinstance(other, dict) and isinstance(other.get("lead"), dict):
+                    try:
+                        terminal = normalised_lead(other["lead"], number)
+                    except (ValueError, OverflowError):
+                        terminal = None
+                    if terminal is not None:
+                        terminal_word = "estimated"
+                        lead, lead_word = terminal, terminal_word
+                        if (number or "?") not in found["lead_once"]:
+                            found["lead_once"].append(number or "?")
             if terminal is not None:
                 estimate = estimated_round_pad(terminal)
                 word = "derived" if terminal_word in ("read", "derived") else "estimated"
@@ -15364,7 +18447,8 @@ def _lift_pad_hole(pin: dict, hole: float, derived: dict) -> bool:
     return False
 
 
-def _judge_holes_against_leads(pins: list, part_lead, part_word, found: dict, derived: dict) -> None:
+def _judge_holes_against_leads(pins: list, part_lead, part_word, found: dict, derived: dict,
+                               unit_cap: float = CHAIN_QUOTE_ROUNDING_MM[1.0]) -> None:
     """Step 2 of `_resolve_pad_terminals`: every through-hole pad's hole judged against the terminal it must take.
 
     Structural, not a threshold: a lead cannot pass through a hole of its
@@ -15393,7 +18477,19 @@ def _judge_holes_against_leads(pins: list, part_lead, part_word, found: dict, de
     @param found Outcome lists of `_resolve_pad_terminals`.
     @param derived The lands the program wrote, updated when a land follows a lifted hole.
     """
-    thru = [pin for pin in pins if pin.get("pad_type") == "thru_hole"]
+    # A press-fit pad is meant to be tighter than its terminal: not judged,
+    # except for a GROSS mismatch. Sanity guard, declared, NOT a press-fit
+    # standard: a hole under half the terminal's circumscribed diameter is
+    # no interference fit any drawing would mean; it is named, nothing changes.
+    for pin in pins:
+        lead = pin.get("lead")
+        drill = _optional_number(pin.get("drill_mm"), positive=True)
+        if (pin.get("pad_type") == "thru_hole" and pin.get("lead_fit") == "press_fit"
+                and isinstance(lead, dict) and drill is not None
+                and drill < 0.5 * lead_circumscribed_diameter(lead)):
+            found.setdefault("press_fit_gross", []).append(_pad_number_text(pin.get("number")) or "?")
+    thru = [pin for pin in pins if pin.get("pad_type") == "thru_hole"
+            and pin.get("lead_fit") != "press_fit"]
     for pin in thru:
         lead = pin.get("lead")
         drill = _optional_number(pin.get("drill_mm"), positive=True)
@@ -15407,8 +18503,16 @@ def _judge_holes_against_leads(pins: list, part_lead, part_word, found: dict, de
             continue
         number = _pad_number_text(pin.get("number")) or "?"
         if (pin.get("sources") or {}).get("drill_mm") == "read":
-            found["lead_contradicted"].append(number)
             _mark_pad_estimated(pin, "drill_mm")
+            if lead.get("shape") == "round" and _same_callout(pin, drill, lead["diameter_mm"],
+                                                              unit_cap):
+                # Two readings of ONE printed value (H1): asked
+                # (`_ask_hole_or_terminal`), with the hole the terminal implies.
+                found.setdefault("hole_or_terminal", []).append(
+                    (pin, drill, lead["diameter_mm"], estimated_round_pad(lead).drill_mm))
+            else:
+                # A hole smaller than a DIFFERENT terminal: a real contradiction.
+                found["lead_contradicted"].append(number)
             continue
         hole = estimated_round_pad(lead).drill_mm
         found["lead_lifted"].append(number)
@@ -15418,7 +18522,9 @@ def _judge_holes_against_leads(pins: list, part_lead, part_word, found: dict, de
             found["loose_blade"].append(number)
     if part_lead is None:
         return
-    lead = part_lead[0]["diameter_mm"]
+    lead = part_lead[0].get("diameter_mm")
+    if lead is None:
+        return
     rest = [(pin, drill) for pin in thru if not isinstance(pin.get("lead"), dict)
             and (drill := _optional_number(pin.get("drill_mm"), positive=True)) is not None]
     if len({round(drill, 6) for _pin, drill in rest}) > 1:
@@ -15432,6 +18538,13 @@ def _judge_holes_against_leads(pins: list, part_lead, part_word, found: dict, de
         if drill > lead:
             continue
         number = _pad_number_text(pin.get("number")) or "?"
+        if ((pin.get("sources") or {}).get("drill_mm") == "read" and part_lead[0].get("shape") == "round"
+                and _same_callout(pin, drill, lead, unit_cap)):
+            # The part-level terminal and the read hole are one printed value
+            # (M3): the same question, never a silent lift or a mark only.
+            _mark_pad_estimated(pin, "drill_mm")
+            found.setdefault("hole_or_terminal", []).append((pin, drill, lead, lifted))
+            continue
         if (pin.get("sources") or {}).get("drill_mm") == "read" and part_word not in ("read", "derived"):
             found["part_protected"].append(number)
             _mark_pad_estimated(pin, "drill_mm")
@@ -15781,7 +18894,9 @@ def _drop_unread_row_spacing(params: "ExtractedParams", notes: list) -> None:
         return
     sources = dict(params.value_sources or {})
     source = sources.get("row_spacing_mm", UNDECLARED_SOURCE)
-    if source == "read":
+    # Read in a document, or chosen by the user among the printed quotes
+    # (`_ask_row_spacing`): both are the measurement.
+    if source in ("read", USER_SOURCE):
         return
     from ..generators.castellated_module import opposite_row_edges, through_hole_inset_from_rows
     edges = [side["edge"] for side in (params.castellated_sides or ()) if isinstance(side, dict)]
@@ -15869,9 +18984,16 @@ def _apply_measured_holes(data: dict, params: "ExtractedParams", notes: list) ->
     Per edge with a verdict: when the style the photo read differs from the
     declared one, the side takes the photo's style, with a note that says
     the evidence (how many lands agreed, the opening and the hole widths);
-    an equal style is confirmed silently. Only the STYLE is adopted: the hole
+    an equal style keeps the declared value but carries the same evidence
+    and a note «confirmed by the photo» (night real run 2026-11-14: the
+    result could not tell «declared, never checked» from «confirmed», only
+    the log said it). Only the STYLE is adopted: the hole
     width read on the photo is the visible barrel, not the drill, and is
-    reported in the note for a person, never written as a size. The
+    reported in the note for a person, never written as a size. A reading
+    the photo stage settled (`photo_inventory.edge_opening_style` keeps a
+    half-hole only when its opening is wider than the photo resolves, and
+    never turns an unresolved opening into a through hole) carries its
+    `reason`, appended to the evidence. The
     measurement block is a private key the photo stage writes; a raw answer
     never carries it (_canonicalize_answer drops it).
 
@@ -15890,20 +19012,581 @@ def _apply_measured_holes(data: dict, params: "ExtractedParams", notes: list) ->
         if not isinstance(reading, dict) or reading.get("style") not in CONTACT_STYLES:
             continue
         declared = side.get("contact_style")
-        if declared == reading["style"]:
-            continue
         label = EDGE_LABELS.get(edge, edge)
-        side["contact_style"] = reading["style"]
         side["_contact_style_evidence"] = tx(
             "letto sulla foto: {agreeing} piazzole su {contacts} concordi, foro {drill:.2f} mm, "
             "apertura sul bordo {chord:.2f} mm",
             agreeing=reading.get("agreeing", 0), contacts=reading.get("contacts", 0),
             drill=float(reading.get("drill_mm") or 0.0), chord=float(reading.get("chord_mm") or 0.0))
+        if isinstance(reading.get("reason"), str) and reading["reason"].strip():
+            # Why the photo settled the style (photo_inventory.settle_edge_holes
+            # with the outline witness; an unresolved opening gives no verdict).
+            side["_contact_style_evidence"] += "; " + reading["reason"].strip()
+        if declared == reading["style"]:
+            # Confirmed, not silent: the evidence says what the photo saw.
+            notes.append(tx("Lato {label}: tipo di contatto «{style}» confermato dalla foto "
+                            "({evidence}).", label=label, style=declared,
+                            evidence=side["_contact_style_evidence"]))
+            continue
+        side["contact_style"] = reading["style"]
         notes.append(tx(
             "Lato {label}: tipo di contatto {measured} letto sulla foto ({evidence}), al posto di "
             "«{declared}» dichiarato dal modello.",
             label=label, measured=reading["style"], evidence=side["_contact_style_evidence"],
             declared=declared or "?"))
+
+
+def _row_quotes_mm(data: dict) -> list:
+    """The answer's `printed_row_quotes` as [(value mm, role)], valid entries only, in the drawing's unit converted."""
+    factor = _declared_unit_factor(data) or 1.0
+    quotes = []
+    for entry in data.get("printed_row_quotes") or () if isinstance(data, dict) else ():
+        if not isinstance(entry, dict):
+            continue
+        value = _optional_number(entry.get("value"), positive=True)
+        role = entry.get("measures") if entry.get("measures") in ROW_QUOTE_ROLES else "other"
+        if value is not None:
+            quotes.append((round(value * factor, 4), role))
+    return quotes
+
+
+#: Option of the "row_spacing" question: no printed value is the row
+#: spacing, the generator estimates the through-hole inset (the behaviour
+#: without an answer).
+ROW_SPACING_ESTIMATE = "estimate"
+
+#: Suffix of a "row_spacing" option value whose quote equals the board size
+#: along the rows (`_equals_board_outline`): the option says so, and an
+#: answer saved when it did not (night real run 2026-11-14, «15.20») is not
+#: that option, so the question is asked again with the new label.
+ROW_OUTLINE_MARK = "~outline"
+
+
+def _row_spacing_question_context(sides, length, width, photo_styles=None):
+    """(extent across the rows, edges) when two opposite sides carry through-holes, else None.
+
+    `photo_styles` {edge: set of styles} replaces or extends the declared
+    style of an edge with what the photo stage read (built by
+    `_row_spacing_photo_styles`).
+    """
+    from ..generators.castellated_module import opposite_row_edges, style_has_through_hole
+    edges = [side.get("edge") for side in sides if isinstance(side, dict)]
+    pair = opposite_row_edges(edges)
+    if pair is None:
+        return None
+    photo_styles = photo_styles or {}
+    if not any(side.get("edge") in pair
+               and any(style_has_through_hole(style)
+                       for style in photo_styles.get(side.get("edge"), {side.get("contact_style")}))
+               for side in sides if isinstance(side, dict)):
+        return None
+    extent = finite_number(length if pair == ("left", "right") else width)
+    return (extent, pair) if extent and extent > 0 else None
+
+
+def _row_spacing_photo_styles(data: dict, sides) -> dict:
+    """{edge: styles} the row-spacing question judges each side by, the photo included.
+
+    A SETTLED photo style (`_measured_holes`) replaces the declared one, as
+    `_apply_measured_holes` does on the result (audit M2); an edge the photo
+    measured without settling (`_photo_contact_styles`) keeps its declared
+    style and adds «through_hole» when the closed holes were seen.
+    """
+    styles = {side["edge"]: {side.get("contact_style")} for side in sides}
+    measured = data.get("_measured_holes") if isinstance(data.get("_measured_holes"), dict) else {}
+    for edge, reading in measured.items():
+        if edge in styles and isinstance(reading, dict) and reading.get("style") in CONTACT_STYLES:
+            styles[edge] = {reading["style"]}
+    pending = (data.get(PHOTO_CONTACT_STYLES_KEY)
+               if isinstance(data.get(PHOTO_CONTACT_STYLES_KEY), dict) else {})
+    for edge, entry in pending.items():
+        if edge in styles and edge not in measured and isinstance(entry, dict) \
+                and entry.get("through_hole_seen"):
+            styles[edge] = styles[edge] | {"through_hole"}
+    return styles
+
+
+def _smallest_row_ring(data: dict, sides) -> float:
+    """The smallest closed through-hole ring (mm) a row of these sides can have, from what is declared.
+
+    The declared ring (`pad_diameter_mm` read or derived), else a declared
+    drill plus MIN_HOLE_WALL_MM on each side, else the smallest closed ring
+    the generator estimates: MIN_ESTIMATED_DRILL_MM + 2 * MIN_HOLE_WALL_MM.
+    """
+    from ..generators.castellated_module import MIN_ESTIMATED_DRILL_MM, MIN_HOLE_WALL_MM
+    sources = data.get("value_sources") if isinstance(data.get("value_sources"), dict) else {}
+    ring = finite_number(data.get("pad_diameter_mm"))
+    if ring and ring > 0 and sources.get("pad_diameter_mm") in ("read", "derived"):
+        return ring
+    drills = []
+    for side in sides:
+        drill = finite_number(side.get("through_hole_drill_mm"))
+        if drill and drill > 0 and sources.get(
+                f"castellated_sides.{side['edge']}.through_hole_drill_mm") in ("read", "derived"):
+            drills.append(drill)
+    if drills:
+        return max(drills) + 2 * MIN_HOLE_WALL_MM
+    return MIN_ESTIMATED_DRILL_MM + 2 * MIN_HOLE_WALL_MM
+
+
+def _equals_board_outline(value: float, outline) -> bool:
+    """Whether `value` equals one of the board outline sizes within the reading tolerance of one quote.
+
+    A quote equal to the board size ALONG the rows is probably that outline
+    (night real run 2026-11-14, a module with rows on the left and right
+    edges: the board WIDTH was offered as the row spacing and, chosen, gave
+    16 mm pads). It is a doubt, not a rule (generality audit D2): the schema
+    gives a quote no axis, and a genuine row spacing can equal the other
+    board size (a 25.4 x 20.32 mm board with its rows on the short edges).
+    So such a quote is offered labelled with the size it equals and the
+    inset it implies, never decided silently.
+    """
+    return any(size is not None and abs(value - size) <= _reading_tolerance(None) + 1e-9
+               for size in (finite_number(entry) for entry in outline or ()))
+
+
+def _row_spacing_possible(value: float, extent: float, ring: float) -> bool:
+    """Whether a quote can be the distance between the contact-row centres (audit M3).
+
+    The rows' holes must lie inside the board with their ring: the inset
+    (extent - value) / 2 at least ring / 2; and the quote must not be the
+    outline itself (closer to the extent than the reading tolerance, the
+    same as `_drop_board_outline_row_spacing`). A quote equal to the OTHER
+    board size is physically possible and stays (`_equals_board_outline`).
+    """
+    return (value > 0 and extent - value > _reading_tolerance(None) + 1e-9
+            and (extent - value) / 2 >= ring / 2 - 1e-9)
+
+
+def _saved_row_spacing(answers, offered: set):
+    """The value a saved "row_spacing" answer chose that is still on offer, or None (audit M4).
+
+    Like `_saved_layout_choice`: the choice is about that value, whatever the
+    other options were. Saved answers that chose different values still on
+    offer settle nothing.
+    """
+    chosen = set()
+    for key, value in (answers or {}).items():
+        if not isinstance(key, str) or not key.startswith("row_spacing:"):
+            continue
+        if str(value) in key.partition(":")[2].split("|") and str(value) in offered:
+            chosen.add(str(value))
+    return next(iter(chosen)) if len(chosen) == 1 else None
+
+
+def _ask_row_spacing(data: dict, progress=None) -> None:
+    """Ask which printed quote is the distance between the contact rows, when nothing witnesses it.
+
+    Two real runs of 2026-11-13 (ESP32 devkit). In one the model gave no
+    `row_spacing_mm` and the through-holes were placed from estimated
+    insets; in the other (gpt-5.6-sol, both main readings) it labelled the
+    printed quotes backwards -- 21.8 «contact_rows», 22.86 «mounting_holes»
+    -- and declared 21.8 «read»: nothing in the pipeline can confirm a row
+    spacing today (the photo stage exports no hole-centre inset and the
+    drawn-hole witness is not run on side-based modules), so a value that
+    rests only on how one reading labelled the quotes has no witness.
+
+    For a castellated module with through-holes on two opposite sides (the
+    photo's styles included, `_row_spacing_photo_styles`), ONE question
+    «row_spacing» offers the quotes the answer transcribed across the rows
+    (`printed_row_quotes`) that are physically possible as a distance
+    between contact centres (`_row_spacing_possible`: inside the board with
+    the smallest ring, not the outline), shown as printed values WITHOUT the
+    role the answer gave them (that labelling is what nothing confirms), plus
+    «non so: stima». It is asked:
+    - when the answer gave no usable row spacing (missing, or a provenance
+      the later rule drops: derived, estimated, undeclared);
+    - when the answer declared it «read» but another printed quote is
+      physically possible too: the read value is listed first, NOT
+      recommended, and the text says it rests on one reading of the labels.
+    Not asked when the read value is the only possible quote, when the user
+    chose it, or without any quote. A saved answer applies whenever its
+    chosen value (or «estimate») is still on offer (`_saved_row_spacing`),
+    checked first. Called twice on one answer (before and after the photo
+    stage): a question of an earlier call is dropped and asked again only
+    if it still applies, and an answer is applied once (audit M1).
+    """
+    # A question an earlier call recorded is re-judged on the data as it is now.
+    if isinstance(data.get("_questions"), list):
+        data["_questions"] = [q for q in data["_questions"]
+                              if not (isinstance(q, dict) and q.get("field") == "row_spacing")]
+    if isinstance(data.get("_candidates"), dict):
+        for key in [key for key in data["_candidates"] if str(key).startswith("row_spacing:")]:
+            data["_candidates"].pop(key, None)
+    if data.get("layout") != "castellated" or data.get("_row_spacing_settled"):
+        return
+    sides = _normalized_sides_copy(data) or []
+    context = _row_spacing_question_context(sides, data.get("body_length_mm"),
+                                            data.get("body_width_mm"),
+                                            _row_spacing_photo_styles(data, sides))
+    if context is None:
+        return
+    extent, pair = context
+    program = data.get("_program_sources") if isinstance(data.get("_program_sources"), dict) else {}
+    if program.get("row_spacing_mm") == USER_SOURCE:
+        return
+    ring = _smallest_row_ring(data, [side for side in sides if side["edge"] in pair])
+    declared = data.get("value_sources") if isinstance(data.get("value_sources"), dict) else {}
+    read = finite_number(data.get("row_spacing_mm"))
+    if read is not None and declared.get("row_spacing_mm") != "read":
+        # Derived, estimated or undeclared: `_drop_unread_row_spacing` drops
+        # it, so the question is the one of a missing row spacing.
+        read = None
+    if read is not None and not _row_spacing_possible(read, extent, ring):
+        read = None
+    # The board size ALONG the rows: a quote equal to it is a doubt (D2).
+    across_lr = pair == ("left", "right")
+    other = finite_number(data.get("body_width_mm") if across_lr else data.get("body_length_mm"))
+
+    def outline_label(key):
+        # The size it equals and where it would put the holes, so that an
+        # absurd inset shows itself; None when it equals no outline size.
+        value = float(key)
+        if other is None or not _equals_board_outline(value, (other,)):
+            return None
+        inset = (extent - value) / 2
+        return (tx("{value} mm (quota stampata uguale alla larghezza della scheda: fori a "
+                   "{inset:.2f} mm dal bordo)", value=key, inset=inset) if across_lr else
+                tx("{value} mm (quota stampata uguale alla lunghezza della scheda: fori a "
+                   "{inset:.2f} mm dal bordo)", value=key, inset=inset))
+    # The roles the answer gave its quotes («contact_rows», «mounting_holes»)
+    # are the very labelling nothing confirms (realrun8 ESP32: 22.86 shown as
+    # «fra fori di montaggio» misled the choice): the options show the printed
+    # values only. The outline is still excluded by geometry
+    # (`_row_spacing_possible`), never by its label.
+    quotes, seen = [], set()
+    for value, role in data.get("_row_quotes_mm") or ():
+        key = f"{value:.2f}"
+        if key in seen or not _row_spacing_possible(value, extent, ring):
+            continue
+        seen.add(key)
+        quotes.append((key, role))
+    read_key = f"{read:.2f}" if read is not None else None
+
+    def option_value(key):
+        # An outline-sized quote is its own option (ROW_OUTLINE_MARK).
+        return key + ROW_OUTLINE_MARK if outline_label(key) else key
+
+    offered = {option_value(key) for key, _role in quotes} | (
+        {option_value(read_key)} if read_key else set()) | {ROW_SPACING_ESTIMATE}
+    saved = _saved_row_spacing(data.get("_answers"), offered)
+    if saved is not None:
+        # Checked before anything else (audit M4): the user's choice wins.
+        data["_row_spacing_settled"] = True
+        note = _apply_row_spacing_choice(data, saved)
+        data["notes"] = (str(data.get("notes") or "") + "\n" + note).strip()
+        if progress:
+            progress(note)
+        return
+    if (read_key is not None and not any(key != read_key for key, _role in quotes)
+            and outline_label(read_key) is None):
+        # The read value is the only physically possible quote: kept. One
+        # equal to the board size along the rows is a doubt and is asked (D2).
+        return
+    if not quotes and read_key is None:
+        return
+    options = []
+    if read_key is not None:
+        options.append({"label": outline_label(read_key) or tx(
+            "{value} mm (letta dall'analisi come distanza fra le file, su una sola lettura delle "
+            "etichette delle quote)", value=read_key), "value": option_value(read_key)})
+    for key, _role in quotes:
+        if key != read_key:
+            options.append({"label": outline_label(key) or tx("{value} mm (quota stampata)",
+                                                             value=key),
+                            "value": option_value(key)})
+    options.append({"label": tx("Non so: stima la distanza dei fori dal bordo"),
+                    "value": ROW_SPACING_ESTIMATE})
+    text = (tx("Distanza fra le file di contatti {value} mm letta dall'analisi solo da come ha "
+               "etichettato le quote stampate, senza un riscontro: quale quota stampata e' la "
+               "distanza fra i centri delle due file?", value=read_key) if read_key else
+            tx("Distanza fra le file di contatti non data dall'analisi: quale quota stampata e' la "
+               "distanza fra i centri delle due file? Mette i fori passanti al posto giusto."))
+    candidates = {option["value"]: {"row_spacing_mm": _row_spacing_value(option["value"])}
+                  for option in options if option["value"] != ROW_SPACING_ESTIMATE}
+    chosen = _ask(data, "row_spacing", text, options, _question_evidence(data),
+                  candidates=candidates)
+    if chosen is None:
+        if progress:
+            progress(tx("Distanza fra le file di contatti: domanda all'utente fra le quote "
+                        "stampate."))
+        return
+    data["_row_spacing_settled"] = True
+    note = _apply_row_spacing_choice(data, chosen)
+    data["notes"] = (str(data.get("notes") or "") + "\n" + note).strip()
+    if progress:
+        progress(note)
+
+
+def _row_spacing_value(value) -> float:
+    """The millimetres of a "row_spacing" option value («22.86», «15.20~outline»)."""
+    return float(str(value).split(ROW_OUTLINE_MARK)[0])
+
+
+def _apply_row_spacing_choice(target, value) -> str:
+    """Write a "row_spacing" answer on an answer dict or on ExtractedParams; return its note.
+
+    «estimate» removes a row spacing the answer read (the user does not
+    trust it): the generator then estimates the through-hole inset.
+    """
+    if value == ROW_SPACING_ESTIMATE:
+        if isinstance(target, dict):
+            target.pop("row_spacing_mm", None)
+            if isinstance(target.get("value_sources"), dict):
+                target["value_sources"].pop("row_spacing_mm", None)
+        else:
+            target.row_spacing_mm = None
+            sources = dict(target.value_sources or {})
+            sources.pop("row_spacing_mm", None)
+            target.value_sources = sources
+        return tx("Distanza fra le file di contatti: nessuna quota scelta, distanza dei fori dal "
+                  "bordo stimata (scelta dell'utente).")
+    spacing = _row_spacing_value(value)
+    if isinstance(target, dict):
+        target["row_spacing_mm"] = spacing
+        _set_program_source(target, "row_spacing_mm", USER_SOURCE)
+    else:
+        target.row_spacing_mm = spacing
+        sources = dict(target.value_sources or {})
+        sources["row_spacing_mm"] = USER_SOURCE
+        target.value_sources = sources
+    return tx("Distanza fra le file di contatti {value:.2f} mm scelta dall'utente fra le quote "
+              "stampate.", value=spacing)
+
+
+#: Key of the answer where the photo stage leaves the edges whose contact
+#: style it measured but could not settle (photo_inventory.PHOTO_CONTACT_STYLES_KEY,
+#: written there; a raw model answer never carries it).
+PHOTO_CONTACT_STYLES_KEY = "_photo_contact_styles"
+
+
+def _contact_style_label(style: str) -> str:
+    """The contact style as an option label (translated)."""
+    return {"through_hole": tx("Fori passanti (bordo non tagliato)"),
+            "half_and_through": tx("Semi-fori sul bordo + fori passanti"),
+            "half_hole": tx("Solo semi-fori sul bordo")}.get(style, style)
+
+
+def _apply_contact_style_choice(sides, edge: str, style: str) -> Optional[str]:
+    """Set the contact style of the side on `edge`; the note, or None when there is no such side."""
+    for side in sides or ():
+        if isinstance(side, dict) and _side_edge(side) == edge:
+            side["contact_style"] = style
+            side.pop("_contact_style_provisional", None)
+            return tx("Lato {label}: tipo di contatto «{style}» scelto dall'utente guardando la "
+                      "foto.", label=EDGE_LABELS.get(edge, edge), style=style)
+    return None
+
+
+def _ask_photo_contact_styles(data: dict, notes: list) -> None:
+    """One question per edge whose contact style the photo measured but did not settle.
+
+    `data[PHOTO_CONTACT_STYLES_KEY]` (photo_inventory.photo_contact_style_questions):
+    per edge the styles the measurement allows (`options`, «half_hole» left
+    out when a closed hole was seen behind the lands), an edge with the same
+    land pattern (`like_edge`) and its style (`recommended`), the photo strip
+    (`evidence`). The question «contact_style» (key: the field, the edge and
+    the options) offers those styles; the one of the like edge is flagged
+    `"recommended": True`. A saved answer sets the side's style at once.
+    The recommendation is `recommended` as photo_inventory resolved it (a
+    twin edge settled by the outline, else the photo's own style of a
+    withheld short row, else none; `recommended_from` says which). When it
+    comes from the photo («photo»: photo_inventory.short_row_contradiction,
+    a short located row whose photo style contradicts the declared one,
+    held back from the measured holes) the text says `why` instead of «the
+    photo does not show whether the edge is cut» -- false there, the outline
+    confirmed the cut; with a twin edge the «like the edge» text stays.
+    While the question is open, rule (a): a declared «half_hole» never
+    stands when the photo saw the through hole -- the side takes
+    «half_and_through» provisionally, said in the notes (the question also
+    blocks footprint writes in the window).
+    """
+    pending = data.get(PHOTO_CONTACT_STYLES_KEY)
+    if not isinstance(pending, dict):
+        return
+    sides = [side for side in data.get("castellated_sides") or () if isinstance(side, dict)]
+    for edge in sorted(pending):
+        entry = pending[edge]
+        if not isinstance(entry, dict):
+            continue
+        side = next((item for item in sides if _side_edge(item) == edge), None)
+        styles = [style for style in entry.get("options") or () if style in CONTACT_STYLES]
+        if side is None or not styles:
+            continue
+        label = EDGE_LABELS.get(edge, edge)
+        like = entry.get("like_edge")
+        why = entry.get("why") if entry.get("recommended_from") == "photo" else None
+        text = (tx("{why} Quale tipo di contatto ha il lato {label}?", why=why, label=label)
+                if isinstance(why, str) and why.strip() else
+                tx("Lato {label}: la foto non mostra se il bordo e' tagliato. I contatti sono fori "
+                   "passanti come il lato {like}, oppure semi-fori?", label=label,
+                   like=EDGE_LABELS.get(like, like)) if like else
+                tx("Lato {label}: la foto non mostra se il bordo e' tagliato. I contatti sono fori "
+                   "passanti oppure semi-fori?", label=label))
+        # Resolved by photo_inventory (twin edge > photo's short-row style).
+        recommended = entry.get("recommended")
+        options = []
+        for style in styles:
+            option = {"label": _contact_style_label(style), "value": style}
+            if style == recommended:
+                option["recommended"] = True
+            options.append(option)
+        evidence = entry.get("evidence") if isinstance(entry.get("evidence"), dict) else None
+        chosen = _ask(data, "contact_style", text, options, evidence,
+                      key_values=[edge] + styles)
+        if chosen is not None:
+            note = _apply_contact_style_choice(sides, edge, chosen)
+            if note:
+                notes.append(note)
+            continue
+        if entry.get("through_hole_seen") and side.get("contact_style") == "half_hole":
+            # Rule (a): the photo saw the closed hole; «half_hole» (no through
+            # hole) cannot stand while the question is open.
+            side["contact_style"] = "half_and_through"
+            side["_contact_style_provisional"] = True
+            notes.append(tx("Lato {label}: dichiarato «solo semi-fori», ma la foto vede i fori "
+                            "passanti dietro le piazzole: tipo provvisorio «semi-fori + fori "
+                            "passanti» fino alla risposta alla domanda.", label=label))
+
+
+def _drop_board_outline_row_spacing(params: "ExtractedParams", notes: list) -> None:
+    """Drop a castellated row spacing equal to the board outline across the rows, with a note.
+
+    The answer itself says the board outline across the two rows is
+    `body_width_mm` (top/bottom rows) or `body_length_mm` (left/right): a row
+    spacing equal to it, within the reading tolerance, is that outline, not
+    the distance between the contact centres -- through-holes placed by it
+    would sit on the board edge (inset 0). Applied only when a side across
+    those rows carries a through-hole (the only use of the value); a
+    half-hole-only module never reads it. The generator then estimates the
+    inset, said in its own note. Structural: no threshold beyond the
+    tolerance of reading one quote twice.
+
+    @param params Result under construction; `row_spacing_mm` and its
+        provenance are removed when they are the outline.
+    @param notes Notes of the result.
+    """
+    spacing = finite_number(params.row_spacing_mm)
+    if spacing is None:
+        return
+    from ..generators.castellated_module import opposite_row_edges, style_has_through_hole
+    sides = [side for side in params.castellated_sides or () if isinstance(side, dict)]
+    pair = opposite_row_edges([side.get("edge") for side in sides])
+    extent = (params.body_length_mm if pair == ("left", "right")
+              else params.body_width_mm if pair == ("top", "bottom") else None)
+    extent = finite_number(extent)
+    other = finite_number(params.body_width_mm if pair == ("left", "right")
+                          else params.body_length_mm if pair == ("top", "bottom") else None)
+    across = extent is not None and abs(spacing - extent) <= _reading_tolerance(None) + 1e-9
+    # The other board size is probably the outline along the rows (night real
+    # run 2026-11-14, `_equals_board_outline`): a doubt, so it is not used
+    # unless the user chose it in the row-spacing question (D2).
+    along = (not across and _equals_board_outline(spacing, (other,))
+             and (params.value_sources or {}).get("row_spacing_mm") != USER_SOURCE)
+    if not across and not along:
+        return
+    if not any(side.get("edge") in pair and style_has_through_hole(side.get("contact_style"))
+               for side in sides):
+        return
+    params.row_spacing_mm = None
+    sources = dict(params.value_sources or {})
+    sources.pop("row_spacing_mm", None)
+    params.value_sources = sources
+    if along:
+        notes.append(tx("Distanza fra le file {spacing} mm uguale all'altra dimensione della "
+                        "scheda ({size} mm): probabilmente e' il contorno e non la distanza fra i "
+                        "centri dei contatti (metterebbe i fori a {inset:.2f} mm dal bordo), "
+                        "quindi non e' usata finche' non la scegli nella domanda sulla distanza "
+                        "fra le file.", spacing=spacing, size=other,
+                        inset=(extent - spacing) / 2 if extent is not None else 0.0))
+        return
+    notes.append(tx("Distanza fra le file {spacing} mm uguale al contorno della scheda ({extent} mm) "
+                    "fra le due file: e' il contorno, non la distanza fra i centri dei contatti, "
+                    "quindi non e' usata. Indica la distanza fra i centri dei fori delle due file "
+                    "per mettere i fori passanti al posto giusto.", spacing=spacing, extent=extent))
+
+
+def _settle_impossible_double_contacts(data: dict, params: "ExtractedParams", notes: list) -> None:
+    """Reduce an ASSUMED drill of a half_and_through side so that the wall to the half-hole holds.
+
+    A half_and_through contact is a half-hole cut by the edge AND a closed
+    through-hole where the declared row spacing puts it. When the row
+    spacing puts that hole so close to the edge that it would merge with
+    the half-hole (wall below MIN_HOLE_WALL_MM, the generator's
+    `_validate_double_contacts`) and the drill was only ASSUMED, the drill
+    is reduced first, as side_geometry does for an assumed half-hole: when
+    the largest drill not below MIN_ESTIMATED_DRILL_MM leaves the wall, it
+    is written as an estimate with a note and the double contact stays.
+    With declared sizes nothing is changed: the generator blocks with a
+    remedy that names the contact type.
+
+    @note The contact STYLE is never switched here any more (generality
+        audit 2026-11-13, item 3). The switch to through_hole needed the
+        photo's «through_hole» verdict on that edge, and
+        `_apply_measured_holes` runs first and already adopts any style the
+        photo settled, so a side reaching this function with that verdict
+        is a through_hole side already: the branch could not be reached.
+
+    @param data Answer (unused since the style switch was removed; kept for
+        the call signature).
+    @param params Result under construction; sides updated in place.
+    @param notes Notes of the result.
+    """
+    from .contact_zones import declared_module
+    from ..generators.castellated_module import (CONTACT_HALF_AND_THROUGH, INSET_ROW_SPACING,
+                                                 MIN_ESTIMATED_DRILL_MM, MIN_HOLE_WALL_MM,
+                                                 SIZE_MODULE, SIZE_SIDE)
+    length, width = finite_number(params.body_length_mm), finite_number(params.body_width_mm)
+    spacing = finite_number(params.row_spacing_mm)
+    if not (length and width and spacing and length > 0 and width > 0 and spacing > 0):
+        return
+    sides = [side for side in params.castellated_sides or () if isinstance(side, dict)]
+    if not any(side.get("contact_style") == CONTACT_HALF_AND_THROUGH for side in sides):
+        return
+    view = {"castellated_sides": sides, "row_spacing_mm": spacing,
+            "drill_mm": params.drill_mm, "pad_diameter_mm": params.pad_diameter_mm,
+            "value_sources": dict(params.value_sources or {})}
+    try:
+        module, pairs = declared_module(view, length, width)
+    except (TypeError, ValueError, ArithmeticError):
+        return
+    sources = view["value_sources"]
+
+    def known(edge: str, field: str, source: str) -> bool:
+        """A size declared for the side or the module, or measured on the photo."""
+        return (source in (SIZE_SIDE, SIZE_MODULE)
+                or sources.get(f"castellated_sides.{edge}.{field}") == MEASURED_SOURCE)
+
+    for side, built in pairs:
+        if built.contact_style != CONTACT_HALF_AND_THROUGH:
+            continue
+        try:
+            wall = module.half_and_through_wall(built)
+            geometry = module.side_geometry(built)
+        except (TypeError, ValueError, ArithmeticError):
+            continue
+        if (wall is None or geometry.thru_inset_source != INSET_ROW_SPACING
+                or wall >= MIN_HOLE_WALL_MM - 1e-6):
+            continue
+        label = EDGE_LABELS.get(built.edge, built.edge)
+        if not known(built.edge, "through_hole_drill_mm", geometry.drill_source):
+            # An assumed drill is reduced first: the wall grows by half of
+            # what the drill loses.
+            reduced = _floor_hundredth_mm(geometry.drill - 2 * (MIN_HOLE_WALL_MM - wall))
+            if reduced >= MIN_ESTIMATED_DRILL_MM - 1e-9:
+                side["through_hole_drill_mm"] = reduced
+                sources[f"castellated_sides.{built.edge}.through_hole_drill_mm"] = "estimated"
+                params.value_sources = dict(sources)
+                notes.append(tx("Lato {label}: foro passante stimato ridotto a {drill:.2f} mm perche' "
+                                "resti la parete minima ({minimum} mm) fra il foro e il semi-foro "
+                                "con le file alla distanza dichiarata; da verificare sul "
+                                "disegno.", label=label, drill=reduced, minimum=MIN_HOLE_WALL_MM))
+            continue
+
+
+def _floor_hundredth_mm(value: float) -> float:
+    """`value` rounded DOWN to 0.01 mm (an estimate never grows past what fits)."""
+    return math.floor(value * 100 + 1e-9) / 100
 
 
 #: Per-side sizes measured ALONG the edge, across the pitch: two adjacent

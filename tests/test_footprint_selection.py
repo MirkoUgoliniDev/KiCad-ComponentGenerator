@@ -254,6 +254,9 @@ def test_selected_drawings_are_highlighted_in_the_symbols_selected_colour(shown)
     (review M4/L1: same colour and strength as the symbol's selected elements)."""
     from kicadgen.gui.symbol_tab import CANVAS_THEMES
     window = shown
+    # CONTRACT CHANGED 2026-11-13: the symbol canvas now starts with KiCad's light
+    # colours (user decision); this test checks the dark theme, so it sets it explicitly.
+    window.symbol_tab.set_kicad_colors(False)
     dark = CANVAS_THEMES["dark"]["selected"]
     click(window, vp(window, 2.5, -10))
     assert _colours(window)[0] == dark and _colours(window)[1] != dark
@@ -281,6 +284,9 @@ def test_a_selected_text_gets_the_selected_colour_and_an_outline(shown):
     from kicadgen.gui.footprint_view import DRAWING_KEY_ROLE
     from kicadgen.gui.symbol_tab import CANVAS_THEMES
     window = shown
+    # CONTRACT CHANGED 2026-11-13: the symbol canvas now starts with KiCad's light
+    # colours (user decision); this test checks the dark theme, so it sets it explicitly.
+    window.symbol_tab.set_kicad_colors(False)
     window.footprint_drawings = validate_footprint_drawings([
         record("text", ((0, -10),), text="AB", size=1.0, anchor=USER_TEXT_ANCHOR),
         record("text", ((5, -10),), text="CD", size=1.0, anchor=USER_TEXT_ANCHOR)])

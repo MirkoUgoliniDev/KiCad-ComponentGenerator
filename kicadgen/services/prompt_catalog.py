@@ -196,6 +196,13 @@ SUPERSEDED_DIGESTS: dict[str, frozenset] = {
 SUPERSEDED_DIGESTS.setdefault("pad_positions_prompt", set())
 SUPERSEDED_DIGESTS["pad_positions_prompt"] = frozenset(SUPERSEDED_DIGESTS["pad_positions_prompt"]) | {
     "aaa67ff191c60975e8bb59522c0f545c04db69a52909a87817b2bf02c3cc541e",
+    # 2026-11-14 (night real runs): before terminal_functions, the second
+    # reading of the switch roles of a drawn circuit symbol.
+    "e565032585e69d85129d3b8ff1eee72fe54c0d2be273eb8c99106a14f14b504a",
+    # 2026-11-14 (night4): the first CIRCUIT SYMBOL sentence spoke of the
+    # «role of each terminal» beside the terminal-section rules; now «pin
+    # roles only», saying it changes nothing about holes and terminals.
+    "309e0c640e659f3794caa40b3945abdf2e057babaf4cd36c1a176fa9b410ba3e",
 }
 
 

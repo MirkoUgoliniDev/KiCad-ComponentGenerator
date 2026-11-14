@@ -138,6 +138,43 @@ def _setup_step_unbuildable(window, monkeypatch, folder):
     fill_required_metadata(window)
 
 
+def _setup_pads_kept_blocked(window, monkeypatch, folder):
+    # «Lascia bloccato» answered (review 2026-11-14, L7).
+    window._pads_kept_blocked = True
+
+
+#: An open terminal-view question (no candidates needed, review 2026-11-14 K).
+_VIEW_QUESTION = {"key": "contacts_view:gate", "field": "contacts_view", "text": "Da quale lato?",
+                  "evidence": None, "options": [{"label": "Dall'alto", "value": "top"},
+                                                {"label": "Dal basso", "value": "bottom"}]}
+
+
+def _setup_footprint_question(window, monkeypatch, folder):
+    # An open footprint question: the .kicad_mod on disk is not the answered layout.
+    from copy import deepcopy
+    from kicadgen.services import datasheet_extractor as ext
+    window._extraction_questions = window._valid_extraction_questions([_VIEW_QUESTION])
+    window._last_extracted = ext.ExtractedParams(name="", description="", tags="", confidence="low",
+                                                 notes="", questions=[deepcopy(_VIEW_QUESTION)])
+
+
+def _remedy_answer_footprint_question(window, monkeypatch, folder):
+    # «Applica ai file» asks the open question; the answer closes it.
+    from kicadgen.services import datasheet_extractor as ext
+
+    def apply(params, answers):
+        params.questions = [q for q in params.questions or () if q["key"] not in answers] or None
+        return params
+    monkeypatch.setattr(ext, "apply_answers", apply)
+    monkeypatch.setattr(window, "_ask_extraction_question", lambda question: "top")
+    window.btn_apply_metadata.click()
+
+
+def _remedy_forget_answers(window, monkeypatch, folder):
+    # The message names «Dimentica le risposte» (or the pads entered by hand).
+    window.action_forget_answers.trigger()
+
+
 def _remedy_remove_model(window, monkeypatch, folder):
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
     window.btn_remove_obsolete_model.click()
@@ -155,6 +192,8 @@ CASES = {
     "step_pads": (_setup_step_pads, _remedy_regen_3d),
     "step_body": (_setup_step_body, _remedy_regen_3d),
     "step_unbuildable": (_setup_step_unbuildable, _remedy_remove_model),
+    "pads_kept_blocked": (_setup_pads_kept_blocked, _remedy_forget_answers),
+    "footprint_question": (_setup_footprint_question, _remedy_answer_footprint_question),
 }
 
 

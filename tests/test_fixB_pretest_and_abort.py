@@ -280,7 +280,7 @@ def test_a_pretest_error_is_reported_as_such(window, monkeypatch):
 def test_a_settings_change_during_a_run_keeps_the_busy_state(window):
     window._begin_ai_run("Analisi AI")
     window.btn_yolo_settings.setEnabled(False)
-    window._refresh_model_combo()  # cio' che fa «Default generali AI» dopo OK
+    window._refresh_ai_models_line()  # what «Modello AI...» does after OK
     assert window.btn_extract_ai.text() == "Analisi in corso..."
     assert not window.btn_yolo_settings.isEnabled()
     window._on_extract_finished()
@@ -288,7 +288,7 @@ def test_a_settings_change_during_a_run_keeps_the_busy_state(window):
     assert window.btn_yolo_settings.isEnabled()
     # Negativo: a riposo lo stesso ricalcolo rimette il testo di riposo.
     window.btn_extract_ai.setText("x")
-    window._refresh_model_combo()
+    window._refresh_ai_models_line()
     assert window.btn_extract_ai.text() == "Estrai parametri con AI"
 
 

@@ -16,6 +16,7 @@ import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Optional
 
 from .openrouter import OpenRouterError
 from .ai_diagnostics import CallCancelled
@@ -1704,6 +1705,300 @@ def _offset_declared(raw_sides, edge: str) -> bool:
     return False
 
 
+#: Contact styles whose edge carries an opening (a half-hole cut by the edge).
+_STYLES_WITH_EDGE_OPENING = ("half_hole", "half_and_through")
+
+
+def edge_opening_window_mm(px_per_mm: float) -> float:
+    """@brief Narrowest edge opening the photo can tell from an intact edge, in mm.
+
+    @param px_per_mm Photo scale ALONG the edge, in pixels per millimetre.
+    @return The measurement window of `edge_lands.measure_edge_holes` in mm:
+        one hole wall (the run opened and closed by the morphology,
+        `MIN_HOLE_WALL_MM`) plus the pixel uncertainty of the two boundaries
+        of a run (2 x `EDGE_UNCERTAINTY_PX`). The same window that reader
+        uses to tell a hole's widest row from its chord on the edge.
+    @throws ValueError When the scale is not a positive finite number.
+    """
+    from ..generators.castellated_module import MIN_HOLE_WALL_MM
+    scale = positive_number(px_per_mm)
+    if scale is None:
+        raise ValueError(f"scale must be a positive finite number, got {px_per_mm!r}")
+    return MIN_HOLE_WALL_MM + 2.0 * EDGE_UNCERTAINTY_PX / scale
+
+
+def edge_opening_style(reading: dict, px_per_mm: float) -> dict:
+    """@brief Keep a half-hole reading only when its opening on the edge is wider than the photo resolves.
+
+    @param reading `edge_lands.HoleStyle.as_dict()` of one edge (style,
+        contacts, agreeing, drill_mm, chord_mm, reason, openings).
+    @param px_per_mm Photo scale along that edge, in pixels per millimetre.
+    @return A new dict: the reading itself when its style has no edge
+        opening (through_hole, None) or when the opening measured on the
+        edge rows (`chord_mm`) is wider than the measurement window;
+        otherwise the style becomes None (NO verdict, the declared style
+        stays), the reader's style kept as `measured_style`, the window as
+        `opening_window_mm` and why in `reason`.
+    @note Never turns a reading into «through_hole» (audit 2026-11-13, H1:
+        doing so on an unresolved opening relabelled real 0.6 mm
+        castellations of a 15 px/mm photo). Through-hole is a POSITIVE
+        observation of the reader: a closed hole with no opening segment
+        at all (`edge_lands.measure_edge_holes`). An opening the reader saw
+        but narrower than the window is only unresolved: the photo cannot
+        tell a cut barrel from the shadow of a ring near the edge, so it
+        says nothing. The window is the reader's own
+        (`edge_opening_window_mm`); a sharper photo shrinks it.
+    """
+    result = dict(reading or {})
+    style = result.get("style")
+    if style not in _STYLES_WITH_EDGE_OPENING:
+        return result
+    window = edge_opening_window_mm(px_per_mm)
+    chord = finite_number(result.get("chord_mm")) or 0.0
+    if chord > window:
+        return result
+    result["measured_style"] = style
+    result["opening_window_mm"] = round(window, 3)
+    result["style"] = None
+    result["reason"] = tx(
+        "apertura sul bordo di {chord:.2f} mm non distinguibile sulla foto (incertezza "
+        "{window:.2f} mm)", chord=chord, window=window)
+    return result
+
+
+#: Outline witness of one edge (`settle_edge_holes`): the board outline is
+#: notched at the declared contacts (`edge_notches.confirmed_rows`, or a
+#: full-hole side corrected by `notched_full_hole_sides`).
+OUTLINE_NOTCHED = "notched"
+#: Outline witness of one edge: the outline is straight, no notch at all
+#: (`edge_notches.count_disagreements`, `no_notch`).
+OUTLINE_SMOOTH = "smooth"
+
+
+def settle_edge_holes(reading: dict, px_per_mm: float, outline: Optional[str] = None) -> tuple:
+    """@brief The contact style of one edge the photo stage adopts, and the warning to show.
+
+    @param reading `edge_lands.HoleStyle.as_dict()` of one edge, with a style.
+    @param px_per_mm Photo scale along that edge, in pixels per millimetre.
+    @param outline What the board OUTLINE says of this edge, a witness
+        independent of the land colours: OUTLINE_NOTCHED, OUTLINE_SMOOTH or
+        None (not measured, or not countable).
+    @return (settled reading or None, warning text or None). None as the
+        reading means no verdict: the declared style stays.
+    @note The land colours see a hole segment, not a cut: a plated half-hole
+        and the copper-free semicircle of a U-shaped pad around a closed
+        hole look alike on them (18:32 devkit run of 2026-11-13: straight
+        board edge, every land read as an opening plus a closed hole). A cut
+        is what the outline shows. Hence:
+        - an edge opening (half_hole, half_and_through) is adopted only when
+          the outline is notched at the contacts and the opening is wider
+          than the photo resolves (`edge_opening_style`);
+        - on a STRAIGHT outline, half_and_through becomes through_hole (the
+          closed hole is measured, the edge feature is no cut) and half_hole
+          gives no verdict; with no outline witness, no verdict;
+        - through_hole (closed hole, no opening on any agreeing land) is
+          adopted unless the outline is notched at the contacts: two photo
+          witnesses that disagree decide nothing (audit 2026-11-13, H2).
+        Every no-verdict comes with a warning.
+    """
+    edge = reading.get("edge") or "?"
+    measured = reading.get("style")
+    if measured == "through_hole":
+        if outline == OUTLINE_NOTCHED:
+            return None, tx(
+                "Fori sul bordo {edge}: tacche sul contorno ai contatti dichiarati ma nessuna "
+                "apertura sulle piazzole (foro {drill:.2f} mm, {agreeing} piazzole su {contacts}); "
+                "tipo di contatto non letto dalla foto, da verificare.", edge=edge,
+                drill=finite_number(reading.get("drill_mm")) or 0.0,
+                agreeing=reading.get("agreeing", 0), contacts=reading.get("contacts", 0))
+        return dict(reading), None
+    if measured not in _STYLES_WITH_EDGE_OPENING:
+        return None, None
+    if outline == OUTLINE_SMOOTH and measured == "half_and_through":
+        settled = dict(reading, style="through_hole", measured_style=measured,
+                       chord_mm=0.0, reason=tx(
+                           "contorno della scheda senza tacche: l'apertura vista sulle piazzole "
+                           "non e' un taglio del bordo, resta il foro chiuso"))
+        return settled, None
+    if outline != OUTLINE_NOTCHED:
+        reason = (tx("contorno della scheda senza tacche: l'apertura vista sulle piazzole non e' "
+                     "un taglio del bordo") if outline == OUTLINE_SMOOTH else
+                  tx("il contorno della scheda non conferma tacche ai contatti dichiarati"))
+        return None, tx("Fori sul bordo {edge}: {measured} non confermato ({reason}); tipo di "
+                        "contatto non letto dalla foto, da verificare.",
+                        edge=edge, measured=measured, reason=reason)
+    settled = edge_opening_style(reading, px_per_mm)
+    if settled.get("style") is None:
+        return None, tx("Fori sul bordo {edge}: {measured} non confermato ({reason}); tipo di "
+                        "contatto non letto dalla foto, da verificare.",
+                        edge=edge, measured=measured, reason=settled.get("reason") or "-")
+    return settled, None
+
+
+def short_row_contradiction(settled, declared_style) -> Optional[str]:
+    """@brief Why a settled reading of a SHORT located row must be asked instead of adopted, or None.
+
+    @param settled The reading `settle_edge_holes` would adopt (with
+        `row_lands`), or None.
+    @param declared_style The contact style the answer declared for that
+        side, or None.
+    @return A warning that says what the photo saw on how many lands and
+        what was declared, when the reading comes from a row the outline
+        located (`row_lands` not None) shorter than MIN_ROW_LANDS and its
+        style differs from a declared one; None otherwise (no reading, a
+        blind or long row, no declaration, or agreement).
+    @note Generality audit 2026-11-14, M1. On a short row the verdict rests
+        on 2-4 lands, and «no closed hole» cannot tell a filled or tented
+        hole from no hole: a contradiction of the declaration there is a
+        doubt for the user, offered with the photo's style recommended
+        (`photo_contact_style_questions`). A reading that AGREES with the
+        declaration only confirms it and may settle; rows of MIN_ROW_LANDS
+        or more keep the settle contract of `settle_edge_holes`.
+    """
+    from .edge_lands import MIN_ROW_LANDS
+    if not isinstance(settled, dict) or not declared_style:
+        return None
+    row = settled.get("row_lands")
+    style = settled.get("style")
+    if row is None or int(row) >= MIN_ROW_LANDS or style is None or style == declared_style:
+        return None
+    values = dict(edge=settled.get("edge") or "?", agreeing=settled.get("agreeing", 0),
+                  contacts=settled.get("contacts", 0), declared=declared_style)
+    if style == "half_hole":
+        return tx("Fori sul bordo {edge}: la foto vede solo semi-fori su {agreeing} piazzole di "
+                  "{contacts}, nessun foro chiuso dietro le piazzole (un foro riempito o coperto "
+                  "apparirebbe uguale), ma il tipo dichiarato e' «{declared}»; con {contacts} "
+                  "contatti la foto da sola non basta: tipo di contatto da confermare.", **values)
+    return tx("Fori sul bordo {edge}: la foto vede {measured} su {agreeing} piazzole di {contacts}, "
+              "ma il tipo dichiarato e' «{declared}»; con {contacts} contatti la foto da sola non "
+              "basta: tipo di contatto da confermare.", measured=style, **values)
+
+
+#: Key of the answer (`declared`) where the photo stage leaves, for each edge
+#: whose contact style the photo could NOT settle, what it did measure there:
+#: the extraction turns each entry into ONE question for that side
+#: (`photo_contact_style_questions`).
+PHOTO_CONTACT_STYLES_KEY = "_photo_contact_styles"
+
+
+def photo_contact_style_questions(readings: dict, settled: dict, outline: dict,
+                                  evidence=None) -> dict:
+    """@brief What the photo measured on the edges it could not settle, for one question per side.
+
+    @param readings {edge: {"reading": HoleStyle.as_dict(), "px_per_mm": scale
+        along that edge, "pitch_mm": declared pitch of the side}} for every
+        edge the land reader measured.
+    @param settled {edge: settled reading} of the edges the photo stage
+        adopted (`settle_edge_holes`, the `_measured_holes` of the answer).
+    @param outline {edge: OUTLINE_NOTCHED or OUTLINE_SMOOTH} of the edges the
+        board outline witnessed.
+    @param evidence Optional callable(edge) -> {"document", "crop"} or None,
+        the photo strip of that edge (the question's `evidence`).
+    @return {edge: entry} for each measured edge NOT in `settled`, entry =
+        {"edge", "measured_style" (the land reader's verdict), "through_hole_seen"
+        (bool), "options" (contact styles the measurement allows, in the
+        order to offer), "like_edge" (a settled edge with the same land
+        pattern, or None), "recommended" (that edge's settled style when it
+        is among the options, else None), "outline", "reading", "evidence",
+        "recommended_from" ("like_edge", "photo" or None: which evidence the
+        recommendation rests on), "photo_style" and "why" (a short located
+        row the photo read but `short_row_contradiction` withheld: its style,
+        recommended only when no like edge is, and the warning saying why;
+        both None otherwise)}.
+        `readings[edge]` may carry "photo_style" and "why" for that case.
+    @note Two rules, neither changes a style by itself (the extraction asks):
+        - a CLOSED hole behind the lands (`reading["closed"]` on at least
+          `edge_lands.hole_agreement_floor(reading["row_lands"])` lands --
+          MIN_ROW_LANDS, or the whole of a short row the outline located --
+          and on half of the lands read) proves the
+          contacts have a through hole, so «half_hole» (no through hole) is
+          left out of the options -- a declared half_hole cannot stand
+          against it;
+        - the SAME land pattern as an edge the outline settled -- same
+          reader verdict, same declared pitch, drill and opening both within
+          the measurement window of the coarser of the two edges
+          (`edge_opening_window_mm`) -- recommends that edge's style. Same
+          board, same photo, same pattern: the evidence of one edge is the
+          best guess for the other, offered, never applied.
+    """
+    from .edge_lands import hole_agreement_floor
+    questions = {}
+    for edge, measured in readings.items():
+        reading = measured.get("reading") or {}
+        style = reading.get("style")
+        if edge in settled or style is None:
+            continue
+        closed = int(reading.get("closed") or 0)
+        # The same floor the reader's verdict needs: MIN_ROW_LANDS on a blind
+        # row, the whole row on a short row the outline located.
+        through_seen = (closed >= hole_agreement_floor(reading.get("row_lands"))
+                        and 2 * closed >= int(reading.get("contacts") or 0))
+        options = (["through_hole", "half_and_through"] if through_seen
+                   else ["through_hole", "half_and_through", "half_hole"])
+        like = None
+        for other, adopted in settled.items():
+            if other == edge or other not in readings or outline.get(other) is None:
+                continue
+            twin = readings[other].get("reading") or {}
+            pitch, other_pitch = measured.get("pitch_mm"), readings[other].get("pitch_mm")
+            if twin.get("style") != style or pitch is None or other_pitch is None:
+                continue
+            if abs(float(pitch) - float(other_pitch)) > 1e-6:
+                continue
+            window = max(edge_opening_window_mm(measured["px_per_mm"]),
+                         edge_opening_window_mm(readings[other]["px_per_mm"]))
+            drills = (finite_number(reading.get("drill_mm")), finite_number(twin.get("drill_mm")))
+            chords = (finite_number(reading.get("chord_mm")) or 0.0,
+                      finite_number(twin.get("chord_mm")) or 0.0)
+            if None in drills or abs(drills[0] - drills[1]) > window:
+                continue
+            if abs(chords[0] - chords[1]) > window:
+                continue
+            like = other
+            break
+        recommended = settled[like].get("style") if like else None
+        source = "like_edge" if recommended in options else None
+        photo_style = measured.get("photo_style")
+        if source is None and photo_style in options:
+            # HEURISTIC, declared as such: a short located row withheld by
+            # `short_row_contradiction` rests on 2-4 lands, and «no closed
+            # hole» there cannot tell a filled or tented hole from none -- the
+            # very reason it is asked. With no twin edge that an outline
+            # witness settled (which wins above: same pattern, a second
+            # witness), the photo's own reading is still the best guess on
+            # offer, so it is recommended, never applied. What would make this
+            # unnecessary: a side view or a drawing that shows the inner hole.
+            recommended, source = photo_style, "photo"
+        questions[edge] = {
+            "edge": edge, "measured_style": style, "through_hole_seen": through_seen,
+            "options": options, "like_edge": like,
+            "recommended": recommended if recommended in options else None,
+            "recommended_from": source,
+            "outline": outline.get(edge), "reading": dict(reading),
+            "evidence": evidence(edge) if evidence else None,
+            "photo_style": photo_style, "why": measured.get("why")}
+    return questions
+
+
+def _edge_strip_evidence(document: str, calibration: dict, edge: str, length: float,
+                         width: float, depth_mm: float):
+    """The question evidence of one edge: the strip of the ORIGINAL photo along it, or no crop.
+
+    The crop box of the board is in original pixels only when the photo was
+    not deskewed (`crop_box_from_metadata` frame «original»); otherwise the
+    strip cannot be named in the file's pixels and the crop is None.
+    """
+    box, frame = crop_box_from_metadata(calibration)
+    crop = None
+    if box is not None and frame == "original" and length > 0 and width > 0:
+        x0, y0, x1, y1 = box
+        across = (y1 - y0) / width if edge in ("top", "bottom") else (x1 - x0) / length
+        depth = max(1, int(round(depth_mm * across)))
+        crop = {"top": [x0, y0, x1, y0 + depth], "bottom": [x0, y1 - depth, x1, y1],
+                "left": [x0, y0, x0 + depth, y1], "right": [x1 - depth, y0, x1, y1]}.get(edge)
+    return {"document": document, "crop": crop}
+
+
 def extract_inventory(paths, model, length, width, kinds, call, progress=None,
                       top_photo_index=None, extra_instructions=None,
                       grounding=True, cache_dir=None, classifier_model=None, mechanical=True,
@@ -1914,8 +2209,12 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
         # where the declared contacts are: they are half-holes (user,
         # 2026-10-30). Corrected before the half-hole checks below, so the
         # side is counted, confirmed and its lands measured like any other.
+        # Edges whose outline shows notches as deep as a half-hole at the
+        # declared contacts: an independent photo witness of an edge opening.
+        notched_edges = set()
         for item in notched_full_hole_sides(edge_profiles, photo.shape, length, width,
                                             declared.get("castellated_sides")):
+            notched_edges.add(item.edge)
             evidence = tx("{found} semi-fori contati sulla foto, sui contatti dichiarati",
                           found=item.found)
             margin = half_hole_depth_margin_mm(item)
@@ -1986,8 +2285,10 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
         from .edge_notches import confirmed_rows
         rows = confirmed_rows(edge_profiles, photo.shape, length, width,
                               declared.get("castellated_sides"))
+        measured_lands = {}
         if rows:
             lands = measure_lands(photo, length, width, rows, edge_profiles)
+            measured_lands = lands
             declared["_measured_lands"] = {edge: land.as_dict() for edge, land in lands.items()
                                            if land.width_mm is not None}
             for kind, message in land_lines(lands):
@@ -2000,18 +2301,66 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
         # photo contradicts it, with a note (_apply_measured_holes).
         from .edge_lands import measure_edge_holes
         from .edge_notches import normalized_sides
-        holes = {}
+        holes, readings = {}, {}
+        # The outline's witness per edge: notched at the declared contacts
+        # (the confirmed rows and the full-hole sides corrected above), or
+        # straight with no notch at all (the smooth disagreements).
+        outline = {item.edge: OUTLINE_SMOOTH for item in disagreements if item.no_notch}
+        outline.update({edge: OUTLINE_NOTCHED for edge in set(notched_edges) | set(rows or ())})
         for edge, side in normalized_sides(declared.get("castellated_sides")).items():
-            reading = measure_edge_holes(photo, edge, side.get("pitch_mm"), length, width)
+            # On a side the outline confirmed (one notch per declared contact,
+            # `confirmed_rows`), the lands are read at the notch centres: a row
+            # shorter than the blind chain search can confirm (MIN_ROW_LANDS)
+            # is then inspected too, every land agreeing (night1 RS485 run,
+            # 2026-11-14: rows of 3 and 4 castellations were never read, and
+            # a declared inner through-hole survived with no photo evidence).
+            # The land measured inwards (`measure_lands`) sets how deep the
+            # holes are read, so «no closed hole» covers the whole land.
+            located = (rows or {}).get(edge, {}).get("centres_mm")
+            land = measured_lands.get(edge)
+            reading = measure_edge_holes(photo, edge, side.get("pitch_mm"), length, width,
+                                         confirmed_centres_mm=located,
+                                         land_inward_mm=getattr(land, "inward_mm", None))
             if reading.style:
-                holes[edge] = reading.as_dict()
                 log(tx("Fori sul bordo {edge}: {style} su {agreeing} piazzole di {contacts} "
                        "(foro {drill:.2f} mm, apertura {chord:.2f} mm).",
                        edge=edge, style=reading.style, agreeing=reading.agreeing,
                        contacts=reading.contacts, drill=reading.drill_mm or 0.0,
                        chord=reading.chord_mm or 0.0))
+                # A half-hole needs an opening on the edge wider than what the
+                # photo resolves, and an outline with notches at the declared
+                # contacts is a second witness of the opening (audit
+                # 2026-11-13, H1/H2): `settle_edge_holes` decides.
+                along = (photo.shape[1] / float(length) if edge in ("top", "bottom")
+                         else photo.shape[0] / float(width))
+                settled, warning_text = settle_edge_holes(
+                    reading.as_dict(), along, outline=outline.get(edge))
+                readings[edge] = {"reading": reading.as_dict(), "px_per_mm": along,
+                                  "pitch_mm": side.get("pitch_mm")}
+                if warning_text:
+                    warn(warning_text)
+                why = short_row_contradiction(settled, side.get("contact_style"))
+                if why:
+                    # A short located row contradicting the declaration is
+                    # asked, recommending what the photo saw (audit M1).
+                    readings[edge].update(photo_style=settled["style"], why=why)
+                    warn(why)
+                    settled = None
+                if settled is not None:
+                    holes[edge] = settled
         if holes:
             declared["_measured_holes"] = holes
+        # The edges the photo measured but could not settle: what it saw there
+        # becomes ONE question per side in the extraction (closed holes seen,
+        # the same land pattern as a settled edge), never a silent change.
+        pending = photo_contact_style_questions(
+            readings, holes, outline,
+            evidence=lambda edge: _edge_strip_evidence(
+                path.name, report.calibration, edge, length, width,
+                2.0 * float(normalized_sides(declared.get("castellated_sides"))
+                            .get(edge, {}).get("pitch_mm") or 1.0)))
+        if pending:
+            declared[PHOTO_CONTACT_STYLES_KEY] = pending
     if top_photo_index is None:
         warn(tx("Vista dall'alto non specificata: scelta euristica {name}, verificare "
                 "la foto nel confronto.",

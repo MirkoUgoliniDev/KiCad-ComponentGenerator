@@ -256,20 +256,25 @@ def test_existing_database_receives_new_bundled_translation_keys(tmp_path):
 @pytest.mark.parametrize(
     ("language", "title", "compatible", "header", "no_limit", "selected", "cancel"),
     (
-        ("it", "Modello solo per questa sessione", "Solo modelli compatibili",
+        ("it", "Cambia il modello predefinito", "Solo modelli compatibili",
          "Modello (id)", "nessun limite", "Modello scelto: anthropic/claude-sonnet-5", "Annulla"),
-        ("en", "Model for this session only", "Compatible models only",
+        ("en", "Change the default model", "Compatible models only",
          "Model (ID)", "no limit", "Selected model: anthropic/claude-sonnet-5", "Cancel"),
-        ("fr", "Modèle pour cette session uniquement", "Modèles compatibles",
+        ("fr", "Changer le modèle par défaut", "Modèles compatibles",
          "Modèle (ID)", "aucune limite", "Modèle sélectionné : anthropic/claude-sonnet-5", "Annuler"),
-        ("de", "Modell nur für diese Sitzung", "Nur kompatible Modelle",
+        ("de", "Standardmodell ändern", "Nur kompatible Modelle",
          "Modell (ID)", "keine Begrenzung", "Ausgewähltes Modell: anthropic/claude-sonnet-5", "Abbrechen"),
     ),
 )
 def test_model_picker_uses_parent_language_without_touching_model_data(qapp,
         tmp_path, monkeypatch, language, title, compatible, header, no_limit,
         selected, cancel):
-    """@brief Translate the nested model picker that executes inside its helper."""
+    """@brief Translate the nested model picker that executes inside its helper.
+
+    CONTRACT CHANGED 2026-11-13: the example title was «Modello solo per questa
+    sessione», removed with the per-session model (user decision); the same
+    contract is checked on a title that still exists.
+    """
     from PyQt6.QtWidgets import QDialogButtonBox, QWidget
     from kicadgen.gui.model_dialog import ModelPickerDialog
 
@@ -286,7 +291,7 @@ def test_model_picker_uses_parent_language_without_touching_model_data(qapp,
     monkeypatch.setattr(ModelPickerDialog, "_load_models", lambda self, force_refresh=False: None)
 
     dialog = ModelPickerDialog("anthropic/claude-sonnet-5", parent,
-                               title="Modello solo per questa sessione")
+                               title="Cambia il modello predefinito")
 
     assert dialog.windowTitle() == title
     assert dialog.check_compatible.text().startswith(compatible)

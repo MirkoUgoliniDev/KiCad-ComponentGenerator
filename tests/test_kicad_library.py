@@ -192,3 +192,28 @@ def test_global_table_path_rejects_an_unknown_version(tmp_path):
         global_fp_lib_table_path(
             tmp_path / "kicad-cli.exe", environ={}, platform="win32",
             version_runner=lambda path: None)
+
+
+
+def test_a_locked_schematic_still_gets_the_current_footprint_copy(tmp_path):
+    """@brief Positive (review L): with the schematic open (lock file) the footprint library copy
+    of the preview is refreshed, so «Aggiorna PCB dallo schema» cannot bring the old one back;
+    the schematic itself is left untouched."""
+    from kicadgen.services.kicad_library import create_preview_project, kicad_lock_file
+    artifacts = _artifacts(tmp_path)
+    (artifacts.component_dir / "Demo.kicad_sym").write_text(
+        '(kicad_symbol_lib (version 20241209) (generator "t")\n'
+        '  (symbol "Demo" (property "Reference" "U" (at 0 0 0)) (symbol "Demo_1_1"\n'
+        '    (pin passive line (at 0 0 0) (length 2.54) (name "A") (number "1")))))\n', encoding="utf-8")
+    preview = create_preview_project(artifacts)
+    copy = preview.directory / "KiCadGen_Preview.pretty" / "Demo.kicad_mod"
+    assert copy.is_file()
+    schematic_before = preview.schematic_path.read_bytes()
+    kicad_lock_file(preview.schematic_path).write_text("lock", encoding="utf-8")
+    artifacts.footprint_path.write_text(
+        artifacts.footprint_path.read_text(encoding="utf-8").replace("(at 0 0)", "(at 1 0)", 1),
+        encoding="utf-8")
+    again = create_preview_project(artifacts)
+    assert again.schematic_skipped == "schematic_locked"
+    assert "(at 1 0)" in copy.read_text(encoding="utf-8")
+    assert preview.schematic_path.read_bytes() == schematic_before

@@ -346,6 +346,9 @@ class Pad(Movable):
     #: preview. None states nothing.
     lead: Optional[dict] = None
     sources: Optional[dict] = None
+    #: METADATA too (`PinSpec.lead_fit`): "press_fit" exempts the pad from
+    #: the terminal-in-hole rule (`footprint_checks.check_hole_vs_lead`).
+    lead_fit: Optional[str] = None
 
     #: `at` is the hole; a drill offset is pad-local and moves with it.
     _POINT_FIELDS = ("at",)

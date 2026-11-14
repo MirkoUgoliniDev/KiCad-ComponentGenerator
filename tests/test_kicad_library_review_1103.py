@@ -12,6 +12,7 @@ real KiCad configuration is never read or written.
 import json
 import os
 import pathlib
+import re
 from pathlib import Path
 
 import pytest
@@ -381,8 +382,19 @@ def test_destination_is_not_resolved_to_its_underlying_path(tmp_path, monkeypatc
 
 # --- 9 and 11. preview isolation and stale WRL ----------------------------------
 
-def test_preview_creates_no_table_and_leaves_existing_tables_untouched(tmp_path):
+def test_preview_creates_only_its_own_table_and_leaves_existing_tables_untouched(tmp_path):
+    # CONTRACT CHANGED 2026-11-13: user decision, a temp-local table only.
+    # The preview used to create no fp-lib-table at all; it now writes ONE,
+    # inside the temporary preview folder, whose rows name only the
+    # footprint copy in that folder (${KIPRJMOD}), so the preview
+    # schematic's footprint field resolves. Every other table stays
+    # byte-identical, as before.
     artifacts = _artifacts(tmp_path)
+    (artifacts.component_dir / "Demo.kicad_sym").write_text(
+        '(kicad_symbol_lib (version 20251024) (generator "kicadgen")\n'
+        '  (symbol "Demo" (property "Reference" "U" (at 0 2.54 0))\n'
+        '    (symbol "Demo_1_1" (pin passive line (at -5.08 0 0) (length 2.54)'
+        ' (name "A") (number "1")))))\n', encoding="utf-8")
     project_table = _table(
         artifacts.component_dir / "fp-lib-table",
         '(lib (name "Keep")(type "KiCad")(uri "/keep.pretty"))')
@@ -391,8 +403,12 @@ def test_preview_creates_no_table_and_leaves_existing_tables_untouched(tmp_path)
         '(lib (name "KiCadGen")(type "KiCad")(uri "/global.pretty"))')
     before = (project_table.read_bytes(), global_table.read_bytes())
     preview = create_preview_project(artifacts)
-    assert not (preview.directory / "fp-lib-table").exists()
-    assert not list(preview.directory.rglob("*fp-lib-table*"))
+    created = [path for path in tmp_path.rglob("*fp-lib-table*")
+               if path not in (project_table, global_table)]
+    assert created == [preview.directory / "fp-lib-table"]
+    uris = re.findall(r'\(uri "([^"]*)"\)', created[0].read_text(encoding="utf-8"))
+    assert uris and all(uri.startswith("${KIPRJMOD}/") for uri in uris)
+    assert (preview.directory / uris[0].removeprefix("${KIPRJMOD}/") / "Demo.kicad_mod").is_file()
     assert (project_table.read_bytes(), global_table.read_bytes()) == before
 
 

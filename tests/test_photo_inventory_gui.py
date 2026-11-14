@@ -55,8 +55,10 @@ def test_extraction_action_stays_in_wizard_footer_below_separate_tools(window, a
     assert not window.group_component_analysis.isAncestorOf(window.btn_extract_ai)
     assert window.project_wizard.isAncestorOf(window.btn_extract_ai)
     assert not window.group_component_analysis.isAncestorOf(window.docs_list)
-    assert window.group_ai_tools.isAncestorOf(window.combo_model)
-    assert window.group_ai_tools.isAncestorOf(window.btn_pick_model)
+    # CONTRACT CHANGED 2026-11-13: one read-only «Modelli AI» line replaces the
+    # per-session combo and its picker (user decision).
+    assert window.group_ai_tools.isAncestorOf(window.label_ai_models)
+    assert not hasattr(window, 'combo_model') and not hasattr(window, 'btn_pick_model')
     assert not hasattr(window, 'combo_vision_model')
     assert not hasattr(window, 'combo_verification_model')
     assert not window.group_ai_tools.isAncestorOf(window.combo_component_type)
@@ -382,10 +384,17 @@ def test_kicad_tab_opens_isolated_preview(window, tmp_path, monkeypatch):
         lambda: ExternalApplications(None, None, str(pcbnew)),
     )
     launched = []
-    monkeypatch.setattr(
-        gui, "launch_preview",
-        lambda executable, board: launched.append((Path(executable), Path(board))),
-    )
+    # CONTRACT CHANGED 2026-11-13 (point 8): «Prova in KiCad» opens the preview
+    # through `launch_preview_editors` (board and schematic) and renders a 3D
+    # image off the GUI thread; both are faked here, the contract on the board
+    # and on the untouched library table is unchanged.
+    from kicadgen.services.kicad_library import PreviewLaunch
+
+    def fake_launch(preview, executable, *a, **k):
+        launched.append((Path(executable), Path(preview.board_path)))
+        return PreviewLaunch(((Path(executable), Path(preview.board_path)),), "eeschema_missing")
+    monkeypatch.setattr(gui, "launch_preview_editors", fake_launch)
+    monkeypatch.setattr(window, "_start_preview_render", lambda *a, **k: None)
     window._test_in_kicad()
     assert launched and launched[0][0] == pcbnew
     assert launched[0][1].is_file()
@@ -762,7 +771,6 @@ def test_settings_preserve_legacy_defaults_but_runtime_uses_one_model(window, mo
         follows the old «Posizioni pad» default keeps following it).
     """
     window.profile_store.save_defaults({'vision_model': 'vendor/old-photo'})
-    window._session_model = "vendor/session-datasheet"
     saved = []
     shown = window.profile_store.step_models()
 
@@ -800,27 +808,31 @@ def test_settings_preserve_legacy_defaults_but_runtime_uses_one_model(window, mo
     assert defaults["pad_model"] == before["pad_model"]
     assert window.profile_store.step_models_stored() == {
         "pad_positions_prompt": "vendor/pad-reader", "crop_prompt": "vendor/crops"}
-    assert window._effective_model() == "vendor/session-datasheet"
-    assert window._vision_model() == "vendor/session-datasheet"
-    assert window._verification_model() == "vendor/session-datasheet"
+    # CONTRACT CHANGED 2026-11-13: no session model replaces the saved one; every
+    # stage follows the default just saved, and the «Modelli AI» line shows it.
+    assert window._effective_model() == "vendor/new-datasheet"
+    assert window._vision_model() == "vendor/new-datasheet"
+    assert window._verification_model() == "vendor/new-datasheet"
+    assert "vendor/new-datasheet" in window.label_ai_models.text()
 
 
-def test_single_model_selection_drives_all_ai_stages_and_can_return_to_default(window, monkeypatch):
+def test_the_saved_default_model_drives_all_ai_stages(window):
+    """@brief CONTRACT CHANGED 2026-11-13: the per-session picker is gone (user decision).
+
+    Positive: the saved default drives every stage and the «Modelli AI» line.
+    Negative: saving another default changes all of them at once (no older
+    session choice can keep a stage on the previous model).
+    """
     window.profile_store.save_defaults({'model': 'vendor/default'})
-    window._refresh_model_combo()
-    monkeypatch.setattr(gui, "pick_model", lambda *args, **kwargs: "vendor/session")
-    window.btn_pick_model.click()
-    assert window._vision_model() == "vendor/session"
-    assert window._verification_model() == "vendor/session"
-    assert window._effective_model() == "vendor/session"
-    assert window.profile_store.defaults()["model"] == "vendor/default"
-    assert window.combo_model.currentData() == "vendor/session"
-    monkeypatch.setattr(gui, "pick_model", lambda *args, **kwargs: None)
-    window.btn_pick_model.click()
-    assert window._vision_model() == "vendor/session"
-    window.combo_model.setCurrentIndex(0)
-    assert window._vision_model() == "vendor/default"
-    assert window._effective_model() == "vendor/default"
+    window._refresh_ai_models_line()
+    assert window._vision_model() == window._verification_model() == "vendor/default"
+    assert window._effective_model() == window._photo_detector_model() == "vendor/default"
+    assert "vendor/default" in window.label_ai_models.text()
+    window.profile_store.save_defaults({'model': 'vendor/other'})
+    window._refresh_ai_models_line()
+    assert window._vision_model() == window._photo_detector_model() == "vendor/other"
+    assert "vendor/other" in window.label_ai_models.text()
+    assert "vendor/default" not in window.label_ai_models.text()
 
 
 def test_single_default_model_is_used_for_vision(window):
@@ -851,7 +863,7 @@ def test_custom_profile_drives_geometry_family_and_worker_snapshot(window, monke
     assert 'note libere' in window.field_component_prompt.toPlainText()
     # One model (2026-10-02): the type's own model is ignored, the global one shows.
     global_model = store.defaults()['model']
-    assert window.combo_model.currentText() == 'Predefinito: ' + global_model
+    assert global_model in window.label_ai_models.text()
     monkeypatch.setattr(gui.ExtractWorker, 'start', lambda self: None)
     item = QListWidgetItem('board.png')
     item.setCheckState(Qt.CheckState.Checked)
@@ -880,17 +892,17 @@ def test_custom_profile_drives_geometry_family_and_worker_snapshot(window, monke
     window._on_extract_finished()
 
 
-def test_single_session_model_does_not_persist(window, monkeypatch):
-    before = window.profile_store.defaults()
-    monkeypatch.setattr(gui, 'pick_model', lambda *a, **kw: 'session/all')
-    window.btn_pick_model.click()
-    assert window._verification_model() == 'session/all'
-    assert window._effective_model() == 'session/all'
-    assert window._vision_model() == 'session/all'
-    assert window.profile_store.defaults() == before
-    window.combo_model.setCurrentIndex(0)
-    assert window._verification_model() == before['model']
-    assert window._effective_model() == before['model']
+def test_no_session_model_mechanism_is_left(window):
+    """@brief CONTRACT CHANGED 2026-11-13: the per-session model and vision model are removed.
+
+    Negative: no picker, combo or state of a session model survives, and the
+    project state no longer saves a «models» block.
+    """
+    for name in ("_pick_session_model", "_pick_session_vlm_model", "_on_model_combo_changed",
+                 "_session_model", "_vlm_model", "combo_model", "btn_pick_model",
+                 "field_vlm_model", "btn_pick_vlm_model"):
+        assert not hasattr(window, name), name
+    assert "models" not in window._project_state()
 
 
 def test_removed_type_refresh_preserves_free_notes_and_falls_back(window):
@@ -914,8 +926,7 @@ def test_only_defaults_refresh_does_not_replace_session_prompt(window):
 
 def test_start_extraction_uses_single_model_and_resets_photo_state(window, raw_params, monkeypatch):
     window._on_extracted(raw_params)
-    window.profile_store.save_defaults({'vision_model': 'vendor/photo'})
-    window._session_model = "vendor/datasheet"
+    window.profile_store.save_defaults({'vision_model': 'vendor/photo', 'model': 'vendor/datasheet'})
     # Suppress only thread execution: inspect the real constructed worker.
     monkeypatch.setattr(gui.ExtractWorker, "start", lambda self: None)
     row = QListWidgetItem("board.png")
@@ -930,7 +941,8 @@ def test_start_extraction_uses_single_model_and_resets_photo_state(window, raw_p
     assert window._photo_png is None
     assert window._photo_overlay_png is None
     assert not window.btn_photo_comparison.isEnabled()
-    assert "Modello AI unico: vendor/datasheet" in window.ai_progress_text.toPlainText()
+    # CONTRACT CHANGED 2026-11-13: «Modello AI unico» renamed «Modello AI predefinito».
+    assert "Modello AI predefinito: vendor/datasheet" in window.ai_progress_text.toPlainText()
     assert "modello AI vendor/datasheet" in window._log_plain_text()
 
 

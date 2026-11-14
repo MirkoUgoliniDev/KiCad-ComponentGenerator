@@ -289,7 +289,9 @@ def test_the_review_dialog_switches_the_commands_off_and_back_on(window, monkeyp
     class FakeCheck(QDialog):
         """Stands for ComponentCheckDialog, which starts its own checking thread."""
 
-        def __init__(self, args, parent=None, tx=None):
+        # CONTRACT CHANGED 2026-11-13: the check dialog also receives its
+        # fixes (`actions`, the symbol re-export); accepted and ignored here.
+        def __init__(self, args, parent=None, tx=None, actions=None):
             super().__init__(parent)
 
         def exec(self):  # noqa: D401 - QDialog override in the fake
