@@ -282,7 +282,7 @@ def test_a_blank_pad_step_rereads_with_the_main_model_as_one_witness(offline, tm
     reread = ext.reread_pad_positions(_stored_pads(), [_drawing(tmp_path)], model="vendor/main",
                                       call=call, same_model=False, step_models=_BLANK)
     assert _models(call) == ["vendor/main"]
-    assert reread.pin_map_conflict and "stesso modello" in reread.pin_map_conflict
+    _same_model_question(reread)
 
 
 def test_without_a_table_the_reread_keeps_the_callers_model(offline, tmp_path):
@@ -340,7 +340,7 @@ def test_the_reread_compares_with_the_recorded_model_not_the_callers(offline, tm
                                       model="vendor/y", call=call, same_model=False,
                                       step_models=_steps(pad_positions_prompt="vendor/x"))
     assert _models(call) == ["vendor/x"]
-    assert reread.pin_map_conflict and "stesso modello" in reread.pin_map_conflict
+    _same_model_question(reread)
     # The re-read result still names the producer, for a re-read of it.
     assert reread.raw_main[ext.RAW_MAIN_MODEL_KEY] == "vendor/x"
 
@@ -351,7 +351,7 @@ def test_a_blank_pad_step_rereads_with_the_recorded_model(offline, tmp_path):
     reread = ext.reread_pad_positions(_recorded("vendor/x"), [_drawing(tmp_path)],
                                       model="vendor/y", call=call, step_models=_BLANK)
     assert _models(call) == ["vendor/x"]
-    assert reread.pin_map_conflict and "stesso modello" in reread.pin_map_conflict
+    _same_model_question(reread)
 
 
 def test_a_pad_step_other_than_the_recorded_model_is_independent(offline, tmp_path):
@@ -373,7 +373,13 @@ def test_without_a_table_the_record_decides_same_model(offline, tmp_path, caller
                                       model=caller_model, call=call,
                                       same_model=independent)  # the caller claims the opposite
     assert _models(call) == [caller_model]
-    assert (reread.pin_map_conflict is None) is independent
+    # CONTRACT CHANGED 2026-11-13 (round 8): the producer re-reading is one
+    # reading -- no confirmation, asked as one recommended layout instead of
+    # a block; an independent reader confirms.
+    if independent:
+        assert reread.pin_map_conflict is None and "confermate" in reread.notes
+    else:
+        _same_model_question(reread)
 
 
 def test_an_unusable_recorded_model_leaves_the_reread_to_the_callers_model(
@@ -459,3 +465,17 @@ def test_pad_and_body_readers_are_not_resolved_when_their_reading_does_not_run(
     _numbering_run(monkeypatch, tmp_path, progress=logs.append,
                    step_models=_steps(pad_positions_prompt="deepseek-api/pads"))
     assert not any("deepseek-api/pads" in line for line in logs)
+
+
+def _same_model_question(params):
+    """The pad-layout question of two agreeing readings of ONE model (round 8, real TEL run).
+
+    CONTRACT CHANGED 2026-11-13: such readings are one reading, still never
+    adopted, but they are ASKED as one recommended confirmation instead of a
+    hard block without a question.
+    """
+    assert not params.pin_map_conflict
+    (question,) = [q for q in params.questions or () if q["field"] == "pad_layout"]
+    assert "stesso modello" in question["text"]
+    assert len(question["options"]) == 1 and question["options"][0].get("recommended") is True
+    return question

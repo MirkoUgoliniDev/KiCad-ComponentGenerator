@@ -692,6 +692,68 @@ class UpdateCheckWorker(QThread):
         self.done.emit(result)
 
 
+class PreviewRenderWorker(QThread):
+    """@brief Render the «Prova in KiCad» preview board to a 3D image off the GUI thread.
+
+    @note Same ownership as `UpdateCheckWorker`: the thread belongs to
+        QApplication, so closing the window during a render (bounded by
+        `kicad_library.PREVIEW_RENDER_TIMEOUT_S`) never destroys a running
+        QThread; application exit waits for it, and the finished thread
+        deletes itself.
+    @note `render_preview_image` is looked up on `kicad_library` at run time,
+        so a test that replaces it there reaches the code that runs.
+    @note `done` carries (result, token): the receiver is a bound method of
+        the window, so the queued connection delivers it on the GUI thread,
+        and the token says which start the result belongs to.
+    """
+    done = pyqtSignal(object, object)
+
+    def __init__(self, preview, kicad_cli, *, has_step: bool, token=None, parent=None):
+        """@brief Prepare one render.
+
+        @param preview `kicad_library.PreviewProject` to render.
+        @param kicad_cli Path of kicad-cli, or None.
+        @param has_step Whether the preview carries a STEP model.
+        @param token Opaque value emitted back with the result.
+        @param parent Owner of the thread; defaults to QApplication.instance().
+        """
+        application = QApplication.instance()
+        super().__init__(parent if parent is not None else application)
+        self.preview = preview
+        self.kicad_cli = kicad_cli
+        self.has_step = bool(has_step)
+        self.token = token
+        if application is not None:
+            application.aboutToQuit.connect(self.wait)
+        self.finished.connect(self._release)
+
+    def _release(self) -> None:
+        """Drop the exit-time wait and delete the finished thread (see `UpdateCheckWorker._release`)."""
+        application = QApplication.instance()
+        if application is not None:
+            try:
+                application.aboutToQuit.disconnect(self.wait)
+            except TypeError:
+                pass  # never connected, or already released
+        self.deleteLater()
+
+    def run(self):
+        """@brief QThread override: always emit one `kicad_library.PreviewRender`.
+
+        @note `render_preview_image` never raises for kicad-cli problems; the
+            guard turns any other error into a ``render_failed`` result, so
+            nothing reaches sys.excepthook from this thread.
+        """
+        from ..services import kicad_library
+        try:
+            result = kicad_library.render_preview_image(
+                self.preview, self.kicad_cli, has_step=self.has_step)
+        except Exception as exc:  # noqa: BLE001 - the signal must always fire
+            result = kicad_library.PreviewRender(None, "render_failed",
+                                                 f"{type(exc).__name__}: {exc}")
+        self.done.emit(result, self.token)
+
+
 class TerminalDetailWorker(QThread):
     """@brief Optional photo detail pass; never regenerates the footprint."""
     done = pyqtSignal(object)
@@ -793,6 +855,7 @@ class ExtractWorker(QThread):
         part_number: str | None = None,
         prompts: dict | None = None,
         step_models: dict | None = None,
+        answers: dict | None = None,
     ):
         """@brief Snapshot extraction settings before starting background work.
 
@@ -838,9 +901,20 @@ class ExtractWorker(QThread):
             «Modello AI» table), copied; forwarded as `step_models=` like
             `crop_prompt`. None = every step on its usual model. The session
             model replaces only `model`, never a step's own choice.
+        @param answers The project's saved answers to structured questions
+            ({question key: value}), copied when the analysis starts, so a
+            later project switch cannot change them; forwarded as `answers=`
+            when the extraction function accepts it. None or empty forwards
+            nothing.
         @note YOLO changes photo proposals only; AI verification remains configured.
+        @note Root cause of saved answers asked again (overnight review
+            2026-11-14): the window set `answers` on the worker but `run`
+            never forwarded them, so the extractor's tolerant re-application
+            (shape signature, row spacing by value) never ran.
         """
         super().__init__()
+        #: The project's saved answers of this run (a copy); None = none.
+        self.answers = dict(answers) if isinstance(answers, dict) and answers else None
         #: Step models of this run (a copy); None = no step choice.
         self.step_models = dict(step_models) if step_models is not None else None
         self.doc_paths = doc_paths
@@ -974,6 +1048,10 @@ class ExtractWorker(QThread):
                                   pad_model=self.pad_model,
                                   part_number=self.part_number,
                                   cancel=self.cancel_event,
+                                  # The saved answers: the extractor applies the
+                                  # ones it can match itself (none = no keyword).
+                                  **({"answers": dict(self.answers)}
+                                     if getattr(self, "answers", None) else {}),
                                   # None = the defaults: not forwarded at all.
                                   **({"prompts": self.prompts}
                                      if getattr(self, "prompts", None) is not None else {}),

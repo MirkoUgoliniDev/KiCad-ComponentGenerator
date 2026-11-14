@@ -109,8 +109,8 @@ library chosen because their dimensions are similar.</p>
   <strong>DeepSeek (direct API)</strong> (models <code>deepseek-api/...</code>;
   when running from source the default is <code>deepseek-api/deepseek-flash</code>).
   The model is chosen from the interface: <span class="ui">Configuration</span> →
-  <span class="ui">AI model...</span>,
-  or the <span class="ui">AI model</span> panel for the session.
+  <span class="ui">AI model...</span>
+  (also from the button beside the <span class="ui">AI models</span> line).
   The key is entered from <span class="ui">Configuration</span> →
   <span class="ui">AI account...</span>: the window lists every provider with
   the source of the key in use (environment variable, Credential Manager,
@@ -255,20 +255,22 @@ see or change the other choices:</p>
     it is loaded, so it is checked only when you press
     <span class="ui">Check compatibility</span>. If the file is missing or not
     compatible, the analysis stops before spending anything.</li>
-  <li><span class="ui">AI model (this session)</span>: the single model used for documents,
-  photos and verification. The button next to it chooses a different model (filterable by
-  cost, OpenRouter or DeepSeek source) <em>for this session only</em>;
-  the default and its source are set from <span class="ui">Configuration →
-  AI model...</span>. The same window, in the <span class="ui">Different models for single steps</span>
+  <li><span class="ui">AI models</span>: a read-only line,
+  <span class="ui">default &lt;model&gt; · N steps with a model of their own</span>. The default
+  model runs every analysis step (documents, photos and verification) that has no model of its
+  own; the button beside it opens
+  <span class="ui">Configuration → AI model...</span>, where the default is chosen with its
+  source (OpenRouter or DeepSeek). There is no longer a model valid for the session only:
+  every choice is made and saved in that window.
+  The same window, in the <span class="ui">Different models for single steps</span>
   section (closed when it opens, its title counts the steps with a model of their own), has
   a table with the model of each
   analysis step (document reading, pad positions, body dimensions, photo
   inventory and crops, markings, terminals, pin types): every step follows the
-  single model until <span class="ui">Change…</span> gives it one of its own,
-  <span class="ui">Use single</span> returns it to the single model and
+  default model until <span class="ui">Change…</span> gives it one of its own,
+  <span class="ui">Use default</span> returns it to the default model and
   <span class="ui">Restore default steps</span> returns only the table to the initial
-  choice, without changing the single model; the session
-  model replaces only the single model. Every prompt (general and per type) is edited from <span class="ui">Configuration →
+  choice, without changing the default model. Every prompt (general and per type) is edited from <span class="ui">Configuration →
   Manage AI types and profiles...</span>.</li>
 </ul>
 
@@ -618,10 +620,13 @@ regenerate the STEP model and repeat the command.</p>
 <table>
   <tr><th>Command</th><th>What it does</th></tr>
   <tr><td class="ui">Test in KiCad...</td>
-      <td>Creates a small temporary project with the footprint and the STEP model, in the
-      component's <code>.kicad-preview</code> subfolder, and opens it in the PCB
-      Editor. In KiCad press <kbd>Alt</kbd>+<kbd>3</kbd> for the 3D view. It does not install
-      and does not change any KiCad library.</td></tr>
+      <td>Creates a small temporary project with the footprint, the symbol and the STEP
+      model, in the component's <code>.kicad-preview</code> subfolder, opens the schematic
+      in the Schematic Editor and the board in the PCB Editor, and shows a 3D image of the
+      component, rendered by KiCad, in a separate window. In KiCad press
+      <kbd>Alt</kbd>+<kbd>3</kbd> for the interactive 3D view. Without a symbol only the
+      board opens and the log says why; without a STEP model the 3D image is not made.
+      It does not install and does not change any KiCad library.</td></tr>
   <tr><td class="ui">Install in KiCad project...</td>
       <td>The recommended choice. Choose the folder of a KiCad project:
       <code>KiCadGen.pretty</code> and <code>KiCadGen.3dshapes</code> are created and the

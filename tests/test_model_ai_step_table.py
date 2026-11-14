@@ -108,13 +108,15 @@ def test_the_step_column_header_is_not_the_pin_pitch(qapp, tmp_path):
 
 
 def test_a_step_shows_the_model_it_really_uses(dialog):
-    """@brief Positive: an own model shows its id in bold; a following step shows «= modello unico», muted.
+    """@brief Positive: an own model shows its id in bold; a following step shows «= modello predefinito», muted.
+
+    @note CONTRACT CHANGED 2026-11-13: «modello unico» renamed «modello predefinito» (user decision; EN default model, FR modèle par défaut, DE Standardmodell).
 
     @note Negative: changing the single model changes the following rows' tooltip, never an own one.
     """
     models = {field: model for _text, model, field in _rows(dialog) if field}
     assert models["crop_prompt"] == "openai/gpt-4o"
-    assert models["inventory_prompt"] == "= modello unico"
+    assert models["inventory_prompt"] == "= modello predefinito"
     own_row = dialog._rows["crop_prompt"][0]
     single_row = dialog._rows["inventory_prompt"][0]
     own, follows = dialog.table.item(own_row, COL_MODEL), dialog.table.item(single_row, COL_MODEL)
@@ -131,8 +133,9 @@ def test_a_step_shows_the_model_it_really_uses(dialog):
 def test_change_sets_one_step_and_use_single_clears_it(dialog, monkeypatch):
     """@brief «Cambia…» sets the step through the picker of every source, with the step's capabilities.
 
-    @note Negative: «Usa l'unico» is hidden (its room kept) on a step that already follows the
-        single model, and clearing one step leaves the others unchanged.
+    @note Negative: «Usa il predefinito» is hidden (its room kept) on a step that already
+        follows the default model, and clearing one step leaves the others unchanged.
+    @note CONTRACT CHANGED 2026-11-13: «modello unico» renamed «modello predefinito» (user decision; EN default model, FR modèle par défaut, DE Standardmodell).
     """
     calls = []
 
@@ -142,7 +145,7 @@ def test_change_sets_one_step_and_use_single_clears_it(dialog, monkeypatch):
     monkeypatch.setattr(settings_dialog, "pick_model", pick)
     _row, change, single = dialog._rows["pin_type_prompt"]
     assert single.isHidden() and single.sizePolicy().retainSizeWhenHidden()
-    assert single.text() == "Usa l'unico"
+    assert single.text() == "Usa il predefinito"
     change.click()
     assert dialog.step_models()["pin_type_prompt"] == "vendor/reader" and not single.isHidden()
     assert calls[-1][0] == "deepseek-api/deepseek-flash", "the picker opens on the model in use"
@@ -383,7 +386,8 @@ def test_a_missing_key_names_the_steps_and_what_happens_to_them(qapp, monkeypatc
         text = d.label_keys_used.text()
         blocked, fallback = text.split("\n")
         assert "Lettura dei ritagli" in blocked and "non parte" in blocked
-        assert "Posizioni dei pad" in fallback and "modello unico" in fallback
+        # CONTRACT CHANGED 2026-11-13: «modello unico» renamed «modello predefinito» (user decision; EN default model, FR modèle par défaut, DE Standardmodell) in the fallback line.
+        assert "Posizioni dei pad" in fallback and "modello predefinito" in fallback
         assert settings_dialog.YELLOW in d.label_keys_used.styleSheet()
         d.btn_account.click()
         assert opened == [True]
@@ -394,39 +398,45 @@ def test_a_missing_key_names_the_steps_and_what_happens_to_them(qapp, monkeypatc
         d.deleteLater()
 
 
-def test_the_session_model_is_said_under_the_single_model(qapp):
-    """@brief Finding 10. Positive: an active session model is named; negative: none, or the same model, hides the line."""
-    d = LlmSettingsDialog(current_model="vendor/m", session_model="vendor/session")
+def test_the_window_has_no_session_model_note(qapp):
+    """@brief CONTRACT CHANGED 2026-11-13: no per-session model exists any more (user decision).
+
+    Positive: the window opens with the default model and has no session note.
+    Negative: a caller that still passes `session_model` is refused (TypeError),
+    instead of a value silently ignored.
+    """
+    d = LlmSettingsDialog(current_model="vendor/m")
     try:
-        assert not d.label_session.isHidden() and "vendor/session" in d.label_session.text()
+        assert not hasattr(d, "label_session")
+        assert d.model() == "vendor/m"
     finally:
         d.deleteLater()
-    for session in (None, "vendor/m"):
-        d = LlmSettingsDialog(current_model="vendor/m", session_model=session)
-        try:
-            assert d.label_session.isHidden()
-        finally:
-            d.deleteLater()
+    with pytest.raises(TypeError):
+        LlmSettingsDialog(current_model="vendor/m", session_model="vendor/session")
 
 
 def test_the_new_texts_follow_the_language(qapp, tmp_path):
     """@brief Positive: in English the captions, titles, hints and buttons are English.
 
     @note Negative: in Italian they stay the Italian sources.
+    @note CONTRACT CHANGED 2026-11-13: «modello unico» renamed «modello predefinito» (user decision; EN default model, FR modèle par défaut, DE Standardmodell).
     """
     from kicadgen.services.analysis_profiles import ProfileStore
     from kicadgen.services.i18n import I18n
     from kicadgen.services.messages import set_translator
     store = ProfileStore(tmp_path / "p.sqlite3")
     expected = {
-        "en": ("Document reading", "Reading — single component", "= single model", "Change…",
-               "Use single", "Re-reads every body enlarged."),
-        "fr": ("Lecture des documents", "Lecture — composant seul", "= modèle unique", "Changer…",
-               "Utiliser l’unique", "Relit chaque corps agrandi."),
-        "de": ("Dokumentlesung", "Lesung — Einzelbauteil", "= einziges Modell", "Ändern…",
-               "Einziges verwenden", "Liest jedes Gehäuse vergrößert erneut."),
-        "it": ("Lettura documenti", "Lettura — componente singolo", "= modello unico", "Cambia…",
-               "Usa l'unico", "Rilegge ogni corpo ingrandito."),
+        "en": ("Document reading", "Reading — single component", "= default model", "Change…",
+               "Use default", "Re-reads every body enlarged."),
+        "fr": ("Lecture des documents", "Lecture — composant seul", "= modèle par défaut", "Changer…",
+               "Utiliser le défaut", "Relit chaque corps agrandi."),
+        # CONTRACT CHANGED 2026-11-14: the German step title reads «Lesen —
+        # Einzelbauteil» (practical review: «Lesung» read oddly); the old text
+        # is registered as superseded so existing databases update.
+        "de": ("Dokumentlesung", "Lesen — Einzelbauteil", "= Standardmodell", "Ändern…",
+               "Standard verwenden", "Liest jedes Gehäuse vergrößert erneut."),
+        "it": ("Lettura documenti", "Lettura — componente singolo", "= modello predefinito", "Cambia…",
+               "Usa il predefinito", "Rilegge ogni corpo ingrandito."),
     }
     for language, (group, title, follows, change, single, hint) in expected.items():
         set_translator(I18n(store, language).raw)
@@ -471,7 +481,7 @@ def test_the_profile_editor_names_each_step_prompt_like_the_table_and_its_model(
                  if label.objectName().endswith("_model")}
         assert "vendor/crops" in lines["crop_prompt_model"]
         single = store.defaults()["model"]
-        assert "modello unico" in lines["marking_prompt_model"] and single in lines["marking_prompt_model"]
+        assert "modello predefinito" in lines["marking_prompt_model"] and single in lines["marking_prompt_model"]
         assert "Modello AI..." in lines["crop_prompt_model"]
         if "inventory_enumerate_prompt" in editor.fields:
             assert "inventory_enumerate_prompt_model" in lines
@@ -540,20 +550,23 @@ def test_a_changed_pad_step_saves_only_itself_and_never_the_old_pad_field(window
 
 
 def test_a_changed_step_is_saved_and_logged(window, monkeypatch):
-    """@brief Positive: the changed step is stored; the log says «Modelli AI salvati» and names the step."""
+    """@brief Positive: the changed step is stored; the log says «Modelli AI salvati» and names the step.
+
+    @note CONTRACT CHANGED 2026-11-13: «Modello unico» renamed «Modello predefinito», and
+        the window no longer receives a session model (the per-session model was removed).
+    """
     from kicadgen.gui import main_window as gui
-    window._session_model = "vendor/session"
     stub = _Stub(lambda shown: dict(shown, marking_prompt="vendor/markings"))
     monkeypatch.setattr(gui, "LlmSettingsDialog", stub)
     logged = []
     monkeypatch.setattr(window, "_append_log", lambda text, *a, **k: logged.append(str(text)))
     window._edit_llm_settings()
     assert window.profile_store.step_models_stored() == {"marking_prompt": "vendor/markings"}
-    assert any(line.startswith("Modelli AI salvati. Modello unico:") for line in logged)
+    assert any(line.startswith("Modelli AI salvati. Modello predefinito:") for line in logged)
     assert not any("SQLite" in line or "LLM" in line for line in logged)
     assert any("Lettura delle sigle → vendor/markings" in line for line in logged)
     # The window receives what it needs for its notes and its account button.
-    assert stub.kwargs["session_model"] == "vendor/session"
+    assert "session_model" not in stub.kwargs
     assert stub.kwargs["stored_step_fields"] == set()
     assert stub.kwargs["account_opener"] == window._open_ai_account
 
@@ -579,16 +592,17 @@ def _start_extraction(window, monkeypatch, family, detector="ai"):
     return window._extract_worker
 
 
-def test_the_extraction_worker_receives_the_steps_and_the_session_model_only_replaces_the_single(
-        window, monkeypatch):
-    """@brief Positive: the worker gets the step table; the session model is its `model`.
+def test_the_extraction_worker_receives_the_steps_and_the_default_model(window, monkeypatch):
+    """@brief Positive: the worker gets the step table; the saved default model is its `model`.
 
-    @note Negative: the step chosen in the table is not replaced by the session model.
+    @note Negative: the step chosen in the table is not replaced by the default model.
+    @note CONTRACT CHANGED 2026-11-13: there is no session model to replace the
+        default one any more (user decision); the window has no such attribute.
     """
     window.profile_store.save_step_models({"crop_prompt": "vendor/crops"})
-    window._session_model = "vendor/session"
+    assert not hasattr(window, "_session_model")
     worker = _start_extraction(window, monkeypatch, "aggregate_tht")
-    assert worker.model == "vendor/session"
+    assert worker.model == window._default_model()
     assert worker.step_models == window.profile_store.step_models()
     assert worker.step_models["crop_prompt"] == "vendor/crops"
 
@@ -596,11 +610,10 @@ def test_the_extraction_worker_receives_the_steps_and_the_session_model_only_rep
 def test_the_photo_call_line_names_the_inventory_step_model(window, monkeypatch):
     """@brief Finding C. Positive: a chosen inventory step is the model the photo line names.
 
-    @note Negative: without a step choice the line names the session/configured model.
+    @note Negative: without a step choice the line names the configured model.
     """
     lines = []
     monkeypatch.setattr(window, "_on_ai_progress", lambda text, *a, **k: lines.append(str(text)))
-    window._session_model = None
     _start_extraction(window, monkeypatch, "aggregate_tht", detector="vlm")
     photo = [line for line in lines if "fotografia affidata" in line]
     assert photo and "modello del passo" not in photo[-1]
@@ -617,7 +630,6 @@ def test_the_key_check_covers_the_chosen_steps_of_the_run(window, monkeypatch):
     @note Negative: for a single part the photo step is left out, and the pad steps that
         still follow the old default are an optional reader, not a chosen model.
     """
-    window._session_model = None
     window.profile_store.save_step_models({"crop_prompt": "vendor/crops"})
     combo = window.combo_component_type
     combo.setCurrentIndex(combo.findData("aggregate_tht"))
@@ -657,7 +669,6 @@ def test_side_commands_check_only_their_own_step(window):
     @note Negative: a chosen crop model on another source is not asked for by a pin-type
         suggestion, a terminal pass or a re-read.
     """
-    window._session_model = None
     window.profile_store.save_step_models({"crop_prompt": "vendor/crops",
                                            "pin_type_prompt": "vendor/pins",
                                            "body_dimensions_prompt": "vendor/body"})

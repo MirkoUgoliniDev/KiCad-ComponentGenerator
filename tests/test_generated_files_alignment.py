@@ -145,7 +145,11 @@ def dialogs(monkeypatch):
                             identifier="KiCadGen:" + NAME, footprint_path="fp", table_path="t"))
     monkeypatch.setattr(gui, "create_preview_project",
                         lambda *a, **k: seen["preview"].append(a) or SimpleNamespace(board_path="b"))
-    monkeypatch.setattr(gui, "launch_preview", lambda *a, **k: None)
+    # CONTRACT CHANGED 2026-11-13 (point 8): the preview opens through
+    # `launch_preview_editors` and renders its 3D image off the GUI thread.
+    monkeypatch.setattr(gui, "launch_preview_editors", lambda *a, **k: __import__("types").SimpleNamespace(
+        schematic_skipped=None, schematic_error=None))
+    monkeypatch.setattr(gui.MainWindow, "_start_preview_render", lambda *a, **k: None)
     monkeypatch.setattr(gui, "detect_external_applications", lambda: SimpleNamespace(
         pcbnew="pcbnew.exe", kicad_cli="kicad-cli.exe"))
     # CONTRACT CHANGED 2026-10-27 (review K): the global installation resolves

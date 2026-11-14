@@ -17,9 +17,10 @@ characters KiCad forbids.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import lru_cache
 import math
+import re
 import unicodedata
 
 from ..generators.symbol import SYMBOL_NAME_ILLEGAL_CHARACTERS
@@ -285,11 +286,18 @@ class Finding:
     @param message Translated text for the user.
     @param hint Translated remedy (what to change and where); filled by the
         checks from `FIX_HINTS`, '' when built without one.
+    @param fix Stable id of a SAFE automatic fix (see `FIX_IDS`), '' when
+        the finding has none. Structured on purpose: the GUI offers its
+        «Correggi» button from this id, never from the translated message.
+    @param fix_value Value the fix applies (e.g. the proposed name of
+        `name_spaces_to_underscore`), '' without a fix.
     """
     code: str
     severity: str
     message: str
     hint: str = ''
+    fix: str = ''
+    fix_value: str = ''
 
     def __post_init__(self) -> None:
         """@brief Refuse a severity outside `SEVERITIES`.
@@ -341,10 +349,37 @@ def name_findings(name: str, *, code: str, label: str, kind: str = 'footprint') 
             '{label}: il nome «{name}» contiene caratteri vietati da KiCad ({characters} o di controllo).',
             label=label, name=name, characters=' '.join(illegal))))
     if any(c.isspace() for c in name):
-        findings.append(_warning(code + '_spaces', tx(
+        finding = _warning(code + '_spaces', tx(
             '{label}: il nome «{name}» contiene spazi, sconsigliati dalle convenzioni KiCad.',
-            label=label, name=name)))
+            label=label, name=name))
+        proposed = proposed_name_without_spaces(name)
+        # The fix is offered only when it is SAFE: the proposed name must be
+        # clean for this kind (no finding at all), so a click on «Correggi»
+        # never trades one finding for another (e.g. a name that also holds
+        # a forbidden character is left to the user).
+        if proposed and not name_findings(proposed, code=code, label=label, kind=kind):
+            finding = replace(finding, fix=FIX_NAME_SPACES, fix_value=proposed)
+        findings.append(finding)
     return findings
+
+
+#: Fix id of a name with spaces: rename it with `proposed_name_without_spaces`.
+FIX_NAME_SPACES = 'name_spaces_to_underscore'
+#: Every automatic fix id a finding can carry.
+FIX_IDS = (FIX_NAME_SPACES,)
+
+
+def proposed_name_without_spaces(name: str) -> str:
+    """@brief The component name with its blanks replaced by «_» (KLC: no spaces in names).
+
+    @param name Name to fix.
+    @return The name stripped at both ends, each run of blanks (together
+        with the underscores touching it) replaced by ONE «_»; every other
+        character is kept as written, so a name valid apart from its spaces
+        stays valid. Underscore runs that touch no blank are kept unchanged.
+        '' for a name made of blanks only.
+    """
+    return re.sub(r'_*\s[\s_]*', '_', str(name).strip())
 
 
 def check_metadata(metadata: dict, footprint_name: str) -> list[Finding]:

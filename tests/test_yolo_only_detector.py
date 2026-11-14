@@ -112,18 +112,13 @@ def test_detector_row_comes_first_and_the_pretest_hides_both_ai_models(window): 
     assert window.field_yolo_model.isEnabled()
     assert form.isRowVisible(window._row_yolo_model)
     assert not form.isRowVisible(window._row_ai_model)
-    assert not form.isRowVisible(window._row_vlm_model)
     assert not form.isRowVisible(window._row_ai_account)  # niente credito: non si spende
-    # La verifica AI riattiva il modello AI; la riga VLM compare solo quando
-    # è configurato un override distinto dal modello AI.
+    # The AI check brings the «Modelli AI» line back. CONTRACT CHANGED
+    # 2026-11-13: the vision-model row of a per-session override was removed
+    # with the session models (user decision).
     combo.setCurrentIndex(combo.findData("yolo"))
     assert form.isRowVisible(window._row_ai_model)
-    assert not form.isRowVisible(window._row_vlm_model)
-    previous_vlm = window._vlm_model
-    window._vlm_model = "different/vision-model"
-    window._on_photo_detector_changed()
-    assert form.isRowVisible(window._row_vlm_model)
-    window._vlm_model = previous_vlm
+    assert not hasattr(window, "_row_vlm_model")
     window._on_photo_detector_changed()
     assert form.isRowVisible(window._row_ai_account)
 

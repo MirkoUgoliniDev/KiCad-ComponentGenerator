@@ -137,7 +137,8 @@ def test_a_saved_single_model_on_a_keyless_source_is_named_in_the_warning(qapp, 
     d = LlmSettingsDialog('prompt', 'vendor/data', current_pad_model="")
     try:
         assert not d.keys_row.isHidden()
-        assert "modello unico vendor/data" in d.label_keys_used.text()
+        # CONTRACT CHANGED 2026-11-13: «modello unico» renamed «modello predefinito» (user decision; EN default model, FR modèle par défaut, DE Standardmodell).
+        assert "modello predefinito vendor/data" in d.label_keys_used.text()
         monkeypatch.setattr(openrouter, "api_key_source", lambda: present)
         d._refresh_key_state()
         assert d.keys_row.isHidden()
@@ -149,7 +150,8 @@ def test_the_model_explanation_is_only_in_the_info_modal(qapp):
     """@brief The help text stays out of the window and opens in a read-only modal (the prompt
     tabs and their explanations moved to the profile manager on 2026-11-12)."""
     app = qapp
-    expected = "Il modello unico esegue ogni passo dell'analisi"
+    # CONTRACT CHANGED 2026-11-13: «modello unico» renamed «modello predefinito» (user decision; EN default model, FR modèle par défaut, DE Standardmodell).
+    expected = "Il modello predefinito esegue ogni passo dell'analisi"
     d = LlmSettingsDialog("custom datasheet", "vendor/datasheet")
     observed = {}
     try:

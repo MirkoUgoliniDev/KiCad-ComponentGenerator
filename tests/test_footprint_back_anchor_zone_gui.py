@@ -657,8 +657,12 @@ def test_the_component_check_is_refused_while_the_footprint_file_is_stale(window
     opened, warned = [], []
 
     class Dialog:
-        def __init__(self, args, parent, tx):
-            opened.append(args)
+        # CONTRACT CHANGED 2026-11-14: the window now passes the fix actions
+        # («Riesporta il simbolo») to the check dialog, so the stub accepts them.
+        def __init__(self, args, parent, tx, actions=None):
+            # CONTRACT CHANGED 2026-11-14 (review P2): the window gives an args BUILDER,
+            # called by the dialog for every run; the stub calls it once.
+            opened.append(args() if callable(args) else args)
 
         def exec(self):
             return 0

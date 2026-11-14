@@ -178,6 +178,26 @@ def test_a_quoted_pad_whose_hole_alone_is_missing_is_never_called_non_existent(w
     assert window._unread_pad_unquoted == [] and HOLE_NOT_QUOTED in window._unread_pads_block()
 
 
+def test_the_reread_outcome_is_said_only_when_it_ran_and_found_nothing(window, monkeypatch, tmp_path):  # noqa: F811
+    """Positive: the extractor re-read the terminals and found nothing -> «Riletto: …» before the
+    remedy. Negative: no re-read (or one that found dimensions) -> the neutral remedy only; the
+    old claim «rileggere lo stesso disegno non lo troverebbe» is never made.
+
+    CONTRACT CHANGED 2026-11-13 (ExtractedParams.terminal_reread): the remedy no longer claims a
+    re-read cannot help.
+    """
+    from types import SimpleNamespace
+    _single_tht(window, monkeypatch, tmp_path)
+    run_extraction(window, _with_unquoted(_holeless({"5"}), []))
+    for outcome, said in ((None, False), ("found", False), ("nothing", True)):
+        monkeypatch.setattr(window, "_settled_extraction",
+                            lambda outcome=outcome: SimpleNamespace(terminal_reread=outcome))
+        block = window._unread_pads_block()
+        assert "Per il foro dei pad 5 ripeti l'analisi" in block
+        assert "non lo troverebbe" not in block
+        assert ("Riletto: nessuna quota di terminale o foro trovata." in block) is said, outcome
+
+
 def test_quoted_and_unquoted_pads_get_each_their_own_sentence(window, monkeypatch, tmp_path):  # noqa: F811
     _single_tht(window, monkeypatch, tmp_path)
     run_extraction(window, _with_unquoted(_holeless({"4", "5"}), ["5"]))

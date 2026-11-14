@@ -332,7 +332,15 @@ def test_the_held_back_log_names_the_command_of_each_question(window):
     window._extraction_questions = [pads]
     text = window._held_back_questions_text()
     assert "«Rigenera footprint»" in text and "«Rigenera modello STEP»" not in text
+    # CONTRACT CHANGED 2026-11-14 (GUI review H1): the terminal view is a
+    # footprint question now (a bottom view mirrors the footprint, so none is
+    # written with the view unknown): its held-back line names the footprint
+    # commands. The «other questions» line is checked on another field.
     window._extraction_questions = [view]
+    text = window._held_back_questions_text()
+    assert "«Rigenera footprint»" in text and "ripetendo l'analisi" not in text
+    other = {"key": "e:1", "field": "height_equals_plan", "text": "t", "options": [], "evidence": None}
+    window._extraction_questions = [other]
     assert "ripetendo l'analisi" in window._held_back_questions_text()
 
 

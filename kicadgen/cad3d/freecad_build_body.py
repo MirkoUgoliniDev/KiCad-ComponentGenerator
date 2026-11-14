@@ -1066,6 +1066,29 @@ def _export_fcstd(doc, fcstd_path, staged):
               exc=exc)
 
 
+def _apply_seating_lift(objects, label_anchors, lift):
+    """@brief Raise every built object and every stored 3D anchor by `lift` mm along Z.
+
+    @param objects FreeCAD document objects of the model (all of them: board,
+        contacts, components, headers, texts).
+    @param label_anchors Dict object name -> [x, y, z] of the preview's pin
+        number anchors, updated in place.
+    @param lift Translation, mm; 0 (no header drawn) changes nothing, so the
+        flat-soldered module keeps its PCB underside at Z=0.
+    @note The objects are moved through their Placement, not by copying their
+        shapes: library STEP models can be large, and a Placement keeps the
+        faces (and their per-face colours) in the same order.
+    """
+    if not lift:
+        return
+    shift = FreeCAD.Placement(FreeCAD.Vector(0, 0, lift), FreeCAD.Rotation())
+    for obj in objects:
+        obj.Placement = shift.multiply(obj.Placement)
+    for name, anchor in list(label_anchors.items()):
+        if anchor is not None:
+            label_anchors[name] = [anchor[0], anchor[1], anchor[2] + lift]
+
+
 def main():
     """@brief Build body, pins, substrate, fillets and texts inside FreeCAD from the JSON job and export them.
 
@@ -1349,6 +1372,9 @@ def main():
     pin_radius = pin_diameter / 2.0
     # Switched off on request (Body3DParams.show_pins_3d): the holes remain.
     shown_pins = pins if data.get("show_pins_3d", True) else []
+    # Translation of the whole model along Z that puts the seating plane at
+    # Z=0 (see _apply_seating_lift). 0 unless a male header is drawn below.
+    seating_lift = 0.0
     if shown_pins and data.get("pin_style") == "male_header":
         # Male strip under a populated board: square pins and plastic
         # spacer, catalogue dimensions (see header_geometry).
@@ -1367,6 +1393,13 @@ def main():
                 box["dx"], box["dy"], box["dz"],
                 FreeCAD.Vector(box["x"], box["y"], box["z"]),
             ), pin_color if box["role"] == "pin" else "#151515")
+        # The boxes above are built with the module underside at Z=0. When
+        # every contact is header-mounted the host board's top face is the
+        # spacer's bottom (user-confirmed seating plane, 2026-11-13) and the
+        # parent sends the spacer height (a catalogue estimate, see
+        # header_geometry.spacer_height); with flat-soldered contacts too it
+        # sends 0 (step_generator.header_seating_plan decides and notes it).
+        seating_lift = float(data.get("header_seating_lift_mm") or 0.0)
         shown_pins = []
     for pin_num, x, y in shown_pins:
         add(f"Pin{pin_num}", Part.makeCylinder(
@@ -1374,6 +1407,11 @@ def main():
             FreeCAD.Vector(x, y, -pin_length),
             FreeCAD.Vector(0, 0, 1),
         ), pin_color)
+
+    # Every object and every stored 3D coordinate moves together, before
+    # STEP, FCStd, WRL and preview exports: the preview's pin numbers stay on
+    # the contacts and every export shares one frame.
+    _apply_seating_lift([obj for obj, _ in colored], label_anchors, seating_lift)
 
     with _StepHeartbeat("recompute"):
         doc.recompute()

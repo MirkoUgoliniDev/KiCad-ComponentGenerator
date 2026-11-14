@@ -109,8 +109,8 @@ KiCad choisis par similitude de dimensions.</p>
   <strong>DeepSeek (API directe)</strong> (modèles <code>deepseek-api/...</code> ;
   en lançant depuis les sources, le modèle par défaut est <code>deepseek-api/deepseek-flash</code>).
   Le modèle se choisit depuis l’interface : <span class="ui">Configuration</span> →
-  <span class="ui">Modèle IA...</span>,
-  ou le panneau <span class="ui">Modèle IA</span> pour la session.
+  <span class="ui">Modèle IA...</span>
+  (aussi depuis le bouton à côté de la ligne <span class="ui">Modèles IA</span>).
   La clé se saisit depuis <span class="ui">Configuration</span> →
   <span class="ui">Compte IA...</span> : la fenêtre liste chaque fournisseur avec
   l’origine de la clé utilisée (variable d’environnement, Gestionnaire d’identification, fichier
@@ -255,21 +255,22 @@ voir ou modifier les autres choix :</p>
     il est chargé ; il n’est donc vérifié qu’en appuyant sur
     <span class="ui">Vérifier la compatibilité</span>. Si le fichier manque ou n’est pas
     compatible, l’analyse s’arrête avant toute dépense.</li>
-  <li><span class="ui">Modèle IA (cette session)</span> : le modèle unique utilisé pour les documents, la
-  photo et la vérification. Le bouton voisin choisit un autre modèle (filtrable par
-  coût, source OpenRouter ou DeepSeek) <em>pour cette session uniquement</em> ;
-  le modèle par défaut et sa source se règlent dans <span class="ui">Configuration →
-  Modèle IA...</span>. La même fenêtre, dans la section <span class="ui">Modèles différents pour certaines
+  <li><span class="ui">Modèles IA</span> : une ligne en lecture seule,
+  <span class="ui">par défaut &lt;modèle&gt; · N étapes avec un modèle propre</span>. Le modèle
+  par défaut exécute chaque étape de l’analyse (documents, photo et vérification) qui n’a pas
+  de modèle propre ; le bouton à côté ouvre <span class="ui">Configuration → Modèle IA...</span>, où se choisit le modèle par
+  défaut avec sa source (OpenRouter ou DeepSeek). Il n’y a plus de modèle valable pour la
+  seule session : chaque choix se fait et s’enregistre dans cette fenêtre.
+  La même fenêtre, dans la section <span class="ui">Modèles différents pour certaines
   étapes</span> (fermée à l’ouverture, son titre compte les étapes avec un modèle propre),
   contient un tableau avec le modèle de
   chaque étape de l’analyse (lecture des documents, positions des pastilles, cotes
   du boîtier, inventaire et découpes de la photo, marquages, bornes, types des
-  broches) : chaque étape suit le modèle unique jusqu’à ce que
+  broches) : chaque étape suit le modèle par défaut jusqu’à ce que
   <span class="ui">Changer…</span> lui en attribue un propre ;
-  <span class="ui">Utiliser l’unique</span> la ramène au modèle unique et
+  <span class="ui">Utiliser le défaut</span> la ramène au modèle par défaut et
   <span class="ui">Rétablir les étapes par défaut</span> ne ramène que le tableau au
-  choix initial, sans changer le modèle unique ; le modèle de la
-  session ne remplace que le modèle unique. Tous les prompts (généraux et par type) se modifient dans <span class="ui">Configuration →
+  choix initial, sans changer le modèle par défaut. Tous les prompts (généraux et par type) se modifient dans <span class="ui">Configuration →
   Gérer les types et profils IA…</span>.</li>
 </ul>
 
@@ -619,10 +620,13 @@ régénérez le modèle STEP et répétez la commande.</p>
 <table>
   <tr><th>Commande</th><th>Ce qu’elle fait</th></tr>
   <tr><td class="ui">Tester dans KiCad…</td>
-      <td>Crée un petit projet temporaire avec l’empreinte et le modèle STEP, dans le
-      sous-dossier <code>.kicad-preview</code> du composant, et l’ouvre dans le PCB
-      Editor. Dans KiCad, appuyez sur <kbd>Alt</kbd>+<kbd>3</kbd> pour la vue 3D. N’installe
-      et ne modifie aucune bibliothèque de KiCad.</td></tr>
+      <td>Crée un petit projet temporaire avec l’empreinte, le symbole et le modèle STEP,
+      dans le sous-dossier <code>.kicad-preview</code> du composant, ouvre le schéma dans
+      l’éditeur de schémas et le circuit dans l’éditeur de circuits imprimés, et affiche
+      une image 3D du composant, générée par KiCad, dans une fenêtre à part. Dans KiCad,
+      appuyez sur <kbd>Alt</kbd>+<kbd>3</kbd> pour la vue 3D interactive. Sans symbole,
+      seul le circuit s’ouvre et le journal dit pourquoi ; sans modèle STEP, l’image 3D
+      n’est pas créée. N’installe et ne modifie aucune bibliothèque de KiCad.</td></tr>
   <tr><td class="ui">Installer dans le projet KiCad…</td>
       <td>Le choix recommandé. Choisissez le dossier d’un projet KiCad : sont
       créés <code>KiCadGen.pretty</code> et <code>KiCadGen.3dshapes</code>, et la

@@ -1,9 +1,9 @@
-"""@brief «Modello AI»: the single AI model, and a model of their own for single analysis steps.
+"""@brief «Modello AI»: the default AI model, and a model of their own for single analysis steps.
 
 The source (DeepSeek or OpenRouter) is the provider of the chosen model; only
 the models of sources that have a key are offered. The prompts are edited in
 the profile manager only (user, 2026-11-12). Every analysis step
-(prompt_models.STEPS) runs on the single model unless a model of its own is
+(prompt_models.STEPS) runs on the default model unless a model of its own is
 chosen in the step table (user request 2026-11-12, global, never per type),
 kept in a section collapsed by default (user, 2026-11-12: «dobbiamo
 semplificare la UX»).
@@ -23,7 +23,9 @@ from PyQt6.QtWidgets import (
 
 from ..services.datasheet_extractor import DEFAULT_PAD_POSITIONS_MODEL
 from ..services.messages import tx
-from ..services.openrouter import DATASHEET_CAPABILITIES, DEFAULT_MODEL, PHOTO_CAPABILITIES
+from ..services.openrouter import (DATASHEET_CAPABILITIES, DEFAULT_MODEL, IMAGES_NOT_READ,
+                                   IMAGES_UNDECLARED, PHOTO_CAPABILITIES, catalog_id,
+                                   image_capability)
 from ..services.prompt_models import (GROUP_DOCUMENTS, GROUP_PHOTO, GROUP_SYMBOL,
                                       LEGACY_PAD_STEPS, STEPS,
                                       step_models as resolve_step_models)
@@ -62,7 +64,7 @@ _FRAME_ALLOWANCE = 40
 
 
 def factory_step_models() -> dict[str, str]:
-    """@brief The step models of a fresh installation: every step on the single model.
+    """@brief The step models of a fresh installation: every step on the default model.
 
     @return {field: ""} for every step, except the two steps the old
         «Posizioni pad» model served (prompt_models.LEGACY_PAD_STEPS), which
@@ -81,12 +83,29 @@ def _hint_font(font: QFont) -> QFont:
     return small
 
 
+def _column_width(option, index) -> int:
+    """The width of the cell's column in its view, or 0 when the view is unknown."""
+    view = option.widget
+    width_of = getattr(view, "columnWidth", None)
+    return int(width_of(index.column())) if callable(width_of) else 0
+
+
+def _hint_lines_height(metrics: QFontMetrics, hint: str, width: int) -> int:
+    """Height of `hint` word-wrapped to `width` pixels (one line when `width` is unknown)."""
+    if width <= 0:
+        return metrics.height()
+    flags = int(Qt.TextFlag.TextWordWrap.value)
+    return metrics.boundingRect(QRect(0, 0, width, 10 ** 5), flags, hint).height()
+
+
 class StepCellDelegate(QStyledItemDelegate):
-    """@brief Draw a step cell as two lines: the step title, and below it the hint in a muted, smaller font.
+    """@brief Draw a step cell as the step title and, below it, the hint in a muted, smaller font.
 
     @note The hint is always visible (UX review 2026-11-12, finding 8: a hint
         reachable only by hovering was missed); a group caption row has no
-        hint and is drawn by the base delegate.
+        hint and is drawn by the base delegate. When the column is narrower
+        than the hint (a small screen, a longer translation) the hint wraps
+        onto more lines instead of being cut (practical test 2026-11-14).
     """
 
     def paint(self, painter, option, index) -> None:
@@ -110,7 +129,8 @@ class StepCellDelegate(QStyledItemDelegate):
         title_metrics = QFontMetrics(opt.font)
         small = _hint_font(opt.font)
         hint_metrics = QFontMetrics(small)
-        top = rect.top() + max(0, (rect.height() - title_metrics.height() - hint_metrics.height()) // 2)
+        hint_height = _hint_lines_height(hint_metrics, str(hint), rect.width())
+        top = rect.top() + max(0, (rect.height() - title_metrics.height() - hint_height) // 2)
         flags = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
         painter.save()
         painter.setFont(opt.font)
@@ -119,9 +139,11 @@ class StepCellDelegate(QStyledItemDelegate):
                          title_metrics.elidedText(title, Qt.TextElideMode.ElideRight, rect.width()))
         painter.setFont(small)
         painter.setPen(MUTED_COLOR)
-        painter.drawText(QRect(rect.left(), top + title_metrics.height(), rect.width(),
-                               hint_metrics.height()), flags,
-                         hint_metrics.elidedText(str(hint), Qt.TextElideMode.ElideRight, rect.width()))
+        hint_top = top + title_metrics.height()
+        painter.drawText(QRect(rect.left(), hint_top, rect.width(),
+                               max(hint_metrics.height(), rect.bottom() - hint_top)),
+                         int(Qt.AlignmentFlag.AlignLeft.value | Qt.AlignmentFlag.AlignTop.value
+                             | Qt.TextFlag.TextWordWrap.value), str(hint))
         painter.restore()
 
     def sizeHint(self, option, index) -> QSize:  # noqa: N802 - Qt override
@@ -129,7 +151,9 @@ class StepCellDelegate(QStyledItemDelegate):
 
         @param option Style option of the cell.
         @param index Model index of the cell.
-        @return The size of the two-line cell, or the base size on a group row.
+        @return The natural (one-line hint) width of the cell, and the height
+            of the title plus the hint wrapped to the column's current width;
+            the base size on a group row.
         """
         hint = index.data(HINT_ROLE)
         if not hint:
@@ -140,17 +164,18 @@ class StepCellDelegate(QStyledItemDelegate):
         hint_metrics = QFontMetrics(_hint_font(opt.font))
         width = max(title_metrics.horizontalAdvance(opt.text),
                     hint_metrics.horizontalAdvance(str(hint))) + 2 * _CELL_PADDING + 4
-        return QSize(width, title_metrics.height() + hint_metrics.height() + 4)
+        column = _column_width(opt, index) - 2 * _CELL_PADDING
+        hint_height = _hint_lines_height(hint_metrics, str(hint), column)
+        return QSize(width, title_metrics.height() + hint_height + 4)
 
 
 class LlmSettingsDialog(QDialog):
-    """@brief «Modello AI»: one line for the single model, a collapsed section for the steps' own models.
+    """@brief «Modello AI»: one line for the default model, a collapsed section for the steps' own models.
 
     The window reads top to bottom (user, 2026-11-12: «dobbiamo semplificare
     la UX»): one short sentence with the «i» button holding the full
     explanation; one row «Modello: <id> (<source>) [Cambia…]», the source
-    being the provider of the model; the session model of the Project tab
-    when one replaces it; the section «Modelli diversi per singoli passi»,
+    being the provider of the model; the section «Modelli diversi per singoli passi»,
     collapsed by default, whose title counts the steps with a model of their
     own; a warning row only when a model in use has no key.
     @note Only the models of sources with a key are offered (user,
@@ -163,7 +188,7 @@ class LlmSettingsDialog(QDialog):
         the screen's available height: on a smaller screen the table scrolls,
         and Tab scrolls it to the focused row button.
     @note `vision_model()` and `verification_model()` remain for callers that
-        save the defaults per stage: they return the same single model.
+        save the defaults per stage: they return the same default model.
         `pad_model()` returns the model of the pad-position step, for callers
         of the old «Posizioni pad» field.
     """
@@ -175,35 +200,32 @@ class LlmSettingsDialog(QDialog):
                  current_numbering_prompt=None, current_family: str | None = None,
                  current_pad_model: str | None = None,
                  current_step_models: dict | None = None,
-                 stored_step_fields=None, session_model: str | None = None,
-                 account_opener=None):
+                 stored_step_fields=None, account_opener=None):
         """@brief Build the «Modello AI» window.
 
         @param current_prompt Ignored (the prompts moved to the profile manager);
             kept so older callers keep working.
-        @param current_model The single model; None shows DEFAULT_MODEL.
+        @param current_model The default model; None shows DEFAULT_MODEL.
         @param parent Owner window; its ``i18n`` translates the labels.
-        @param current_vision_model Ignored (one single model).
+        @param current_vision_model Ignored (one default model).
         @param current_grounding_prompt Ignored (prompts are in the profile manager).
         @param current_verification_prompt Ignored (prompts are in the profile manager).
-        @param current_verification_model Ignored (one single model).
+        @param current_verification_model Ignored (one default model).
         @param current_single_prompt Ignored (prompts are in the profile manager).
         @param current_numbering_prompt Ignored (prompts are in the profile manager).
         @param current_family Ignored.
         @param current_pad_model Old «Posizioni pad» model: used only when
             `current_step_models` is None, as the model of the two pad steps
-            (None = the factory default, "" = the single model).
+            (None = the factory default, "" = the default model).
         @param current_step_models The model of every step,
-            {prompt field: identifier or "" for the single model}
-            (ProfileStore.step_models); missing steps follow the single model.
+            {prompt field: identifier or "" for the default model}
+            (ProfileStore.step_models); missing steps follow the default model.
         @param stored_step_fields Fields with a SAVED choice
             (ProfileStore.step_models_stored keys), or None for none. A saved
             or changed choice whose key is missing blocks a paid run
             (MainWindow._ensure_api_key); an unsaved default (the pad steps'
-            old reader) falls back on the single model. The warning row says
+            old reader) falls back on the default model. The warning row says
             which of the two happens.
-        @param session_model The model chosen for this session in the
-            Project tab, or None: said under the single model, which it replaces.
         @param account_opener Callable opening «Account AI...» (the main
             window's), or None to open the dialog directly.
         """
@@ -217,14 +239,13 @@ class LlmSettingsDialog(QDialog):
         if current_step_models is None:
             legacy = DEFAULT_PAD_POSITIONS_MODEL if current_pad_model is None else current_pad_model
             current_step_models = resolve_step_models({}, legacy)
-        #: {step field: model identifier, or "" for the single model}.
+        #: {step field: model identifier, or "" for the default model}.
         self._steps = {item.field: str(current_step_models.get(item.field) or "").strip()
                        for item in STEPS}
         #: The table as it opened: a step differing from it is a change the user made.
         self._initial_steps = dict(self._steps)
         #: Steps with a saved choice (see `stored_step_fields`).
         self._stored_fields = frozenset(stored_step_fields or ())
-        self._session_model = (session_model or "").strip() or None
         self._account_opener = account_opener
 
         layout = QVBoxLayout(self)
@@ -234,23 +255,23 @@ class LlmSettingsDialog(QDialog):
         layout.setSpacing(12)
         self.info_buttons = []
         self._help_text = (
-            "Il modello unico esegue ogni passo dell'analisi; la sua sorgente è quella del "
+            "Il modello predefinito esegue ogni passo dell'analisi; la sua sorgente è quella del "
             "modello, indicata fra parentesi: DeepSeek (API diretta, chiave DeepSeek) oppure "
             "OpenRouter (chiave OpenRouter). «Cambia…» elenca solo i modelli delle sorgenti che "
             "hanno una chiave; le chiavi si inseriscono con Configurazione → «Account AI...» e "
             "il saldo della sorgente in uso compare sotto «Estrai parametri con AI». Nella "
             "sezione «Modelli diversi per singoli passi» un passo può avere un modello proprio: "
-            "«Cambia…» lo sceglie, «Usa l'unico» lo riporta al modello unico, «Ripristina passi "
+            "«Cambia…» lo sceglie, «Usa il predefinito» lo riporta al modello predefinito, «Ripristina passi "
             "predefiniti» riporta solo la tabella alla scelta iniziale (posizioni dei pad e "
             "quote del corpo di un componente singolo su un modello proprio, perché sui disegni "
             "quotati i modelli economici sbagliano spesso). La scelta vale per tutte le "
             "tipologie. Prima di un'analisi a pagamento si controlla che la sorgente di ogni "
             "passo scelto che l'analisi usa abbia la sua chiave; se poi il modello di un passo "
             "non può essere usato (per esempio credito esaurito), quel passo lo esegue il "
-            "modello unico e il log lo dice. I testi inviati ai modelli (prompt) si modificano "
-            "in Configurazione → «Gestione tipologie e profili AI...». Per una prova si può "
-            "scegliere un altro modello solo per questa sessione dal tab Progetto («Modello AI "
-            "(questa sessione)»): sostituisce il modello unico, non quelli dei passi."
+            "modello predefinito e il log lo dice. I testi inviati ai modelli (prompt) si modificano "
+            "in Configurazione → «Gestione tipologie e profili AI...». Nel tab Progetto la riga "
+            "«Modelli AI» di «Strumenti AI» riassume il modello predefinito e i passi con un "
+            "modello proprio; il pulsante accanto alla riga apre questa finestra."
         )
 
         intro_row = QHBoxLayout()
@@ -263,7 +284,7 @@ class LlmSettingsDialog(QDialog):
         intro_row.addWidget(self._info_button(), 0, Qt.AlignmentFlag.AlignTop)
         layout.addLayout(intro_row)
 
-        #: «Modello: <id> (<source>) [Cambia…]» and, under it, the session note.
+        #: «Modello: <id> (<source>) [Cambia…]».
         self.single_row = QWidget()
         self.single_row.setObjectName("single_model_row")
         single_layout = QVBoxLayout(self.single_row)
@@ -274,7 +295,14 @@ class LlmSettingsDialog(QDialog):
         self.field_model.setReadOnly(True)
         self.field_model.setObjectName("single_model")
         model_row.addWidget(self.field_model, 1)
-        #: The source, i.e. the provider of the single model, in parentheses.
+        #: Warning icon shown when the default model is declared text only (see _refresh_single).
+        self.label_default_warning = QLabel()
+        self.label_default_warning.setObjectName("single_model_warning")
+        self.label_default_warning.setPixmap(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_MessageBoxWarning).pixmap(16, 16))
+        self.label_default_warning.setVisible(False)
+        model_row.addWidget(self.label_default_warning)
+        #: The source, i.e. the provider of the default model, in parentheses.
         self.label_source = QLabel()
         self.label_source.setObjectName("single_model_source")
         self.label_source.setProperty("i18n_skip", True)
@@ -283,20 +311,13 @@ class LlmSettingsDialog(QDialog):
         self.btn_pick_single = QPushButton(tx("Cambia…"))
         self.btn_pick_single.setObjectName("single_model_change")
         self.btn_pick_single.setAutoDefault(False)
-        self.btn_pick_single.setAccessibleName(tx("Cambia il modello unico"))
-        self.btn_pick_single.setToolTip(tx("Sceglie il modello unico fra quelli delle sorgenti con "
+        self.btn_pick_single.setAccessibleName(tx("Cambia il modello predefinito"))
+        self.btn_pick_single.setToolTip(tx("Sceglie il modello predefinito fra quelli delle sorgenti con "
                                            "una chiave."))
         self.btn_pick_single.setProperty("i18n_skip", True)
         self.btn_pick_single.clicked.connect(self._pick_model)
         model_row.addWidget(self.btn_pick_single)
         single_layout.addLayout(model_row)
-        #: The Project tab's session model, when one replaces the single model.
-        self.label_session = QLabel()
-        self.label_session.setObjectName("session_model_note")
-        self.label_session.setWordWrap(True)
-        self.label_session.setProperty("i18n_skip", True)
-        self.label_session.setStyleSheet(f"color: {SUBTEXT};")
-        single_layout.addWidget(self.label_session)
         layout.addWidget(self.single_row)
 
         #: The steps' own models, collapsed by default; the title counts them.
@@ -324,13 +345,17 @@ class LlmSettingsDialog(QDialog):
         self.table.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.table.setItemDelegateForColumn(COL_STEP, StepCellDelegate(self.table))
         header = self.table.horizontalHeader()
-        # The step column is fitted to its titles and hints when the section
-        # opens (`_fit_to_rows`), the model column takes the rest: no
-        # horizontal scroll, long ids elided in the middle.
-        header.setSectionResizeMode(COL_STEP, QHeaderView.ResizeMode.Interactive)
-        header.setSectionResizeMode(COL_MODEL, QHeaderView.ResizeMode.Stretch)
+        # The model column is fitted to its header and texts (`_fit_to_rows`),
+        # the step column takes the rest and wraps its hints when narrow: no
+        # horizontal scroll, and a model id is elided only on a screen too
+        # small for it (its tooltip names it in full). Practical test
+        # 2026-11-14: the stretching model column was squeezed to «= mod…».
+        header.setSectionResizeMode(COL_STEP, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(COL_MODEL, QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(COL_ACTIONS, QHeaderView.ResizeMode.ResizeToContents)
-        #: {step field: (row, «Cambia…» button, «Usa l'unico» button)}.
+        # A narrower step column wraps the hints onto more lines: the rows follow.
+        header.sectionResized.connect(self._on_column_resized)
+        #: {step field: (row, «Cambia…» button, «Usa il predefinito» button)}.
         self._rows: dict[str, tuple[int, QPushButton, QPushButton]] = {}
         #: {row button: its table row}, read by the focus filter.
         self._button_rows: dict[QPushButton, int] = {}
@@ -381,7 +406,7 @@ class LlmSettingsDialog(QDialog):
         self.btn_restore_steps.setObjectName("restore_step_defaults")
         self.btn_restore_steps.setToolTip(tx(
             "Riporta ogni passo alla scelta iniziale: posizioni dei pad e quote del corpo su "
-            "{model}, tutti gli altri sul modello unico. Il modello unico e la sorgente non "
+            "{model}, tutti gli altri sul modello predefinito. Il modello predefinito e la sorgente non "
             "cambiano.", model=DEFAULT_PAD_POSITIONS_MODEL))
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
@@ -426,7 +451,7 @@ class LlmSettingsDialog(QDialog):
         self._refresh_rows()
 
     def _row_buttons(self, item, row: int) -> QWidget:
-        """The «Cambia…» and «Usa l'unico» buttons of one step, named after the step for screen readers."""
+        """The «Cambia…» and «Usa il predefinito» buttons of one step, named after the step for screen readers."""
         cell = QWidget()
         cell_layout = QHBoxLayout(cell)
         cell_layout.setContentsMargins(2, 1, 2, 1)
@@ -442,13 +467,13 @@ class LlmSettingsDialog(QDialog):
         change.setAccessibleDescription(hint)
         change.clicked.connect(lambda checked=False, field=item.field: self._pick_step_model(field))
         # An action, shown only when it does something (finding 4): a step
-        # already on the single model hides it, keeping its room so the
+        # already on the default model hides it, keeping its room so the
         # «Cambia…» buttons stay aligned.
-        single = QPushButton(tx("Usa l'unico"))
+        single = QPushButton(tx("Usa il predefinito"))
         single.setObjectName(f"step_single_{item.field}")
         single.setAutoDefault(False)
-        single.setToolTip(tx("Il passo «{step}» torna al modello unico.", step=title))
-        single.setAccessibleName(tx("Riporta il passo «{step}» al modello unico", step=title))
+        single.setToolTip(tx("Il passo «{step}» torna al modello predefinito.", step=title))
+        single.setAccessibleName(tx("Riporta il passo «{step}» al modello predefinito", step=title))
         single.setAccessibleDescription(hint)
         policy = single.sizePolicy()
         policy.setRetainSizeWhenHidden(True)
@@ -497,26 +522,71 @@ class LlmSettingsDialog(QDialog):
 
     def _refresh_rows(self) -> None:
         """Show in every row the model the step really uses: an own model stands out, a following one is muted."""
-        normal = self.table.palette().color(QPalette.ColorGroup.Active, QPalette.ColorRole.Text)
         for field, (row, _change, single) in self._rows.items():
             own = self._steps.get(field, "")
             cell = self.table.item(row, COL_MODEL)
             font = cell.font()
             font.setItalic(False)
-            if own:
+            cell.setIcon(QIcon())
+            capability = self._step_image_capability(field, own)
+            if own and capability == IMAGES_NOT_READ:
+                # Shown without opening the picker: at the analysis this step
+                # falls back to the default model (prompt_models.usable_model).
                 cell.setText(own)
-                cell.setToolTip(tx("Modello proprio di questo passo."))
-                cell.setForeground(normal)
+                cell.setToolTip(tx("Il modello {model} non legge immagini (dichiarato da "
+                                   "OpenRouter per {source}) e questo passo manda immagini: "
+                                   "all'analisi il passo userà il modello predefinito. Scegline "
+                                   "un altro con «Cambia…».", model=own, source=catalog_id(own)))
+                cell.setForeground(WARNING_COLOR)
+                cell.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MessageBoxWarning))
+                font.setBold(True)
+            elif own:
+                cell.setText(own)
+                # The full id first: the cell elides it on a small screen.
+                tooltip = own + "\n" + tx("Modello proprio di questo passo.")
+                if capability == IMAGES_UNDECLARED:
+                    # A subtle note only: undeclared is never a refusal.
+                    tooltip += "\n" + tx("Capacità immagini non dichiarata: va verificata sulla "
+                                         "documentazione del fornitore.")
+                cell.setToolTip(tooltip)
+                # No colour of its own: the style sheet's table text colour applies.
+                # The table palette's Text is not that colour under the application
+                # style sheet (it drew the ids black on the dark table, practical
+                # test 2026-11-14).
+                cell.setData(Qt.ItemDataRole.ForegroundRole, None)
                 font.setBold(True)
             else:
-                # The single model is written once, above (finding 12).
-                cell.setText(tx("= modello unico"))
-                cell.setToolTip(tx("Segue il modello unico ({model}).", model=self.model()))
+                # The default model is written once, above (finding 12).
+                cell.setText(tx("= modello predefinito"))
+                tooltip = tx("Segue il modello predefinito ({model}).", model=self.model())
+                # The default model's image capability, for an image step that
+                # follows it: the same subtle note as an own undeclared model
+                # (the warning itself is on the default model's row).
+                default_capability = self._step_image_capability(field, self.model())
+                if default_capability == IMAGES_UNDECLARED:
+                    tooltip += "\n" + tx("Capacità immagini non dichiarata: va verificata sulla "
+                                          "documentazione del fornitore.")
+                cell.setToolTip(tooltip)
                 cell.setForeground(MUTED_COLOR)
                 font.setBold(False)
             cell.setFont(font)
             single.setVisible(bool(own))
         self._refresh_section_title()
+
+    def _step_image_capability(self, field: str, model: str):
+        """The image capability of a step's own model, or None when it does not matter.
+
+        None for a step that sends no image or follows the default model;
+        otherwise openrouter.image_capability, the rule the picker and the
+        send-time check share. The parsed catalogue is shared and keyed on
+        the cache file's version (openrouter.fresh_catalog): a refresh made
+        by the picker is seen at the next row refresh, without a re-parse
+        of an unchanged file.
+        """
+        needs_images = next((item.images for item in STEPS if item.field == field), True)
+        if not model or not needs_images:
+            return None
+        return image_capability(model)
 
     def _step_capabilities(self, field: str) -> tuple:
         """The capabilities the picker requires for the step `field`."""
@@ -530,16 +600,25 @@ class LlmSettingsDialog(QDialog):
     def _pick_step_model(self, field: str) -> None:
         """«Cambia…»: choose the model of one step among the models of the sources with a key."""
         title = next((tx(item.title) for item in STEPS if item.field == field), field)
+        following = not self._steps.get(field)
         chosen = pick_model(self._steps.get(field) or self.model(), self, title=title,
                             capabilities=self._step_capabilities(field),
                             providers=self._keyed_providers())
+        if chosen and following and chosen.strip() == self.model():
+            # OK on the default the picker opened with is not a choice: the
+            # step keeps following the default model (it would otherwise be
+            # pinned and stop following a later change of the default).
+            chosen = None
         if chosen:
             self._steps[field] = chosen.strip()
-            self._refresh_rows()
-            self._refresh_key_state()
+        # Redrawn even without a choice: the picker may have refreshed the
+        # catalogue, and the marks follow it.
+        self._refresh_single()
+        self._refresh_rows()
+        self._refresh_key_state()
 
     def _step_follows_single(self, field: str) -> None:
-        """«Usa l'unico»: the step goes back to the single model."""
+        """«Usa il predefinito»: the step goes back to the default model."""
         self._steps[field] = ""
         self._refresh_rows()
         self._refresh_key_state()
@@ -580,6 +659,9 @@ class LlmSettingsDialog(QDialog):
             window stays centred where it was.
         """
         self.ensurePolished()
+        # The centre before any resize below: the window is re-centred on it.
+        start_centre = self.geometry().center()
+        start_size = (self.width(), self.height())
         layout = self.layout()
         open_section = not self.steps_box.isHidden() and self.steps_box.isExpanded()
         layout.setStretch(self._spare_index, 0 if open_section else 1)
@@ -599,22 +681,29 @@ class LlmSettingsDialog(QDialog):
             step_width = max((table.sizeHintForIndex(table.model().index(row, COL_STEP)).width()
                               for row in step_rows), default=header.sectionSize(COL_STEP))
             step_width = max(step_width, header.sectionSizeHint(COL_STEP))
-            table.resizeRowsToContents()
-            header.resizeSection(COL_STEP, min(step_width, max(200, max_width // 2)))
-            # Width: the step column, at least 200 px of model column, the buttons.
+            # The model column holds its longest text (header included); only
+            # a screen too small for it caps it at a third of the width.
+            model_width = min(self._model_column_width(), max(200, max_width // 3))
+            header.resizeSection(COL_MODEL, model_width)
+            # Width: the step column at its natural width, the model column,
+            # the buttons; capped to the screen, the step column then wraps.
             actions = max(header.sectionSizeHint(COL_ACTIONS),
                           table.sizeHintForColumn(COL_ACTIONS))
             scrollbar = table.verticalScrollBar().sizeHint().width()
-            wanted_table = (header.sectionSize(COL_STEP) + 200 + actions + scrollbar
+            wanted_table = (step_width + model_width + actions + scrollbar
                             + 2 * table.frameWidth())
             width = min(max(width, width + wanted_table - table.width()), max_width)
+            if width != self.width():
+                self.resize(width, self.height())
+                layout.activate()
+            table.resizeRowsToContents()
             # Height: every row, the header and the frame, whatever the rest takes.
             rows = sum(table.rowHeight(row) for row in range(table.rowCount()))
             wanted = rows + header.height() + 2 * table.frameWidth()
             height = min(self.height() + max(0, wanted - table.height()), max_height)
-        if (width, height) == (self.width(), self.height()):
+        if (width, height) == start_size:
             return
-        centre = self.geometry().center()
+        centre = start_centre
         self.resize(width, height)
         if area.isValid() and self.isVisible():
             geometry = self.geometry()
@@ -624,6 +713,33 @@ class LlmSettingsDialog(QDialog):
             top = min(max(geometry.top(), area.top() + frame // 2),
                       area.bottom() - geometry.height() - frame // 2)
             self.move(max(area.left(), left), max(area.top(), top))
+
+    def _model_column_width(self) -> int:
+        """The width the «Modello usato» column needs: its header and its longest text, with the icon.
+
+        At least 200 px, so an id chosen later rarely needs eliding.
+        """
+        table = self.table
+        header = table.horizontalHeader()
+        metrics = QFontMetrics(table.font())
+        bold = QFont(table.font())
+        bold.setBold(True)
+        bold_metrics = QFontMetrics(bold)
+        icon = table.iconSize().width() if table.iconSize().isValid() else 16
+        widest = 0
+        for row, _change, _single in self._rows.values():
+            cell = table.item(row, COL_MODEL)
+            if cell is None:
+                continue
+            used = bold_metrics if cell.font().bold() else metrics
+            widest = max(widest, used.horizontalAdvance(cell.text())
+                         + (icon + 6 if not cell.icon().isNull() else 0))
+        return max(200, header.sectionSizeHint(COL_MODEL), widest + 2 * _CELL_PADDING + 8)
+
+    def _on_column_resized(self, index: int, _old: int, _new: int) -> None:
+        """A resized step column re-measures the rows (its hints wrap differently)."""
+        if index == COL_STEP:
+            self.table.resizeRowsToContents()
 
     # -- help ------------------------------------------------------------------------------
 
@@ -672,32 +788,46 @@ class LlmSettingsDialog(QDialog):
         finally:
             dialog.deleteLater()
 
-    # -- single model ----------------------------------------------------------------------
+    # -- default model ---------------------------------------------------------------------
 
     def source(self) -> str:
-        """@brief The source of the single model: the provider of the model itself.
+        """@brief The source of the default model: the provider of the model itself.
 
         @return A providers.PROVIDERS key.
         """
         return provider_of(self.model())
 
     def _set_single_model(self, model: str) -> None:
-        """Show `model` as the single model, with its source, and in every row that follows it."""
+        """Show `model` as the default model, with its source, and in every row that follows it."""
         self._model = model
         self._refresh_single()
         self._refresh_rows()
 
     def _refresh_single(self) -> None:
-        """The single model's id, its source in parentheses and the session note."""
+        """The default model's id and its source in parentheses, marked when it cannot read images.
+
+        The default model serves every step without a model of its own, and
+        every step that sends images refuses a model declared text only
+        (openrouter.image_capability, the picker's rule): the row says so in
+        the warning colour, with the warning icon. Undeclared is never marked.
+        """
         self.field_model.setText(self._model)
         source = self.source()
         self.label_source.setText("(" + tx(PROVIDER_LABELS.get(source, source)) + ")")
-        session = self._session_model
-        shown = bool(session) and session != self.model()
-        self.label_session.setText(
-            tx("In questa sessione il tab Progetto usa {model} al posto del modello unico.",
-               model=session) if shown else "")
-        self.label_session.setVisible(shown)
+        text_only = (any(item.images for item in STEPS)
+                     and image_capability(self._model) == IMAGES_NOT_READ)
+        if text_only:
+            tooltip = tx("Il modello predefinito {model} non legge immagini (dichiarato da "
+                         "OpenRouter per {source}): i passi che mandano immagini e lo usano non "
+                         "possono leggerle. Scegline un altro con «Cambia…».",
+                         model=self._model, source=catalog_id(self._model))
+            self.field_model.setStyleSheet(f"color: {WARNING_COLOR.name()};")
+        else:
+            tooltip = ""
+            self.field_model.setStyleSheet("")
+        self.field_model.setToolTip(tooltip)
+        self.label_default_warning.setToolTip(tooltip)
+        self.label_default_warning.setVisible(text_only)
 
     @staticmethod
     def _key_present(provider: str) -> bool:
@@ -721,7 +851,7 @@ class LlmSettingsDialog(QDialog):
         """Whether a missing key of the step's source stops a paid run (a saved or changed choice).
 
         A step on the pad steps' unsaved factory reader instead falls back on
-        the single model (prompt_models.usable_model), as the key check of
+        the default model (prompt_models.usable_model), as the key check of
         MainWindow._chosen_step_models counts only saved choices.
         """
         return field in self._stored_fields or self._steps.get(field) != self._initial_steps.get(field)
@@ -746,7 +876,7 @@ class LlmSettingsDialog(QDialog):
                             "per scegliere i modelli."))
         else:
             if self.source() not in keyed:
-                lines.append(tx("Chiave {source} mancante per il modello unico {model}: un'analisi "
+                lines.append(tx("Chiave {source} mancante per il modello predefinito {model}: un'analisi "
                                 "non parte finché non la inserisci o non scegli un altro modello.",
                                 source=tx(PROVIDER_LABELS.get(self.source(), self.source())),
                                 model=self.model()))
@@ -766,9 +896,9 @@ class LlmSettingsDialog(QDialog):
                                     source=name, steps=", ".join(blocked)))
                 if fallback:
                     lines.append(tx("Chiave {source} mancante per: {steps}. Finché manca, questi "
-                                    "passi li esegue il modello unico.",
+                                    "passi li esegue il modello predefinito.",
                                     source=name, steps=", ".join(fallback)))
-        # One line per case: the single model, the steps that stop a run, those that fall back.
+        # One line per case: the default model, the steps that stop a run, those that fall back.
         self.label_keys_used.setText("\n".join(lines))
         self.keys_row.setVisible(bool(lines))
 
@@ -788,14 +918,18 @@ class LlmSettingsDialog(QDialog):
             self._fit_to_rows()
 
     def _pick_model(self) -> None:
-        """«Cambia…» of the single model: the models of the sources that have a key."""
+        """«Cambia…» of the default model: the models of the sources that have a key."""
         chosen = pick_model(self._model, self, title="Modello", providers=self._keyed_providers())
         if chosen:
             self._set_single_model(chosen.strip())
-            self._refresh_key_state()
+        else:
+            # The picker may have refreshed the catalogue: the marks follow it.
+            self._refresh_single()
+            self._refresh_rows()
+        self._refresh_key_state()
 
     def _restore_step_defaults(self) -> None:
-        """«Ripristina passi predefiniti»: the step table back to the factory choice; single model kept."""
+        """«Ripristina passi predefiniti»: the step table back to the factory choice; default model kept."""
         self._steps = factory_step_models()
         self._refresh_rows()
         self._refresh_key_state()
@@ -805,7 +939,7 @@ class LlmSettingsDialog(QDialog):
     def step_models(self) -> dict[str, str]:
         """@brief The model of every step, as the table shows it.
 
-        @return {prompt field: model identifier, or "" for the single model},
+        @return {prompt field: model identifier, or "" for the default model},
             one entry per prompt_models.STEPS field (a copy).
         """
         return dict(self._steps)
@@ -824,19 +958,19 @@ class LlmSettingsDialog(QDialog):
     def pad_model(self) -> str:
         """@brief The model of the pad-position step (the old «Posizioni pad» field).
 
-        @return The stripped identifier, or "" when it follows the single model.
+        @return The stripped identifier, or "" when it follows the default model.
         """
         return self._steps.get(LEGACY_PAD_STEPS[0], "").strip()
 
     def verification_model(self):
-        """@brief The single model (kept for callers that save the default per stage).
+        """@brief The default model (kept for callers that save the default per stage).
 
         @return The same value as `model()`.
         """
         return self.model()
 
     def vision_model(self) -> str:
-        """@brief The single model (kept for callers that save the default per stage).
+        """@brief The default model (kept for callers that save the default per stage).
 
         @return The same value as `model()`.
         """

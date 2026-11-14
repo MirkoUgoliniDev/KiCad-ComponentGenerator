@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 import math
 import os
+import re
 from pathlib import Path
 import tempfile
 import unicodedata
@@ -152,7 +153,10 @@ class SymbolPin:
     @note `length` (mm, None = the layout's 2.54) must be a multiple of
         PIN_LENGTH_STEP_MM so the inner end of a grid-placed pin stays on a
         50 mil grid; `hidden` writes `(hide yes)`; `text_size` (mm, None =
-        1.27) is the font size of the pin name and number.
+        1.27) is the font size of the pin name and number; `alternates`
+        are the pin's other functions, written as KiCad
+        `(alternate "NAME" <type> line)` forms with the pin's own type
+        (see `split_pin_name` and `symbol_inputs`).
     """
     number: str
     name: str
@@ -164,6 +168,7 @@ class SymbolPin:
     length: float | None = None
     hidden: bool = False
     text_size: float | None = None
+    alternates: tuple[str, ...] = ()
 
 
 #: Step of a custom pin length (50 mil) and its allowed range, mm.
@@ -287,15 +292,287 @@ def normalize_pin_name(name: str) -> str:
     return name.replace(' ', PIN_NAME_SPACE_SUBSTITUTE)
 
 
+#: Process-wide choice (user, 2026-11-13, «Solo nome principale»): True
+#: writes only the primary name of a pinout entry «PRIMARY (ALT1, ALT2)» as
+#: the pin name and its listed functions as KiCad alternates; False writes
+#: the full text as before. It is a user preference of the whole program,
+#: like the interface language, so it lives here and not in each call:
+#: every reader of project rows (symbol editor, export, component check,
+#: symbol edits) lays out and writes the same names. The GUI sets it from
+#: the saved preference with `set_primary_pin_names`; default ON.
+_PRIMARY_PIN_NAMES = {'enabled': True}
+
+
+def primary_pin_names_enabled() -> bool:
+    """@brief Whether pinout names are split into a primary name and KiCad alternates.
+
+    @return The current process-wide choice, True by default.
+    """
+    return bool(_PRIMARY_PIN_NAMES['enabled'])
+
+
+def set_primary_pin_names(enabled: bool) -> None:
+    """@brief Set the process-wide choice read by `symbol_inputs` (see `_PRIMARY_PIN_NAMES`).
+
+    @param enabled True to write the primary name plus alternates, False to
+        write the full pinout text as the pin name.
+    """
+    _PRIMARY_PIN_NAMES['enabled'] = bool(enabled)
+
+
+#: Shape of one item of a «PRIMARY (f1, f2)» list that `split_pin_name`
+#: accepts as a signal name: a letter first, then letters, digits and
+#: «_ + - .», no spaces (ADC1_3, TOUCH4, U0TXD, D+, SPI.CLK). Part of a
+#: declared heuristic, see `split_pin_name`.
+_ALTERNATE_ITEM = re.compile(r'[A-Za-z][A-Za-z0-9_+\-.]*')
+#: Separators of the items inside the one parenthesised group of a pin name
+#: (`split_pin_name`): the comma and the slash.
+_ALTERNATE_SEPARATORS = re.compile(r'[,/]')
+#: Words that read as STATES of one signal, not as other functions
+#: («EN (ON/OFF)», «MODE (HIGH/LOW)»): a group made only of them stays in the
+#: name. HEURISTIC (audit M1/L4, 2026-11-13): common level and state
+#: words, no part or brand names; see `split_pin_name`. «EN» and «DIS» are
+#: NOT here (audit L4, 2026-11-14): they are signal names as well (an
+#: enable pin), so «RST (EN)» lists a function exactly like «EN (RST)».
+_STATE_WORDS = frozenset({"ON", "OFF", "HIGH", "LOW", "HI", "LO", "H", "L", "YES", "NO",
+                          "TRUE", "FALSE", "OPEN", "CLOSED", "NC"})
+
+
+def _same_pin_name(first: str, second: str) -> bool:
+    """True when two names are the same pin name once written as KiCad shows it (blanks collapsed, spaces as «_»)."""
+    return normalize_pin_name(' '.join(first.split())) == normalize_pin_name(' '.join(second.split()))
+
+
+#: «PRIMARY (HEAD (INNER))»: one group whose content is a name followed by
+#: one nested group that closes the outer one (`_flatten_restated_group`).
+_RESTATED_GROUP = re.compile(r'(?P<primary>[^()]+?)\s*\(\s*(?P<head>[^()]+?)\s*\((?P<inner>[^()]*)\)\s*\)')
+
+
+def _flatten_restated_group(text: str) -> str:
+    """«P (P (A, B))» as «P (A, B)» when the nested group's head restates the primary; the text unchanged otherwise.
+
+    HEURISTIC, declared (real run 2026-11-14: the model wrote «+Vin (+Vin
+    (Vcc))», restating the pin name before its list). One level is flattened
+    only when the result is unambiguous: the outer group holds exactly a
+    name and ONE nested group that closes it, and that name is the primary
+    itself (`_same_pin_name`), so the nested list can only be the primary's
+    list. «A (B (C))» (C could be a remark on B), «P (X, P (Y))», a second
+    nesting level or text after the groups stay as written, and
+    `split_pin_name` then keeps them whole.
+    """
+    match = _RESTATED_GROUP.fullmatch(text)
+    if not match or not _same_pin_name(match['primary'].strip(), match['head']):
+        return text
+    return f"{match['primary'].strip()} ({match['inner']})"
+
+
+def _group_items(text: str):
+    """(head, items) of «HEAD (i1, i2)» under the group guards of `split_pin_name`; None when it is no function list.
+
+    Items that repeat the head (`_same_pin_name`) are dropped BEFORE the
+    guards: a repeat of the name is not another function and may have any
+    shape («+Vin (+Vin)»). The list may come back empty when every item was
+    a repeat («GND (GND)»).
+    """
+    head, bracket, rest = text.partition('(')
+    primary = head.strip()
+    if not bracket or not primary or ')' in head:
+        return None
+    # The group must close exactly at the end and contain no other bracket:
+    # a nested or second group, or an unclosed one, is not a plain list.
+    if not rest.endswith(')'):
+        return None
+    inner = rest[:-1]
+    if '(' in inner or ')' in inner:
+        return None
+    written = [item.strip() for item in _ALTERNATE_SEPARATORS.split(inner) if item.strip()]
+    if not written:
+        # «A ()», «A (, )»: no list at all.
+        return None
+    items = [item for item in written if not _same_pin_name(item, primary)]
+    if not items:
+        # The parentheses only repeat the name: no other function.
+        return primary, []
+    if all(len(item) == 1 for item in items) or all(item.upper() in _STATE_WORDS for item in items):
+        # Single characters or states of one signal: part of the name.
+        return None
+    # «,» and «/» both separate the items of the one group: pinout tables
+    # write «GPIO4 (ADC1_3, TOUCH4)» and «GPIO4 (ADC1_3/RTC/TOUCH4)» alike.
+    if not all(_ALTERNATE_ITEM.fullmatch(item) for item in items):
+        return None
+    return primary, items
+
+
+def split_pin_name(name) -> tuple[str, tuple[str, ...]]:
+    """@brief Split a pinout entry «PRIMARY (ALT1, ALT2)» into its primary name and its other functions.
+
+    @param name The pin name as the pinout table holds it (any value; None
+        reads as empty).
+    @return (primary, alternates): the stripped text before the «(» and
+        the items inside the parentheses separated by «,» or «/» (both
+        may appear in one group), stripped, empty items, duplicates and
+        items equal to the primary dropped (equal as KiCad shows them,
+        `_same_pin_name`), in their written order. A list that only repeats
+        the name gives the primary with no alternate («GND (GND)» -> GND).
+        Any other name that does not pass every condition below comes back
+        whole with no alternates.
+    @note One restated nesting level is flattened first
+        (`_flatten_restated_group`, declared heuristic): «+Vin (+Vin (Vcc))»
+        reads as «+Vin (Vcc)». Any other nesting keeps the name whole.
+    @note Alternatives come ONLY from the parenthesised list (coordinator
+        decision, 2026-11-14, after a generality audit): a «/» OUTSIDE
+        parentheses is never split, because the text cannot tell two
+        alternatives («USB_D-/GPIO19») from one combined signal printed
+        with a slash (tied enables «DE/RE», half-duplex «RX/TX», «IN/OUT»,
+        «I/O»). The extraction is asked to write alternatives as
+        «PRIMARY (ALT1, ALT2)» and to keep a label printed with «/» as
+        printed; such a head stays the primary whole («I/O (GPIO4)» gives
+        «I/O» with alternate GPIO4).
+    @note HEURISTIC, not a structural rule. A parenthesis in a pinout cell
+        may hold other functions («GPIO4 (ADC1_3, TOUCH4, RTC)») or a remark
+        («RESET (active low)», «VIN (5-12V, 1A max)», «VCC(3.3V)»), and the
+        text alone cannot tell which. The guards below were chosen on the
+        devkit pinout tables this program reads, which write a pin's other
+        functions as «GPIOn (f1, f2)» with identifier-like signal names; a
+        remark is usually prose, a value or a range. Conditions, all
+        required:
+        - exactly ONE balanced top-level group, closing the text (nothing
+          after «)»), with a non-empty primary before it: «A (x) (y)»,
+          an unclosed «A (x» or a stray «)» are not lists;
+        - EVERY non-empty item looks like a signal identifier: starts with
+          a letter, no spaces, only letters, digits and «_ + - .» (pattern
+          `_ALTERNATE_ITEM`); one non-identifier item («active low»,
+          «3.3V», «1A max») keeps the whole name;
+        - at least one item survives;
+        - the group is NOT made only of single characters («I/O», «N/C»,
+          «H/L») nor only of state words (`_STATE_WORDS`: «ON/OFF»,
+          «HIGH/LOW»): such a group describes the one signal (audit M1/L4,
+          2026-11-13) and stays in the name.
+        Known limit: an identifier-like remark is indistinguishable from a
+        function and IS split, e.g. «GND (EP)» gives GND with alternate EP
+        (same shape as «D0 (RX)»); the switch in the pinout window turns
+        the split off. What would make this unnecessary: the extraction
+        returning the alternate functions of each pinout entry as a list
+        of its own, so nothing has to be parsed out of the name.
+    """
+    text = '' if name is None else str(name).strip()
+    # A name without the one closing function list (no bracket, a remark,
+    # a nested or second group, a stray bracket) comes back whole; only a
+    # nested group that restates the primary is flattened first.
+    parsed = _group_items(_flatten_restated_group(text))
+    if parsed is None:
+        return text, ()
+    primary, items = parsed
+    alternates = []
+    for item in items:
+        if item not in alternates:
+            alternates.append(item)
+    return primary, tuple(alternates)
+
+
+class PinNameRewriteNote(LocalizedText):
+    """@brief The note that one pin name was written with KiCad's space substitution.
+
+    A type of its own so the interface recognises it without reading the
+    translated text (`summarize_pin_notes`), and carries the pin number.
+    """
+
+    def __init__(self, number: str, name: str, normalized: str) -> None:
+        """@brief Build the per-pin note.
+
+        @param number The pin number.
+        @param name The name as given.
+        @param normalized The name as written («_» for every space).
+        """
+        # Built through `_message` so the catalogue test that collects its
+        # templates (tests/test_symbol_review_fixes.py) still sees this one.
+        base = _message(
+            'Pin {number}: nome «{name}» scritto come «{normalized}», come farebbe KiCad al '
+            'caricamento (gli spazi diventano «_»).',
+            'Pin {number}: name «{name}» written as «{normalized}», as KiCad does on load '
+            '(spaces become «_»)', number=number, name=name, normalized=normalized)
+        super().__init__(base.template, base.english, **base.values)
+        ## @brief The pin number the note is about.
+        self.number = number
+
+
+def pin_number_ranges(numbers: Iterable[str]) -> str:
+    """@brief Pin numbers as compact ranges («1–4, 7, A1»).
+
+    @param numbers Pin numbers as text, any order, duplicates allowed.
+    @return Canonical ASCII decimals joined into ranges in numeric order,
+        then every other number as written, sorted; '' for none.
+    @note Only a canonical decimal joins a range: «01» is another pad than
+        «1» (KiCad compares pad numbers as text), and a Unicode digit such
+        as «²» passes `str.isdigit` but not `int` (same rule as the
+        component check dialog's list).
+    """
+    values = [str(value) for value in numbers]
+
+    def canonical(value):
+        """True for an ASCII decimal written without leading zeros."""
+        return value.isascii() and value.isdigit() and str(int(value)) == value
+    numeric = sorted({int(value) for value in values if canonical(value)})
+    other = sorted({value for value in values if not canonical(value)})
+    parts = []
+    if numeric:
+        start = previous = numeric[0]
+        for value in numeric[1:]:
+            if value == previous + 1:
+                previous = value
+                continue
+            parts.append(str(start) if start == previous else f'{start}–{previous}')
+            start = previous = value
+        parts.append(str(start) if start == previous else f'{start}–{previous}')
+    return ', '.join(parts + other)
+
+
+def summarize_pin_notes(notes) -> tuple[list, list]:
+    """@brief Fold the per-pin space-rewrite notes into ONE status line; keep the details for the log.
+
+    @param notes The notes of `normalize_pins`, in order.
+    @return (visible, detail): `visible` holds every note that is not a
+        `PinNameRewriteNote` and, when there are any, one summary
+        `LocalizedText` (count of pins, their numbers as ranges, the first
+        rewrite as example) in the place of the first one; `detail` holds
+        the `PinNameRewriteNote`s themselves, one per pin and name, for the
+        log (user, 2026-11-13: the repeated per-pin lines filled the status).
+    """
+    visible, detail = [], []
+    summary_at = None
+    for note in notes:
+        if isinstance(note, PinNameRewriteNote):
+            if summary_at is None:
+                summary_at = len(visible)
+                visible.append(None)
+            detail.append(note)
+        else:
+            visible.append(note)
+    if summary_at is not None:
+        numbers = list(dict.fromkeys(note.number for note in detail))
+        first = detail[0]
+        visible[summary_at] = _message(
+            'Nomi di {count} pin scritti con «_» al posto degli spazi, come farebbe KiCad al '
+            'caricamento (pin {pins}; es. «{name}» → «{normalized}»). Dettaglio nel registro.',
+            'Names of {count} pins written with «_» instead of spaces, as KiCad does on load '
+            '(pins {pins}; e.g. «{name}» → «{normalized}»). Details in the log',
+            count=len(numbers), pins=pin_number_ranges(numbers),
+            name=first.values['name'], normalized=first.values['normalized'])
+    return visible, detail
+
+
 def normalize_pins(pins: Iterable[SymbolPin], notes: list | None = None) -> tuple[SymbolPin, ...]:
     """@brief Validate identities; preserve names/order and default unknown types passive.
 
     @param pins The pins to check, in their intended order.
     @param notes Optional list that receives a `LocalizedText` for every
         silent normalisation worth telling the user (a pin name whose spaces
-        became underscores); None discards them.
+        became underscores, as a `PinNameRewriteNote`); None discards them.
     @return A tuple of copies with number, name, electrical type, length,
-        hidden flag and text size normalized; order preserved.
+        hidden flag, text size and alternates normalized (alternates: same
+        validation as the name, kept as written, empty ones, repeats and
+        the name itself dropped, sorted as KiCad re-saves them); pin order
+        preserved.
     @throws SymbolError When an item is not a SymbolPin, a number is empty,
         duplicated or holds whitespace, a side is unknown, a length is not
         a multiple of 1.27 mm up to 12.7 mm, a text size is outside
@@ -326,12 +603,22 @@ def normalize_pins(pins: Iterable[SymbolPin], notes: list | None = None) -> tupl
         normalized_name = normalize_pin_name(name)
         if normalized_name != name:
             if notes is not None:
-                notes.append(_message(
-                    'Pin {number}: nome «{name}» scritto come «{normalized}», come farebbe KiCad al '
-                    'caricamento (gli spazi diventano «_»).',
-                    'Pin {number}: name «{name}» written as «{normalized}», as KiCad does on load '
-                    '(spaces become «_»)', number=number, name=name, normalized=normalized_name))
+                notes.append(PinNameRewriteNote(number, name, normalized_name))
             name = normalized_name
+        # Alternates get the name's own validation but NOT its space
+        # substitution: KiCad 10 keeps an alternate «A B» as written when it
+        # loads and re-saves the library (`kicad-cli sym upgrade --force`,
+        # 2026-11-13). Empty ones, repeats and the pin's own name are dropped,
+        # and they are sorted by code point: KiCad keys alternates by name in
+        # a sorted map and re-saves them in that order, so the file stays
+        # equal to what KiCad keeps (same principle as `normalize_pin_name`).
+        alternates = set()
+        for alternate in pin.alternates or ():
+            alternate = _text(alternate, _label('Nome del pin {number}', 'Pin {number} name',
+                                                number=number))
+            if alternate and alternate != name:
+                alternates.add(alternate)
+        alternates = sorted(alternates)
         if pin.side not in ('left', 'right', 'top', 'bottom'):
             raise SymbolError(_message('Pin {number}: lato non valido.', 'Pin {number}: invalid side', number=number))
         electrical_type = pin.electrical_type if pin.electrical_type in ELECTRICAL_TYPES else 'passive'
@@ -352,27 +639,68 @@ def normalize_pins(pins: Iterable[SymbolPin], notes: list | None = None) -> tupl
                                   'Pin {number}: text size must be between 0.5 and 5.08 mm', number=number))
             text_size = round(float(text_size), 4)
         result.append(replace(pin, number=number, name=name, electrical_type=electrical_type,
-                              length=length, hidden=bool(pin.hidden), text_size=text_size))
+                              length=length, hidden=bool(pin.hidden), text_size=text_size,
+                              alternates=tuple(alternates)))
     if not result:
         raise SymbolError(_message('Serve almeno un pin.', 'At least one pin is required'))
     return tuple(result)
 
 
-def symbol_inputs(rows):
+def symbol_inputs(rows, *, primary_names: bool | None = None):
     """@brief Decode project metadata without discarding pin identities or electrical roles.
 
     @param rows Project pin rows (dicts with `pin`, `name`, `electrical_type`,
         the `symbol_*` layout fields and, optionally, `symbol_body`).
+    @param primary_names True to write each name «PRIMARY (ALT1, ALT2)» as
+        PRIMARY with ALT1, ALT2 as KiCad alternates (`split_pin_name`),
+        False to keep the full text as the name; None follows the
+        process-wide preference (`primary_pin_names_enabled`).
     @return (pins, body): the SymbolPin list in row order and the shared
         body size, None when no row declares one.
     @throws SymbolError When the rows declare different body sizes.
+    @note The rows keep the full text: only the pins built here differ, so
+        the pinout table and the project file never lose a function.
+    @note A split name is kept whole when another pin with a DIFFERENT
+        identity (set of alternates) has the same primary name AS KICAD
+        WRITES IT (`normalize_pin_name`: «PWR EN» and «PWR_EN (CE)» both
+        show «PWR_EN»): two signals never share a pin name because of the
+        split; pins with the same identity stay alike even when their list
+        is written in another order («IO5 (RX, TX)» and «IO5 (TX, RX)»).
     """
-    pins = [SymbolPin(str(row.get('pin', '')), str(row.get('name') or ''),
-                      row.get('electrical_type', 'passive'),
-                      row.get('symbol_side', 'left'), row.get('symbol_offset'),
-                      row.get('symbol_position'), row.get('symbol_angle'),
-                      row.get('symbol_pin_length'), bool(row.get('symbol_pin_hidden', False)),
-                      row.get('symbol_pin_text_size')) for row in rows]
+    split = primary_pin_names_enabled() if primary_names is None else bool(primary_names)
+
+    def name_of(row):
+        """(name, alternates) of one row under the chosen mode."""
+        name = str(row.get('name') or '')
+        return split_pin_name(name) if split else (name, ())
+    named = [name_of(row) for row in rows]
+    # Pins whose DIFFERENT full names would collapse onto one primary name
+    # («SPI (MOSI)» and «SPI (MISO)», «GND (AGND)» and «GND (PGND)») keep
+    # their full names: the split must never make two different signals
+    # look alike (generality audit 2026-11-13, item 5). Pins with the SAME
+    # identity (four «GND», stacked pins, one list written in another
+    # order) stay alike. Pins are grouped by the primary name as KiCad will
+    # show it (spaces become «_», audit L5 2026-11-14: «PWR EN» and «PWR_EN
+    # (CE)» look alike on the sheet) and told apart by the SET of
+    # alternates, so a reordered list is not mistaken for another signal.
+    full_names: dict = {}
+
+    def shown(name):
+        """The pin name as KiCad will display it, the grouping key of the guard."""
+        return normalize_pin_name(name.strip())
+    for name, alternates in named:
+        full_names.setdefault(shown(name), set()).add(frozenset(alternates))
+    named = [(str(row.get('name') or ''), ()) if alternates and len(full_names[shown(name)]) > 1
+             else (name, alternates)
+             for row, (name, alternates) in zip(rows, named)]
+    pins = []
+    for row, (name, alternates) in zip(rows, named):
+        pins.append(SymbolPin(str(row.get('pin', '')), name,
+                              row.get('electrical_type', 'passive'),
+                              row.get('symbol_side', 'left'), row.get('symbol_offset'),
+                              row.get('symbol_position'), row.get('symbol_angle'),
+                              row.get('symbol_pin_length'), bool(row.get('symbol_pin_hidden', False)),
+                              row.get('symbol_pin_text_size'), alternates))
     bodies = [row['symbol_body'] for row in rows if 'symbol_body' in row]
     if bodies and any(body != bodies[0] for body in bodies):
         raise SymbolError(_message('Dimensioni del corpo del simbolo incoerenti fra i pin.',
@@ -842,6 +1170,9 @@ def serialize_symbol(name: str, pins: Iterable[SymbolPin], *,
 
     @param name Symbol name, also the Value property; no library separator.
     @param pins Pins with identities and electrical roles; see `layout_symbol`.
+        Each `SymbolPin.alternates` item becomes an `(alternate "NAME" <type>
+        line)` form after the pin number (KiCad 10 syntax, verified loading
+        with kicad-cli 10).
     @param footprint Footprint reference «Library:Name» (hidden property).
     @param reference Designator prefix, letters only; ignored when `metadata`
         is given (its `reference` wins).
@@ -943,10 +1274,18 @@ def serialize_symbol(name: str, pins: Iterable[SymbolPin], *,
         size = _num(pin_text_size_of(pin))
         pin_effects = f'(effects (font (size {size} {size})))'
         hide = ' (hide yes)' if pin.hidden else ''
-        lines.extend((f'      (pin {pin.electrical_type} line (at {_num(item.x)} {_num(item.y)} {item.angle}) '
-                      f'(length {_num(pin_length_of(pin, layout.pin_length))}){hide}',
-                      f'        (name {_quote(pin.name or "~")} {pin_effects})',
-                      f'        (number {_quote(pin.number)} {pin_effects}))'))
+        # Alternates follow the number inside the pin, as KiCad 10 writes them
+        # (`(alternate "NAME" <type> <shape>)`, e.g. its Analog_ADC library);
+        # each takes the pin's own type and the «line» shape every pin here has.
+        pin_lines = [f'      (pin {pin.electrical_type} line (at {_num(item.x)} {_num(item.y)} {item.angle}) '
+                     f'(length {_num(pin_length_of(pin, layout.pin_length))}){hide}',
+                     f'        (name {_quote(pin.name or "~")} {pin_effects})',
+                     f'        (number {_quote(pin.number)} {pin_effects})']
+        pin_lines += [f'        (alternate {_quote(alternate)} {pin.electrical_type} line)'
+                      for alternate in pin.alternates]
+        # The pin form closes on its last line, as before alternates existed.
+        pin_lines[-1] += ')'
+        lines.extend(pin_lines)
     lines.extend(('    )', '    (embedded_fonts no)', '  )', ')', ''))
     return '\n'.join(lines)
 

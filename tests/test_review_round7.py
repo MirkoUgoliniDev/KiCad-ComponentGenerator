@@ -295,9 +295,14 @@ def test_a_fit_carries_the_stretch_it_shows():
 PINNED_DEFAULT_DIGESTS = {
     "system_prompt": "57abf7a6024746011314768b5f9dde6af2c4eaecebd89144c70b5ebd4da6cef2",
     # 2026-11-13 (plan P6): self-consistent grid, a case marking is no terminal.
-    "system_prompt_single": "c95f0dbc652bb3353dad27ad92c3a17e867905ab9f52f0da0634fc9299bb0abd",
+    # CONTRACT CHANGED 2026-11-14 (NC/NO of a drawn contact): symbol_contact
+    # asked beside the function; the former digest is superseded.
+    "system_prompt_single": "9edc33978ab8c933a37d6dde636e01a397fd3907a49a881616ca6374d7a5e139",
     "numbering_prompt": "f06548f8dc636b32d64cc92235e44d5ad0315030132eb71fb0d8f44a6ad35e5a",
-    "pad_positions_prompt": "e565032585e69d85129d3b8ff1eee72fe54c0d2be273eb8c99106a14f14b504a",
+    # CONTRACT CHANGED 2026-11-14: terminal_functions, the second reading of
+    # a drawn circuit symbol's roles, worded as «pin roles only» (night4);
+    # the former digests are superseded.
+    "pad_positions_prompt": "7c6ac6f7884a7a1131f65b3604fc63c72e532e00734bba83a25bb445d9b25aed",
     "body_dimensions_prompt": "ee5bbe4bb854f6a5c0f3d6a790d84ab8e4963813d74de67d6eed77a5a433354b",
     "contact_style_prompt": "ea0e1707ab43a1b89b6bcb5082e17cba38713f4b94dec19d67d5ec8d2482ffdd",
     "role_prompt_pinout": "3bc308855fd9d35e3253ef84b9aa7f7dde85006ac83bbdbd4498a748f5f71e98",

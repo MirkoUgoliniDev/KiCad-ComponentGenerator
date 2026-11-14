@@ -19,6 +19,7 @@ adding an external dependency for two calls would not be justified.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import http.client
 from http.client import IncompleteRead
@@ -1292,15 +1293,137 @@ def deepseek_declared_text_only(model: str) -> bool:
         declaration. It only ever refuses a model declared text only; an
         unknown model is sent as before. A modality field in DeepSeek's own
         list would make it unnecessary.
+    @note Known counter-example (adversarial review, 2026-11-14): OpenRouter's
+        ``deepseek/deepseek-v4-flash`` declares text only while separate
+        vision identifiers exist, and a direct-API alias may point at a
+        different build than the OpenRouter entry of the same name. The
+        borrowed answer can therefore be wrong in either direction; the
+        picker shows the borrowed source identifier so the user can judge.
     """
-    from .providers import provider_model_name
+    from .providers import PROVIDER_DEEPSEEK, provider_of
+    # Only a DeepSeek direct identifier borrows the declaration: an OpenRouter
+    # «deepseek/<name>» is not this function's question (callers check the
+    # provider first; the answer stays False for it, as before).
+    return provider_of(model) == PROVIDER_DEEPSEEK and image_capability(model) == IMAGES_NOT_READ
+
+
+#: Values of `image_capability`: the model declares image input...
+IMAGES_READ = "yes"
+#: ...declares input modalities WITHOUT image (text only)...
+IMAGES_NOT_READ = "no"
+#: ...or nothing usable is declared (not in the catalogue, stale catalogue,
+#: no modality list): never a reason to refuse the model.
+IMAGES_UNDECLARED = "undeclared"
+
+#: Parsed fresh catalogue, keyed on (path, mtime_ns, size) of the cache file:
+#: the picker, the step table and every send-time check share one parse of
+#: the ~1 MB file instead of re-reading it at each call.
+_FRESH_MEMO: dict = {"key": None, "index": {}}
+_FRESH_LOCK = threading.Lock()
+
+
+def catalog_id(model) -> str:
+    """@brief The OpenRouter catalogue identifier that carries `model`'s image declaration.
+
+    @param model A model identifier of either provider, or a ModelInfo.
+    @return The identifier itself for OpenRouter; ``deepseek/<name>`` for a
+        DeepSeek direct identifier (DECLARED HEURISTIC, see
+        deepseek_declared_text_only: the same model through two routes).
+    """
+    from .providers import PROVIDER_DEEPSEEK, provider_model_name, provider_of
+    model = getattr(model, "id", model)
+    model = model.strip() if isinstance(model, str) else ""
+    if model and provider_of(model) == PROVIDER_DEEPSEEK:
+        return "deepseek/" + provider_model_name(model)
+    return model
+
+
+def _modalities_capability(modalities) -> str:
+    """Image capability from a declared modality tuple: empty means undeclared."""
+    if not modalities:
+        return IMAGES_UNDECLARED
+    return IMAGES_READ if "image" in modalities else IMAGES_NOT_READ
+
+
+def fresh_catalog() -> dict:
+    """@brief The cached OpenRouter catalogue as {id: raw row}, only while within MODELS_CACHE_TTL_S.
+
+    @return The rows of the disk cache indexed by identifier; an empty dict
+        when the cache is missing, unreadable or stale (stale data never
+        refuses a model).
+    @note Parsed once per version of the file (path, modification time,
+        size) and shared by every caller, threads included.
+    """
+    path = _models_cache_path()
+    try:
+        stat = path.stat()
+    except OSError:
+        return {}
+    if time.time() - stat.st_mtime > MODELS_CACHE_TTL_S:
+        return {}
+    key = (str(path), stat.st_mtime_ns, stat.st_size)
+    with _FRESH_LOCK:
+        if _FRESH_MEMO["key"] == key:
+            return _FRESH_MEMO["index"]
     rows = _load_models_cache() or []
-    wanted = "deepseek/" + provider_model_name(model)
-    for raw in rows:
-        info = _model_from_payload(raw) if isinstance(raw, dict) and raw.get("id") == wanted else None
-        if info is not None:
-            return bool(info.input_modalities) and "image" not in info.input_modalities
-    return False
+    index = {raw["id"]: raw for raw in rows
+             if isinstance(raw, dict) and isinstance(raw.get("id"), str)}
+    with _FRESH_LOCK:
+        _FRESH_MEMO["key"], _FRESH_MEMO["index"] = key, index
+    return index
+
+
+def fresh_catalog_rows() -> list:
+    """@brief The fresh catalogue rows (see `fresh_catalog`), as a list.
+
+    @return The raw rows; empty when the cache is missing, unreadable or stale.
+    """
+    return list(fresh_catalog().values())
+
+
+def image_capability(model, catalog=None) -> str:
+    """@brief Whether a model reads images: IMAGES_READ, IMAGES_NOT_READ or IMAGES_UNDECLARED.
+
+    The one rule shared by the model picker (which greys a text-only model
+    in the lists of the steps that send images), the «Modello AI» table and
+    the send-time checks (prompt_models.usable_model,
+    deepseek_declared_text_only), so the list and the call never disagree.
+
+    @param model A model identifier of either provider, or a ModelInfo (only
+        its identifier is used: a row loaded from an expired cache, the
+        offline fallback of list_models, must not judge more than the call).
+    @param catalog The fresh catalogue already loaded ({id: row} from
+        `fresh_catalog`, or a list of raw rows), or None to use `fresh_catalog`.
+    @return IMAGES_READ when "image" is among the declared input modalities
+        of the entry `catalog_id(model)`, IMAGES_NOT_READ when modalities are
+        declared without it, IMAGES_UNDECLARED when the model is not in the
+        catalogue, the catalogue is missing or older than MODELS_CACHE_TTL_S,
+        or the entry declares no modalities.
+    @note Stale or missing data is never a refusal: the model may have gained
+        image input since. Only a fresh, explicit declaration says «no».
+    """
+    wanted = catalog_id(model)
+    if not wanted:
+        return IMAGES_UNDECLARED
+    if catalog is None:
+        catalog = fresh_catalog()
+    if isinstance(catalog, dict):
+        raw = catalog.get(wanted)
+    else:
+        raw = next((row for row in catalog if isinstance(row, dict) and row.get("id") == wanted),
+                   None)
+    info = _model_from_payload(raw) if raw is not None else None
+    return _modalities_capability(info.input_modalities) if info else IMAGES_UNDECLARED
+
+
+def image_capabilities(models) -> dict:
+    """@brief `image_capability` of many models over one fresh catalogue.
+
+    @param models Iterable of ModelInfo.
+    @return {model id: IMAGES_READ | IMAGES_NOT_READ | IMAGES_UNDECLARED}.
+    """
+    catalog = fresh_catalog()
+    return {m.id: image_capability(m, catalog) for m in models}
 
 
 def _write_models_cache(payload: list[dict]) -> None:
@@ -1569,6 +1692,63 @@ _COMPATIBLE_TOOL_CHOICES = ("required", "auto")
 COMPATIBILITY_LEVELS = len(_COMPATIBLE_TOOL_CHOICES)
 
 
+#: Largest completion budget the one retry asks for when the catalogue does
+#: not declare the model's own limit. DECLARED HEURISTIC: the reasoning
+#: models of the model benchmark of 2026-11-14 spent up to ~27k tokens
+#: before the tool call; 65536 covers that with margin and is a limit most
+#: current models accept. The model's declared `max_completion_tokens`
+#: replaces it whenever the catalogue gives one.
+TRUNCATION_RETRY_CAP_TOKENS = 65536
+
+#: Factor by which the one retry enlarges the completion budget (bounded by
+#: the declared limit, else TRUNCATION_RETRY_CAP_TOKENS).
+TRUNCATION_RETRY_FACTOR = 4
+
+def _catalog_row(model: str) -> Optional[dict]:
+    """The fresh catalogue row that carries `model`'s declarations (`catalog_id`), or None."""
+    raw = fresh_catalog().get(catalog_id(model))
+    return raw if isinstance(raw, dict) else None
+
+
+@contextlib.contextmanager
+def _budget_on_truncation(model: str, max_tokens):
+    """Give a TruncatedAnswerError raised inside the budgets of the ONE retry (`completion_budget_retry`)."""
+    try:
+        yield
+    except TruncatedAnswerError as exc:
+        exc.max_tokens = max_tokens
+        exc.budget_retry = completion_budget_retry(model, max_tokens)
+        if exc.budget_retry is None:
+            raise TruncatedAnswerError(str(exc) + " " + tx(
+                "Nessun budget di completamento maggiore disponibile per questo modello.")) from None
+        raise
+
+
+def completion_budget_retry(model: str, max_tokens: int) -> Optional[int]:
+    """@brief The larger completion budget of the ONE retry after a truncated answer, or None.
+
+    @param model Model identifier of either provider.
+    @param max_tokens The budget that was exhausted.
+    @return `max_tokens` x TRUNCATION_RETRY_FACTOR, bounded by the model's
+        declared `top_provider.max_completion_tokens` in the fresh catalogue
+        (a DeepSeek direct model borrows its OpenRouter twin's, `catalog_id`),
+        else by TRUNCATION_RETRY_CAP_TOKENS; None when that bound leaves no
+        room above `max_tokens` (nothing larger can be asked).
+    """
+    try:
+        current = int(max_tokens)
+    except (TypeError, ValueError):
+        return None
+    limit = TRUNCATION_RETRY_CAP_TOKENS
+    row = _catalog_row(model)
+    top = row.get("top_provider") if isinstance(row, dict) else None
+    declared = top.get("max_completion_tokens") if isinstance(top, dict) else None
+    if isinstance(declared, (int, float)) and not isinstance(declared, bool) and declared > 0:
+        limit = int(declared)
+    target = min(current * TRUNCATION_RETRY_FACTOR, limit)
+    return target if target > current else None
+
+
 def call_tool(*args, **kwargs) -> dict:
     """@brief Call the model once and decode explicit structured tool arguments.
 
@@ -1584,6 +1764,10 @@ def call_tool(*args, **kwargs) -> dict:
     @note Same parameters, result and errors as `_call_tool`, which does the
         work; this wrapper only guarantees that the request context read by
         `_record_usage` (time and model of the call) never outlives the call.
+    @note An answer cut by the completion budget raises TruncatedAnswerError
+        with the larger budget one more attempt may use (`budget_retry`); the
+        logged wrapper (`ai_diagnostics.make_logged_call`) makes that attempt,
+        once (model benchmark 2026-11-14).
     """
     try:
         return _call_tool(*args, **kwargs)
@@ -1705,7 +1889,8 @@ def _call_tool(
             if isinstance(usage, dict) and cost is not None:
                 usage["cost"], usage["cost_source"] = cost, "token_price"
         _record_usage(payload)
-        arguments = tool_arguments(payload, tool["function"]["name"], provider="DeepSeek")
+        with _budget_on_truncation(model, max_tokens):
+            arguments = tool_arguments(payload, tool["function"]["name"], provider="DeepSeek")
         return _drop_nulls(arguments) if strict is not None else arguments
     if has_pdf:
         body["plugins"] = [{"id": "file-parser", "pdf": {"engine": pdf_engine}}]
@@ -1740,7 +1925,8 @@ def _call_tool(
     # Before tool_arguments, which may raise: the call was paid anyway, and
     # a cost tally that ignores the failed attempts is false.
     _record_usage(payload)
-    return tool_arguments(payload, tool["function"]["name"])
+    with _budget_on_truncation(model, max_tokens):
+        return tool_arguments(payload, tool["function"]["name"])
 
 
 #: JSON-schema keywords a schema node may use to be converted to DeepSeek
@@ -1854,9 +2040,11 @@ def tool_arguments(payload: dict, tool_name: str, provider: str = "OpenRouter") 
     @throws ToolArgumentsError Only for a COMPLETE answer whose arguments are
         not a JSON object, which a caller may pay once more for. An answer cut
         by the token budget (finish_reason length / max_tokens) with missing
-        or partial arguments raises a plain OpenRouterError that states the
-        truncation first, never retried (audit 138, A5).
-    @note No fallback empty object and no automatic retry on incomplete responses.
+        or partial arguments raises a TruncatedAnswerError that states the
+        truncation first (audit 138, A5); never a ToolArgumentsError, so it is
+        never repeated as it was -- the logged wrapper asks once more with a
+        LARGER budget (model benchmark 2026-11-14).
+    @note No fallback empty object; an incomplete answer is never accepted.
     """
     context = _diagnostic_context(payload)
     if not isinstance(payload, dict):
@@ -1915,16 +2103,29 @@ def _truncated(choice: dict) -> bool:
     return choice.get("finish_reason") in _TRUNCATION_REASONS
 
 
+class TruncatedAnswerError(OpenRouterError):
+    """@brief An answer cut by the completion budget before the tool call was complete.
+
+    Not `retryable` (the same request would be cut the same way). `_call_tool`
+    sets `budget_retry`, the larger budget `completion_budget_retry` allows
+    (None when none), and `max_tokens`, the exhausted one: the logged wrapper
+    (`ai_diagnostics.make_logged_call`) asks ONCE more with it.
+    """
+
+    budget_retry: Optional[int] = None
+    max_tokens: Optional[int] = None
+
+
 def _truncation_error(detail: str) -> OpenRouterError:
-    """The non-retryable error of an answer cut by the completion budget.
+    """The error of an answer cut by the completion budget (`TruncatedAnswerError`).
 
     `detail` is the diagnostic context, or the argument error (which already
     ends with it) when the cut left missing or partial arguments.
     """
-    return OpenRouterError(
+    return TruncatedAnswerError(
         tx("Risposta troncata: budget di token di completamento esaurito prima di "
-           "restituire la chiamata allo strumento richiesto. Nessun tentativo "
-           "automatico aggiuntivo.") + (" " + detail if not detail.startswith(" ") else detail))
+           "restituire la chiamata allo strumento richiesto.")
+        + (" " + detail if not detail.startswith(" ") else detail))
 
 
 def _non_finite_constant(_name: str) -> None:

@@ -61,6 +61,10 @@ def _finite(value: float, name: str, positive: bool = False) -> float:
     return value
 
 
+#: Values of `PinSpec.lead_fit` (None: the document does not say).
+LEAD_FITS = (None, "clearance", "press_fit")
+
+
 @dataclass(frozen=True)
 class PinSpec:
     """@brief Describe one package pin and its physical pad geometry."""
@@ -86,6 +90,12 @@ class PinSpec:
     #: not quote it, and for every project saved before 2026-11-10. Each pin
     #: has its own: one part may mix round pins and flat blades.
     lead: Optional[dict] = None
+    #: How the terminal sits in its hole, as the document states it:
+    #: "clearance" (it passes freely) or "press_fit" (pressed in, the hole
+    #: meant to be tighter than the terminal); None when the document does
+    #: not say, the common case, read as clearance. A press-fit pad is not
+    #: held to «the terminal passes the hole» (`tht_estimates.lead_passes`).
+    lead_fit: Optional[str] = None
     #: Provenance of this pad's values: any of the keys "drill_mm",
     #: "pad_size", "shape", "lead", each "read", "derived" or "estimated"
     #: (`core.tht_estimates.SOURCE_WORDS`). None states nothing: no mark and
@@ -118,7 +128,7 @@ class PinSpec:
         """
         return hash((self.number, self.x_mm, self.y_mm, self.pad_length_mm, self.pad_width_mm, self.side,
                      self.name, self.pad_type, self.shape, self.rotation_deg, self.drill_mm,
-                     self.drill_length_mm))
+                     self.drill_length_mm, self.lead_fit))
 
     def _circle_with_two_sides_is_an_oval(self) -> None:
         """@brief Turn a "circle" with two different sides into the "oval" KiCad would need.
@@ -169,8 +179,12 @@ class PinSpec:
             builds the pin states the type or drops the hole.
         @note `lead` and `sources` must follow the contract of
             `core.tht_estimates` (known shape and words, finite positive
-            sizes, no unknown key).
+            sizes, no unknown key); `lead_fit` is None, "clearance" or
+            "press_fit".
         """
+        if self.lead_fit not in LEAD_FITS:
+            raise ValueError(tx("pin {number}: montaggio del terminale non valido: {fit}",
+                                number=self.number, fit=self.lead_fit))
         if self.number is None:
             raise ValueError(tx("il numero del pin non puo' essere vuoto"))
         if not str(self.number).strip() and self.pad_type != "np_thru_hole":
@@ -412,9 +426,9 @@ class PackageGeometry:
                 side=pin.side, name=pin.name, pad_type=pin.pad_type,
                 shape=pin.shape, rotation_deg=_normal_angle(pad_angle + self.orientation_deg),
                 drill_mm=pin.drill_mm, drill_length_mm=pin.drill_length_mm,
-                # The terminal and the provenance belong to the pad, whatever
-                # the view it is seen from.
-                lead=pin.lead, sources=pin.sources,
+                # The terminal, its fit and the provenance belong to the pad,
+                # whatever the view it is seen from.
+                lead=pin.lead, lead_fit=pin.lead_fit, sources=pin.sources,
             ))
         return result
 
@@ -785,8 +799,9 @@ def package_from_mapping(data: dict) -> PackageGeometry:
         # Optional (2026-11-06): absent or null is a round hole, as before.
         drill_length_mm=p.get("drill_length_mm"),
         # Optional (2026-11-10): the terminal's section and the provenance
-        # of the pad's values; absent or null states nothing.
-        lead=p.get("lead"), sources=p.get("sources"),
+        # of the pad's values; absent or null states nothing. Optional
+        # (2026-11-14): how the terminal sits in its hole.
+        lead=p.get("lead"), lead_fit=p.get("lead_fit"), sources=p.get("sources"),
     ) for p in raw_pins]
     geometry = PackageGeometry(
         name=str(data.get("name") or "Package"),

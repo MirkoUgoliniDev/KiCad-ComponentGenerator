@@ -50,6 +50,7 @@ except ImportError:  # pragma: no cover - optional dependency
 from ..cad3d.measurement_uncertainty import EDGE_UNCERTAINTY_PX
 from ..generators.castellated_module import MIN_HOLE_WALL_MM
 from .messages import tx
+from ..core.validation import finite_number
 from .photo_refine import (MAX_BOARD_EDGE_DRIFT_PX, MAX_BOARD_EDGE_DRIFT_RATIO, _lab,
                            _otsu_level)
 
@@ -832,14 +833,24 @@ class HoleStyle:
     """@brief What the photo says about the holes of the contacts of one edge.
 
     @note `style` is "half_hole" (the hole centre sits on the edge: the
-        opening on the edge is as wide as the hole), "half_and_through" (a
-        full plated hole inside the board that the edge only nicks: the
-        opening is a chord narrower than the hole, whose widest row lies
-        inside) or "through_hole" (a closed circle, no opening), or None
-        when the lands or the holes could not be read; `contacts` says on
-        how many lands the verdict rests, `agreeing` how many agree with
-        it; `drill_mm` the median hole width, `chord_mm` the median opening;
-        `reason` why there is no verdict.
+        opening on the edge is as wide as the hole), "half_and_through" (an
+        opening on the edge AND a closed hole behind it, or a full plated
+        hole inside the board that the edge only nicks: the opening is a
+        chord narrower than the hole, whose widest row lies inside) or
+        "through_hole" (a closed circle and NO opening on the edge, whether
+        its land reaches the edge or not), or None when the lands or the
+        holes could not be read; `contacts` says on how many lands the
+        verdict rests, `agreeing` how many agree with it; `drill_mm` the
+        median hole width, `chord_mm` the median width of the opening on the
+        edge rows (0.0 for through_hole), both over the agreeing lands only;
+        `openings` how many agreeing lands showed an opening segment,
+        `closed` how many a CLOSED hole behind the edge (a through hole the
+        contact has, whatever the edge shows);
+        `reason` why there is no verdict;
+        `row_lands` the length of the row when its lands were located by an
+        independent witness (the outline notches, `confirmed_centres_mm` of
+        `measure_edge_holes`), None when the reader found the row itself by
+        its blind chain search (see `hole_agreement_floor`).
     """
 
     edge: str
@@ -849,20 +860,123 @@ class HoleStyle:
     drill_mm: Optional[float] = None
     chord_mm: Optional[float] = None
     reason: str = ""
+    openings: int = 0
+    closed: int = 0
+    row_lands: Optional[int] = None
 
     def as_dict(self) -> dict:
         """@brief JSON-friendly copy for the extraction answer (`_measured_holes`).
 
-        @return A plain dict with the edge, the hole style, the contact and
-            agreeing counts, the drill and chord diameters in mm (None when not
-            measured) and the reason text.
+        @return A plain dict with the edge, the hole style, the contact,
+            agreeing and opening counts, the drill and chord diameters in mm
+            (None when not measured), the reason text and the length of a
+            row located by the outline (`row_lands`, None otherwise).
         """
         return dict(edge=self.edge, style=self.style, contacts=self.contacts,
                     agreeing=self.agreeing, drill_mm=self.drill_mm, chord_mm=self.chord_mm,
-                    reason=self.reason)
+                    reason=self.reason, openings=self.openings, closed=self.closed,
+                    row_lands=self.row_lands)
 
 
-def measure_edge_holes(crop, edge: str, pitch_mm, length_mm: float, width_mm: float) -> HoleStyle:
+def hole_agreement_floor(row_lands=None) -> int:
+    """@brief Fewest lands that must agree before a hole verdict (or a count of closed holes) stands.
+
+    @param row_lands Length of a row whose lands an independent witness
+        located (`HoleStyle.row_lands`), or None for a row the reader found
+        by its own blind chain search.
+    @return MIN_ROW_LANDS for a blind row; for a located row, its length
+        capped at MIN_ROW_LANDS -- every land of a row shorter than
+        MIN_ROW_LANDS must agree -- and never fewer than two: one land alone
+        has no other land of the row to corroborate its reading, so a
+        one-contact side gets no verdict (structural, not tuned).
+    @note Why the two cases differ (night1 RS485 run, 2026-11-14: rows of 3
+        and 4 castellations the outline confirmed, and the reader never gave
+        a verdict because it asked for 5 agreeing lands). MIN_ROW_LANDS
+        guards against CHANCE: a blind chain of fewer lands may be labels or
+        marks aligned at the pitch. When the outline has counted exactly the
+        declared notches at the declared contacts
+        (`edge_notches.confirmed_rows`), the lands are known and no chance
+        chain is involved; what remains is the colour reading of each land,
+        which a unanimity of the whole short row guards instead. No number
+        is tuned on a board: the floor is the row's own length.
+    """
+    try:
+        located = int(row_lands) if row_lands is not None else 0
+    except (TypeError, ValueError):
+        located = 0
+    if located <= 0:
+        return MIN_ROW_LANDS
+    return max(2, min(MIN_ROW_LANDS, located))
+
+
+def choose_land_class(verdicts, classes: int, mask_class: int, floor: int, spans=None,
+                      enclosure_px: float = 0.0):
+    """@brief Which colour class holds the lands, its verdict, and whether that verdict stands.
+
+    @param verdicts [(class index, verdict)] of every land read, one entry per
+        land and colour class (`measure_edge_holes`).
+    @param classes Number of colour classes.
+    @param mask_class The class of the board's own colour (never the lands).
+    @param floor Fewest agreeing lands (`hole_agreement_floor`).
+    @param spans Optional {class: typical width along the edge, px} of the
+        runs each class read as lands.
+    @param enclosure_px How much wider than what it encloses a land must be:
+        the copper ring on both sides of a hole, 2 x MIN_HOLE_WALL_MM in px.
+    @return None when no class but the mask produced a reading; otherwise
+        (land class, its majority verdict, lands agreeing on it, lands read
+        in that class, decided). `decided` is False when the majority is
+        below the floor or below half of the lands read, or when another
+        non-mask class that passes the same tests reaches a DIFFERENT
+        verdict and the enclosure rule cannot tell which class is the land.
+    @note Generality audit 2026-11-14, M2. Several colour classes may read
+        "lands": the copper, and the colour that shows through the holes,
+        whose runs enclose specks of the ring. A land SURROUNDS its hole, so
+        along the edge its run is wider than the hole's by the copper ring
+        on both sides, at least 2 x MIN_HOLE_WALL_MM by fabrication. Among
+        the passing classes with conflicting verdicts, the one wider than
+        every rival by that much encloses them and is the land; when no
+        class is that much wider, the photo does not say which colour is
+        copper and the reading abstains -- the class order of the clustering
+        or a one-land lead never picks the style. A rival below the floor is
+        noise (labels, specks). Structural: the margin is the fabrication
+        minimum, no number tuned on a board.
+    """
+    def majority(cls):
+        kept = [v for k, v in verdicts if k == cls]
+        if cls == mask_class or not kept:
+            return None
+        best = max(sorted(set(kept)), key=kept.count)
+        return best, kept.count(best), len(kept)
+
+    def passes(entry):
+        return entry is not None and entry[1] >= floor and entry[1] * 2 >= entry[2]
+
+    readings = {cls: majority(cls) for cls in range(classes)}
+    readings = {cls: entry for cls, entry in readings.items() if entry is not None}
+    if not readings:
+        return None
+    land_class = max(readings, key=lambda cls: (readings[cls][1], readings[cls][2], -cls))
+    passing = [cls for cls, entry in readings.items() if passes(entry)]
+    if land_class in passing and any(readings[cls][0] != readings[land_class][0] for cls in passing):
+        # Conflicting passing classes: the enclosing one is the land, if any.
+        widths = spans or {}
+
+        def encloses(cls):
+            return cls in widths and all(
+                other in widths and widths[cls] - widths[other] >= enclosure_px
+                for other in passing if readings[other][0] != readings[cls][0])
+        enclosing = [cls for cls in passing if encloses(cls)]
+        if len(enclosing) != 1:
+            best, agreeing, read = readings[land_class]
+            return land_class, best, agreeing, read, False
+        land_class = enclosing[0]
+    best, agreeing, read = readings[land_class]
+    return land_class, best, agreeing, read, passes(readings[land_class])
+
+
+def measure_edge_holes(crop, edge: str, pitch_mm, length_mm: float, width_mm: float,
+                       confirmed_centres_mm: Optional[Sequence[float]] = None,
+                       land_inward_mm: Optional[float] = None) -> HoleStyle:
     """@brief Read, land by land, how the holes of an edge row meet the board edge.
 
     @param crop Calibrated BGR crop, the board filling the frame.
@@ -870,6 +984,22 @@ def measure_edge_holes(crop, edge: str, pitch_mm, length_mm: float, width_mm: fl
     @param pitch_mm Declared pitch of the row, in mm.
     @param length_mm Board extent along X, in mm.
     @param width_mm Board extent along Y, in mm.
+    @param confirmed_centres_mm Contact centres along the edge (mm from its
+        start) that an INDEPENDENT witness located -- the outline notches of
+        `edge_notches.confirmed_rows`, whose count equals the declared one --
+        or None. Given, the lands are read at those centres instead of being
+        searched by the blind copper chain (`count_edge_copper`), and the
+        verdict needs the agreement of `hole_agreement_floor(len(centres))`
+        lands: a row shorter than MIN_ROW_LANDS is then readable, with every
+        land agreeing.
+    @param land_inward_mm Inward extent of the lands MEASURED on the photo
+        (`measure_lands`, `LandMeasure.inward_mm`), or None. Used only with
+        `confirmed_centres_mm`: the holes are then read over the whole land
+        plus one hole wall, not only one pitch from the edge, so «no closed
+        hole» covers every row of the land. On a located row a land still
+        filling the inner row of the window gives no «half_hole» reading: a
+        closed hole may lie past it (evidence of absence only over what was
+        read).
     @return HoleStyle; `style` None when there is no verdict.
     @note Geometry, not a declaration (user, 2026-10-08: the model declared
         «half_hole» or «half_and_through» for the same photo from one run to
@@ -877,17 +1007,28 @@ def measure_edge_holes(crop, edge: str, pitch_mm, length_mm: float, width_mm: fl
         pitch from the edge the columns fall in three colour classes
         (`_colour_classes`: mask, copper, what the hole shows; only the periodic row counts); the lands are the runs of the class whose
         runs enclose a hole (a run of the other colour bounded by the land
-        on both sides); for each land the opening on the edge rows (chord
-        c, read past the bright cut line) and the widest hole row (D, at
+        on both sides); for each land an OPENING is a hole segment that
+        starts within one hole wall (MIN_HOLE_WALL_MM) of the edge -- no
+        copper wall separates it from the edge, so on the colours it reads as
+        a cut, which only the outline can confirm -- and a CLOSED hole one
+        that starts farther in; the opening on the edge rows (chord
+        c, the width on the edge rows -- the first hole wall's worth of rows
+        past the bright cut line, where a cut barrel is as wide as the cut)
+        and the widest hole row (D, at
         depth r*) decide: D within the measurement window of c and r* on
         the edge rows -> the centre is on the edge, "half_hole"; D wider
         than c by more than the window with r* inside -> a full hole the
-        edge nicks, "half_and_through"; no opening but a closed hole in a land that still
-        touches the edge -> "half_and_through" too (an edge pad with a hole:
-        the generator's through_hole is a ring SET BACK from the edge); a
-        closed hole in a land clear of the edge -> "through_hole". The side's verdict is the majority, taken only when
-        at least MIN_ROW_LANDS lands agree and they are at least half of
-        the lands read. No board-specific number: the window is the
+        edge nicks, "half_and_through"; an opening AND a closed hole behind
+        it -> "half_and_through"; a closed hole and NO opening segment ->
+        "through_hole", whether its land reaches the edge or is set back
+        (user, 2026-11-13: an edge pad around a closed hole was called
+        «half_and_through», and the generator then drilled a half-hole the
+        board does not have). Drill and chord medians are taken over the
+        lands of the winning verdict only, so a closed-only land never
+        lowers the opening of the lands that have one. The side's verdict is the majority, taken only when
+        at least `hole_agreement_floor` lands agree (MIN_ROW_LANDS for a
+        blind row, the whole row for a short row the outline located) and
+        they are at least half of the lands read. No board-specific number: the window is the
         uncertainty of a run's extent (one hole wall plus two boundary
         pixels), as in count_edge_copper.
     """
@@ -904,7 +1045,28 @@ def measure_edge_holes(crop, edge: str, pitch_mm, length_mm: float, width_mm: fl
     depth = int(min(across_extent // 2, max(4 * band_px, round(float(pitch_mm) * across_scale))))
     if depth < 2 * band_px or along_extent < 3:
         return HoleStyle(edge, None, reason=tx("finestra troppo stretta"))
-    strip = _edge_window(crop, edge, 0, along_extent, depth)
+    located = [float(c) for c in confirmed_centres_mm or ()
+               if finite_number(c) is not None
+               and 0.0 <= float(c) * along_scale <= along_extent]
+    if confirmed_centres_mm and len(located) != len(confirmed_centres_mm):
+        # A located centre off the edge (or not a number) means the outline's
+        # count and this frame disagree: the lands can no longer be matched
+        # one to one with the declared contacts, and a floor taken from the
+        # surviving centres would ask fewer lands than the row has (audit
+        # 2026-11-14, L2). No verdict rather than a verdict on part of a row.
+        return HoleStyle(edge, None, reason=tx("posizioni dichiarate non leggibili sul bordo"),
+                         row_lands=len(confirmed_centres_mm))
+    # Rows the holes are read on: one pitch from the edge (`depth`), or, on
+    # a located row with a measured land, the whole land plus one hole wall
+    # -- the inner through-hole of a half_and_through contact lies inside
+    # its land, which may run deeper than one pitch. Never past the middle
+    # of the board. The land runs and the mask colour keep `depth`.
+    read_depth = depth
+    inward = finite_number(land_inward_mm)
+    if located and inward is not None and inward > 0:
+        read_depth = int(min(across_extent // 2,
+                             max(depth, math.ceil((inward + MIN_HOLE_WALL_MM) * across_scale))))
+    strip = _edge_window(crop, edge, 0, along_extent, read_depth)
     lab = _lab(np.ascontiguousarray(strip))
     # Column classes on the rings the lands always fill (as count_edge_copper),
     # then every pixel of the strip joins the nearer of the two column colours.
@@ -923,17 +1085,28 @@ def measure_edge_holes(crop, edge: str, pitch_mm, length_mm: float, width_mm: fl
     window = MIN_HOLE_WALL_MM * along_scale + 2 * EDGE_UNCERTAINTY_PX
     # Only lands of the periodic row are read: a body or a label on an edge
     # without contacts also encloses a patch of another colour.
-    row = count_edge_copper(crop, edge, pitch_mm, length_mm, width_mm)
-    if not row.found:
-        return HoleStyle(edge, None, reason=row.reason or tx("nessuna fila di piazzole sul bordo"))
     pitch_px = float(pitch_mm) * along_scale
-    lattice = [c * along_scale for c in row.centres_mm]
-
-    def on_row(a, b):
+    if located:
+        # The outline located each contact (one notch per declared contact):
+        # those centres ARE the lands, so only they are probed -- not the
+        # half-pitch points, which would be the gaps.
+        lattice = [c * along_scale for c in located]
+        points = list(lattice)
+        row_lands = len(located)
+    else:
+        row = count_edge_copper(crop, edge, pitch_mm, length_mm, width_mm)
+        if not row.found:
+            return HoleStyle(edge, None, reason=row.reason or tx("nessuna fila di piazzole sul bordo"))
+        lattice = [c * along_scale for c in row.centres_mm]
         # The chain may be the lands or the gaps: a land holds a chain point
         # or a point half a pitch from one (a land whose tongue to the edge
         # is not centred still holds the point).
         points = lattice + [k + pitch_px / 2 for k in lattice] + [k - pitch_px / 2 for k in lattice]
+        row_lands = None
+    floor = hole_agreement_floor(row_lands)
+
+    def on_row(a, b):
+        # A land run holds one of the probe points, within the window.
         return any(a - window <= k <= b + window for k in points)
 
     def runs(mask):
@@ -950,8 +1123,8 @@ def measure_edge_holes(crop, edge: str, pitch_mm, length_mm: float, width_mm: fl
 
     def hole_profile(land, a, b):
         """Per row, the width of the largest non-land run enclosed by land pixels in [a, b)."""
-        widths = np.zeros(depth, dtype=float)
-        for r in range(depth):
+        widths = np.zeros(read_depth, dtype=float)
+        for r in range(read_depth):
             row = land[r, a:b]
             edges = np.where(row)[0]
             if edges.size < 2:
@@ -967,19 +1140,23 @@ def measure_edge_holes(crop, edge: str, pitch_mm, length_mm: float, width_mm: fl
             widths[r] = best
         return widths
 
-    verdicts, drills, chords = [], [], []
+    verdicts, drills, chords, has_opening, has_closed = [], [], [], [], []
+    # Typical width along the edge of the runs each class read as lands,
+    # for the enclosure rule of `choose_land_class`.
+    class_spans = {}
     for land_class in range(len(centres)):
         land = pixel_class == land_class
         # A land is the run of columns that hold its colour somewhere in the
         # strip (at least one ring's worth of rows): a U-shaped land, whose
         # opening on the edge runs deeper than the first rings, is then one
         # run and not its two legs.
-        spans = [(a, b) for a, b in runs(land.sum(axis=0) >= band_px) if on_row(a, b)]
-        if len(spans) < MIN_ROW_LANDS:
+        spans = [(a, b) for a, b in runs(land[:depth].sum(axis=0) >= band_px) if on_row(a, b)]
+        if len(spans) < floor:
             continue
         # The lands of a row are alike: runs narrower than the row's by more
         # than the window are marks and tongues, not lands.
         typical = float(np.median([b - a for a, b in spans]))
+        class_spans[land_class] = typical
         for a, b in spans:
             if abs((b - a) - typical) > window:
                 continue
@@ -990,17 +1167,34 @@ def measure_edge_holes(crop, edge: str, pitch_mm, length_mm: float, width_mm: fl
             # touches the edge is the opening (past the bright cut line), any
             # other, separated by rows of solid copper, is a closed hole.
             segments, start = [], None
-            for r in range(depth):
+            for r in range(read_depth):
                 if widths[r] >= min_run / 2 and start is None:
                     start = r
                 elif widths[r] < min_run / 2 and start is not None:
                     segments.append((start, r))
                     start = None
             if start is not None:
-                segments.append((start, depth))
-            opening = next((seg for seg in segments if seg[0] <= 1), None)
-            closed = [seg for seg in segments if seg[0] > 1]
-            chord = float(np.median(widths[1:opening[1]])) if opening and opening[1] > 1 else 0.0
+                segments.append((start, read_depth))
+            # A CLOSED hole has a hole wall of solid land between it and the
+            # edge (band_px rows, MIN_HOLE_WALL_MM). A hole that starts closer
+            # has no such wall and is read as an OPENING of the edge: on the
+            # land colours it cannot be told from a cut whose first rows the
+            # cut line or the blur hid (a 0.6 mm castellation at 12 px/mm
+            # starts at row 2, audit 2026-11-13 H1). Whether such an edge
+            # feature IS a cut is the outline's to say, not the colours'
+            # (photo_inventory.settle_edge_holes: a copper-free notch of a
+            # U-shaped pad looks the same, 18:32 devkit run).
+            opening = next((seg for seg in segments if seg[0] <= band_px), None)
+            closed = [seg for seg in segments if seg[0] > band_px and seg is not opening]
+            chord = 0.0
+            if opening:
+                # The width ON the edge: one hole wall's worth of rows from the
+                # opening's first row past the cut line (row 0). The median over
+                # the whole opening read a semicircle at ~0.7-0.9 of its chord
+                # and made real castellations look narrower (audit 2026-11-13, H1).
+                first = max(opening[0], 1)
+                edge_rows = widths[first:min(opening[1], first + band_px)]
+                chord = float(np.median(edge_rows)) if edge_rows.size else float(widths[opening[0]])
             if opening and closed:
                 # A half-hole on the edge and a full hole behind it.
                 verdict, diameter = "half_and_through", float(max(widths[s0:s1].max() for s0, s1 in closed))
@@ -1014,23 +1208,33 @@ def measure_edge_holes(crop, edge: str, pitch_mm, length_mm: float, width_mm: fl
                            else "half_and_through" if diameter - chord > window else None)
                 if verdict is None:
                     continue
+                if (verdict == "half_hole" and row_lands is not None
+                        and float(land[read_depth - 1, a:b].mean()) > _WINDOW_MAJORITY):
+                    # «No closed hole» is evidence of absence only over the
+                    # land the strip holds: a land that still fills the
+                    # strip's inner row runs past the window, and a closed
+                    # hole may lie beyond it. That land says nothing. Only
+                    # on located rows, which read the measured land whole;
+                    # the blind reading keeps its one-pitch contract.
+                    continue
             elif closed:
-                # A closed hole. Whether the land reaches the edge decides the
-                # footprint's vocabulary: CONTACT_THROUGH_HOLE is a ring SET
-                # BACK from the edge (no copper on the edge rows); a land that
-                # touches the edge with a closed hole behind it is an edge pad
-                # with a hole, which the generator draws as half_and_through
-                # (pad to the edge plus the hole, the pins have their hole).
-                touches = bool(land[1:band_px + 1, a:b].any())
-                verdict = "half_and_through" if touches else "through_hole"
+                # A closed hole and no opening on the edge: a through-hole
+                # contact, whether its land reaches the edge or is set back.
+                # «half_and_through» means a half-hole CUT by the edge, which
+                # the generator drills; with no opening the board has none
+                # (user, 2026-11-13: the 18:32 devkit run, plain header holes).
+                verdict = "through_hole"
                 diameter = float(max(widths[s0:s1].max() for s0, s1 in closed))
             else:
                 continue
             verdicts.append((land_class, verdict))
             drills.append(diameter / along_scale)
             chords.append(chord / along_scale)
+            has_opening.append(opening is not None)
+            has_closed.append(bool(closed))
     if not verdicts:
-        return HoleStyle(edge, None, reason=tx("nessun foro leggibile sulle piazzole"))
+        return HoleStyle(edge, None, reason=tx("nessun foro leggibile sulle piazzole"),
+                         row_lands=row_lands)
     # The land class is the one whose runs enclose holes that AGREE: a row
     # of contacts has one kind of hole, while the gaps between them enclose
     # labels and marks of every shape. The class with the largest agreeing
@@ -1044,22 +1248,27 @@ def measure_edge_holes(crop, edge: str, pitch_mm, length_mm: float, width_mm: fl
     board_colour = np.median(interior.reshape(-1, 3), axis=0) if interior.size else centres[0]
     mask_class = int(np.argmin(np.linalg.norm(centres - board_colour, axis=1)))
 
-    def agreement(cls):
-        kept = [v for k, v in verdicts if k == cls]
-        if cls == mask_class or not kept:
-            return (0, 0)
-        return (max(kept.count(v) for v in set(kept)), len(kept))
-    land_class = max(range(len(centres)), key=agreement)
-    kept = [v for k, v in verdicts if k == land_class]
-    best = max(set(kept), key=kept.count)
-    agreeing = kept.count(best)
-    if agreeing < MIN_ROW_LANDS or agreeing * 2 < len(kept):
-        return HoleStyle(edge, None, len(kept), agreeing,
-                         reason=tx("letture dei fori discordi o troppo poche"))
+    choice = choose_land_class(verdicts, len(centres), mask_class, floor, class_spans,
+                               2 * MIN_HOLE_WALL_MM * along_scale)
+    if choice is None:
+        # Every reading came from the mask class: labels, not holes.
+        return HoleStyle(edge, None, reason=tx("nessun foro leggibile sulle piazzole"),
+                         row_lands=row_lands)
+    land_class, best, agreeing, kept, decided = choice
+    if not decided:
+        return HoleStyle(edge, None, kept, agreeing,
+                         reason=tx("letture dei fori discordi o troppo poche"),
+                         row_lands=row_lands)
+    # Medians over the lands of the winning verdict only (M3): every verdict
+    # with an edge opening has one on each of its lands, a through_hole land
+    # has none, so no statistic mixes the two.
     chosen = [i for i, (k, v) in enumerate(verdicts) if k == land_class and v == best]
-    return HoleStyle(edge, best, len(kept), agreeing,
+    return HoleStyle(edge, best, kept, agreeing,
                      round(float(np.median([drills[i] for i in chosen])), 3),
-                     round(float(np.median([chords[i] for i in chosen])), 3))
+                     round(float(np.median([chords[i] for i in chosen])), 3),
+                     openings=sum(1 for i in chosen if has_opening[i]),
+                     closed=sum(1 for i in chosen if has_closed[i]),
+                     row_lands=row_lands)
 
 
 def land_lines(lands: dict) -> list:

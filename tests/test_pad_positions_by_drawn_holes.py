@@ -188,12 +188,20 @@ def test_two_agreeing_readings_take_the_only_declared_view():
     assert data["package_geometry"]["source_view"] == "bottom"
 
 
-@pytest.mark.parametrize("main", [TRUE, SHIFTED])
-def test_different_declared_views_are_never_settled_by_the_holes(main):
+def test_different_declared_views_are_never_settled_by_the_holes():
     """The holes say where, not from which side: even when they match the main layout."""
-    data = _main(main, view="top")
+    data = _main(SHIFTED, view="top")
     apply_dedicated_pads(data, _reading(view="bottom"), check_layout=FakeHoles(TRUE))
     assert "viste diverse" in unresolved(data)
+
+
+def test_the_same_layout_declared_from_two_sides_asks_the_side():
+    """CONTRACT CHANGED (model benchmark 2026-11-14): with the SAME pad geometry the two
+    declarations are withdrawn and the side becomes the question, never a dead end."""
+    data = _main(TRUE, view="top")
+    apply_dedicated_pads(data, _reading(view="bottom"), check_layout=FakeHoles(TRUE))
+    assert "_pin_map_conflict" not in data and "viste diverse" in data["notes"]
+    assert data["contacts_view"] not in ("top", "bottom")
 
 
 def test_a_reading_of_the_same_shape_at_another_scale_blocks():

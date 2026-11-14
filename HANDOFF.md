@@ -1,5 +1,859 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## IN CORSO 13/11/2026 sera — l'utente ha provato l'ESP32 dal vero: «ha fatto un disastro»; «fixi una cosa ne rompi 2»
+
+Analisi VERA ESP32 18:32 (deepseek-flash): (1) l'AI dichiara i lati lunghi «half_hole» (sbagliato: fori passanti);
+il controllo foto corregge in half_and_through anche con apertura sul bordo 0.00 mm (lato inferiore) e 0.13 mm su
+foro 0.72 (superiore) -> il controllo geometrico blocca con «resterebbero -0.81mm di scheda» (rimedio inutile);
+(2) pinout di 45 voci per 44 contatti con COMMENTI dell'AI nei nomi («GND (top_left_field_label_G)», «GND (labelled_G,
+between TX and the right hole)», «GPIO1 / IO1 (labelled "1")»), doppioni (5V, 5V (5V0)): accettato senza controllo;
+(3) i nomi corti non separano le alternative con «/» («GPIO4 (ADC1_3/RTC/TOUCH4)»). LEZIONE DI METODO (detta
+all'utente): i replay offline non vedono come l'AI risponde allo schema/istruzioni NUOVI; prima di dire «fatto» si
+fa un'analisi VERA (pochi centesimi) su ESP32, T7N, TEL e si controllano simbolo, footprint e verifica.
+APPROVATO («si»): A) nomi dei pin = nome di segnale, non frase/commento; doppioni o piu' voci che contatti ->
+ricorrezione pagata (una), poi segnalazione dei pin; B) separatori «,» e «/» dentro la parentesi; C) mezzo foro solo
+se l'apertura sul bordo e' apprezzabile rispetto al foro (zero/trascurabile -> passante); se la geometria rende
+impossibile un tipo di contatto, provare il tipo compatibile invece di bloccare. D) consiglio all'utente: modello piu'
+capace per la lettura documenti (non codice).
+FIX A/B/C FATTO (agente fixABC): photo_inventory.edge_opening_style (apertura sul bordo non piu' larga della finestra
+di misura MIN_HOLE_WALL_MM + 2*incertezza -> through_hole; 0.30 mm a 40.96 px/mm), _settle_impossible_double_contacts
+nell'estrattore, rimedio «foro passante» negli errori di parete del generatore; PinoutNameProblems + _PINOUT_NAME_CORRECTION
+(nomi-commento -> una ricorrezione pagata, poi finding document_name_remark WARN 2 in component_check); split_pin_name
+con «/» nella parentesi. Test nuovi tests/test_pin_name_remarks.py, tests/test_edge_opening_contact_style.py; 412+480+1447
+mirati verdi. Replay 18:32: nomi puliti dopo una ricorrezione pulita; altrimenti pin 22,24,41,45,48,49 segnalati;
+contatti passanti, nessun blocco. CORREZIONE CHIESTA dal coordinatore: l'agente aveva fatto scattare la ricorrezione
+pagata anche per «piu' voci che contatti» con nomi puliti, contro la decisione dell'utente (voci senza pad -> domanda
+GRATUITA): ristretta ai soli nomi-commento, contratti ripristinati. Falsi positivi dichiarati: «not connected»,
+«Chip enable (active high)», «VIN (5-12V, 1A max)». Poi: revisione di generalita' + ANALISI VERE (regola utente).
+ANALISI VERE (13/11 sera, MainWindow offscreen sul vero pulsante, copie in scratchpad/realrun, 0.1018 USD, 12 chiamate):
+T7N PASS (5 pad Ø1.3, niente C, STEP ok); ESP32 parziale (nomi sui contatti giusti, passanti, niente blocco; MA righe a
+±11.65 = 23.30 invece di 22.86 stampato; nomi = sigle serigrafate «19» invece di «GPIO19»; foro 0.5 dai valori di
+montaggio, troppo piccolo per il pettine 0.64; 29 avvisi «il nome X richiama il pad X»; 42 «ATTENZIONE 3D»; descrizione
+dice castellated/WROOM-1U); TEL FAIL (domanda a 2 opzioni senza consiglio, l'opzione 1 ha 9 e 10 nello stesso punto;
+la risposta salvata dell'utente non riconosciuta perche' la chiave contiene il digest della lettura principale che
+cambia; niente generato; verifica: «[Errno 2]» grezzo). Falso positivo in tutte: «Simbolo esportato» (verify_component
+ricostruisce il simbolo senza grafica/metadati) ora importanza 2 -> «DA RIVEDERE» sempre.
+REVISIONE fixABC: H1 edge_opening_style declassa a passante castellazioni vere a bassa risoluzione (confronta la
+larghezza mediana, non la corda sul bordo; un'apertura non risolta deve dare NESSUN verdetto); H2 guardia del contorno
+solo sui lati dichiarati passanti; H3 _settle_impossible_double_contacts usa il foro di riferimento 1.0 ipotizzato;
+M1 «/» spezza «I/O», «ON/OFF»; M2 nomi-commento: ricorrezione pagata su falsi positivi -> solo segnalazione.
+GIRO DI CORREZIONI (detto all'utente): estrazione (TEL: disposizioni impossibili escluse, unica valida consigliata,
+chiave della risposta sulla disposizione scelta; ESP32: row_spacing = centri dei contatti non fori di fissaggio,
+nome del pin = nome del pinout non sigla; H3; M2); foto (H1, H2, M3, L5); verifica/GUI (falso «Simbolo esportato»,
+messaggio con rimedio quando manca il footprint per domanda aperta, avvisi ripetuti in una riga, M1 «/» con elementi
+di un solo carattere, L2, foro/pad predefiniti del montaggio a pettine 1.0/1.7 come i pettini KiCad). Poi di nuovo
+le TRE analisi vere.
+FATTI (13/11 notte): estrazione round 7 (_coincident_pads esclude disposizioni impossibili, unica valida consigliata
+non adottata; _saved_layout_choice riconosce la risposta per digest della disposizione scelta; schema row_spacing =
+centri dei contatti, nome = nome del pinout, pin_names = sigle; _drop_board_outline_row_spacing; H3 solo con misure
+dichiarate, foro ipotizzato ridotto; nomi-commento solo segnalati, niente ricorrezione); GUI (symbol_text_without_metadata
+unica regola, applied_symbol passato alla verifica -> niente falso «Simbolo esportato»; footprint_missing in parole con
+rimedio; note ripetute in una riga; pettini gia' 1.7/1.0 di default — l'ESP32 dell'utente ha 1.3/0.5 SALVATI, detto
+all'utente; split_pin_name tiene «I/O», «ON/OFF»; L2); foto (edge_lands: apertura = segmento entro una parete dal
+bordo, corda sul bordo; settle_edge_holes con testimone del contorno; su foto reale ESP32: lato inferiore through_hole,
+superiore NESSUN verdetto -> resta il half_hole dichiarato dal modello se lo ridice). SCOPERTA: nel run vero di prima
+la distanza fra le file 23.30 era il ripiego del generatore (il modello non l'aveva data). Aperti: 2 test di
+test_edge_opening_contact_style da riallineare (agente estrazione), stringhe foto nel catalogo (agente GUI), foro
+chiuso letto 0.53 invece di 0.98 sulla foto reale (non diagnosticato).
+SECONDO GIRO DI ANALISI VERE (scratchpad/realrun2, 0.0818 USD; totale 0.1836): T7N PASS (verdetto «UTILIZZABILE CON
+RISERVE», falso «Simbolo esportato» sparito; MA nomi con commenti «Common_(C)», «NC_(closed_with_11_in_rest)» — ora solo
+segnalati); TEL FAIL (nessuna domanda: il modello ha dato una griglia 2x10; blocco «le due letture concordano sui pad
+ma non sulla posizione del corpo: 0.25 mm» causato da body_offset_x -3.25 NON stampato contro 3.0 stampato -> un
+valore non stampato blocca uno stampato, nessuna domanda; numero di parte letto 2412WI); ESP32 FAIL e REGRESSIONE
+(lato superiore: half_and_through misurato ma contorno non leggibile -> nessun verdetto -> resta half_hole del
+modello -> «Il contatto 44 non ha un foro passante per gli header», generazione bloccata; il modello non ha dato
+row_spacing e chiama 22.86 «fori di fissaggio»; pinout di 58 voci per 44 contatti, sfalsato, dopo una ricorrezione
+pagata «coerente» rovinata dal riconteggio). CONCLUSIONE ONESTA: la variabilita' delle risposte di deepseek-flash
+domina; ogni giro di difese sposta il problema. Proposto all'utente: provare un modello piu' capace per la lettura
+principale (analisi vere a pagamento) prima di altre difese; difese strutturali ancora da fare: un valore non stampato
+non blocca uno stampato (TEL); lato con foro chiuso misurato e contorno illeggibile (ESP32 superiore).
+BUDGET APPROVATO dall'utente (13/11 notte): fino a 5 EURO di analisi vere «basta che il tutto funzioni alla fine».
+Speso finora 0.1836 USD. Passo 1 in corso: analisi vere dei 3 progetti con la lettura principale su
+openai/gpt-5.6-sol (impostata solo nel DB profili della COPIA di prova, non in quello dell'utente), due volte ciascuno,
+codice fermo. Poi difese strutturali e analisi finali.
+ESITO (realrun3a/b, 0.998 USD, totale 1.18 USD): con gpt-5.6-sol letture GIUSTE e STABILI (ESP32 44 voci GPIO sui
+contatti giusti in entrambe; TEL 6 pad identici = quote.png; T7N 5 pad, nomi puliti). 2 PASS su 6 per difetti del
+PROGRAMMA: (1) TEL bloccato per costruzione: principale e lettura dedicata con lo stesso modello «valgono come una
+sola lettura», fori disegnati non controllabili -> blocco senza domanda; (2) T7N run A: la chiave della domanda
+contacts_view contiene i digest della disposizione, 0.2 mm di differenza -> risposta salvata ignorata, domanda di
+nuovo senza consiglio; (3) ESP32: lato superiore half_and_through misurato ma contorno illeggibile -> vale il tipo del
+modello (run A half_and_through ok, run B half_hole -> blocco); (4) ESP32 row_spacing mai dato -> stima 22.77
+asimmetrica. Costo per analisi con gpt-5.6-sol 0.09-0.37 USD (3-20 volte deepseek). CORREZIONI (dette all'utente,
+dentro «basta che funzioni»): (1) letture concordi dello stesso modello senza testimone -> domanda con la
+disposizione concordata CONSIGLIATA, non blocco; (2) risposte salvate riconosciute con tolleranza di lettura; (3) tipo
+di contatto incerto su un lato -> domanda con il ritaglio, consigliata «come l'altro lato» se le piazzole misurate sono
+uguali; (4) row_spacing mancante -> domanda con le quote stampate come opzioni. Poi analisi vere finali.
+FATTI: foto (photo_contact_style_questions, data["_photo_contact_styles"], HoleStyle.closed; sulla foto vera lato
+superiore -> opzioni through_hole/half_and_through, consigliata through_hole «come il lato inferiore»); estrazione
+round 8 (agreed=True -> domanda consigliata; contacts_view con firma di forma ~shape: tollerante; printed_row_quotes +
+domanda row_spacing; domanda contact_style con regola (a); 1510 mirati verdi). NON FATTO: tolleranza delle risposte
+salvate pad_layout (servono le posizioni nella risposta salvata; proposta dell'agente, da fare). In corso: GUI
+(campi row_spacing e contact_style, stringhe round8_strings.md), poi analisi vere finali (budget: speso 1.18 USD su 5 EUR).
+GUI round 8 FATTO (224 verdi, _apply_answered_castellated_choice, 29 voci i18n). ANALISI VERE FINALI in corso
+(realrun4a/b, gpt-5.6-sol sulla lettura principale solo nelle copie, risposte come un utente attento che guarda il
+documento: consigliata se c'e', altrimenti quella sostenuta dal documento).
+ESITO FINALE (realrun4a/b, 0.955 USD; totale 2.14 USD): 6 SU 6 PASS con gpt-5.6-sol sulla lettura principale.
+T7N 5 pad Ø1.3 identici A/B (domanda vista dall'alto/basso richiesta di nuovo perche' la risposta salvata e' nel
+formato vecchio); TEL generato: domanda di conferma CONSIGLIATA, 6 pad = quote.png (15.24/2.54/10.16, pin 1 a 3.0
+dal bordo), deriva 0.02 mm in B; ESP32 generato: righe ±11.43 (22.86; A da domanda row_spacing, B dato dal modello),
+passanti su entrambi i lati (superiore dalla domanda consigliata), 44 nomi sui contatti giusti; verdetti «UTILIZZABILE
+CON RISERVE» senza importanza 1/2; riga unica degli avvisi 3D confermata. Anomalie residue: nome del pin 8 TEL sbagliato
+(«Common»/«NC [Common]» invece di NC: lettura del modello); stile dei nomi variabile fra esecuzioni (T7N etichette vs
+funzioni; ESP32 «GPIO19» vs «GPIO19 / USB_D-»); all'apertura del progetto ESP32 note con i nomi VECCHI salvati;
+descrizione ESP32 parla ancora di castellated. DIPENDENZA: con deepseek-flash (configurazione attuale dell'utente)
+ESP32 e TEL fallivano -> serve la decisione dell'utente sul modello della lettura principale (costo 0.06-0.37 USD per
+analisi). Mancano prima del commit: revisione read-only dei giri 7-8 e suite completa (alla richiesta di commit).
+DECISO dall'utente («ok», 13/11 notte): lettura principale su gpt-5.6-sol. FATTO dal coordinatore con
+ProfileStore.save_step_models in data/analysis_profiles.sqlite3: system_prompt e system_prompt_single =
+openai/gpt-5.6-sol (prima ""= predefinito deepseek-flash); il modello predefinito resta deepseek-api/deepseek-flash per
+gli altri passi (foto/ritagli). NB: e' il DB dei profili versionato -> al commit diventa anche il default distribuito.
+PROVE DELL'UTENTE (22:2x): TEL e ESP32 GENERATI. Rele' NUOVO SRD-05VDC-SL-C BLOCCATO: «foro non quotato e nessun
+terminale», ma pinout.jpeg QUOTA i terminali (2-Ø0.6 bobina 1,5; 2-1x0.4 contatti 2,3; 1.1x0.3 comune 4): la lettura
+principale gpt-5.6-sol non li ha dichiarati (stamattina gpt-5.5 si'); la domanda ha offerto solo «lascia bloccato» e il
+messaggio dice «rileggere lo stesso disegno non lo troverebbe» (FALSO qui). APPROVATO («ok»): quando ai pad mancano foro
+E terminale, prima di bloccare UNA rilettura mirata a pagamento (solo quote dei terminali e dei fori, ~0.03 USD), poi
+fori ricavati come stima segnalata; blocco solo se anche la rilettura non trova nulla, e il messaggio non afferma che
+rileggere e' inutile. Agente estrazione; poi analisi vera sull'SRD (copia).
+FATTO round 9: causa vera = la lettura dedicata AVEVA trascritto i terminali, ma con lo stesso modello erano usati solo
+per confermare quelli della principale (assenti) e buttati -> ora _reading_leads usati come «letti una volta» (stima);
+_reread_missing_terminals (tool report_pad_terminals) solo se nessuna lettura li trova; ExtractedParams.terminal_reread;
+messaggio onesto in main_window (~18161). 1153 + 102 test mirati verdi. Analisi vera SRD in corso (realrun5a/b).
+ESITO realrun5 (0.20 USD, totale 2.34 USD): B PASS (12.0, terminali, NC/NO giusti); A FAIL: entrambe le letture
+gpt-5.6-sol danno file a 12.2 (stampato 12.0), verdetto fori solo «coincidenza» (unanchored) eppure opzione CONSIGLIATA;
+NC/NO scambiati. FATTO round 10: _witness_weakens(verdict) (rifiuti, conflitti, unanchored, page_skewed,
+no_match_unobservable -> indebolisce; nessun verdetto, conferma, too_few_circles/no_round_holes/not_a_drawing/no_image ->
+no); nel ramo «stesso modello concorde» recommended solo se nessun testimone indebolisce, altrimenti testo «Controllare
+il disegno prima di confermare: …» (pad piu' lontano, scarto massimo/tolleranza); seconda opzione da
+_hole_backed_layouts quando costruibile. LIMITE: lo scarto uniforme di una fila (caso A) NON viene ricostruito come
+opzione: servirebbe LayoutCheck con i centri dei cerchi accoppiati (drawing_holes.py) -> non autorizzato, solo avviso.
+3 stringhe in 4 lingue, test GUI test_round8_questions_gui. 906 + 62 test mirati verdi. Prova vera finale SRD
+(realrun6a/b) in corso. PROPOSTO, non autorizzato: avviso in verifica componente «NC/NO letti una volta sola».
+ESITO realrun6 (0.197 USD, totale ~2.54 USD): A e B PASS identici: lettura dedicata 12.0 consigliata (fori 0.09 mm),
+principale 12.2 non consigliata; vista dal basso; NO=2 NC=3 COM=4 bobina 1-5 giusti; footprint/simbolo/STEP generati;
+verifica «UTILIZZABILE CON RISERVE» (7 WARN importanza 3); registro senza errori. Il ramo round 10 (stesso modello
+concorde + coincidenza) NON si e' presentato: verificato solo dai test. DIFETTO APERTO: la domanda contacts_view
+(alto/basso) viene richiesta a ogni analisi nonostante due risposte «basso» salvate (chiave legata al digest della
+lettura precedente) -> da indagare, non ancora autorizzato.
+IN CORSO (utente 13/11 notte: «committa pusha mergia in main pusha poi crea MSI»): (1) revisione read-only dei giri 7-10
+(generality-auditor + adversarial-reviewer) in parallelo con (2) la suite completa a meta' su codice fermo; (3) se la
+revisione trova difetti alti: correzione, test mirati, suite rifatta; (4) pre-commit-check (segreti, DB profili incluso,
+commenti inglesi, handoff/CLAUDE.md riallineati); (5) commit su FOOTPRINT-ADVANCE, push, merge in main, push; (6) MSI con
+la skill build-installer (NIENTE release GitHub: non chiesta).
+REVISIONE DI GENERALITA' (nessun alto; suite fermata per correggere): IN CORREZIONE (agente estrazione) 1 _witness_weakens
+a regola invertita (anche low_resolution/search_limit indeboliscono); 3 ramo morto di _settle_impossible_double_contacts;
+4 fori della rilettura terminali «letti» -> stima letta una volta; 5 split_pin_name che collassa pin diversi sullo stesso
+nome (SPI (MOSI)/SPI (MISO)); 10 docstring superate. RINVIATI (da riferire all'utente, non autorizzati): 2 riduzione del
+foro stimato fino a 0.3 mm (un pin da header 0.64 non entra: serve un minimo da diagonale del pin o domanda); 6 lato
+foto «through_hole» adottato con un solo testimone; 7 raccomandazione «come l'altro lato» senza contorno su questo lato;
+8 due letture dello stesso modello ancora «consigliate» senza testimone (deciso dall'utente, fragile); 9
+_drop_board_outline_row_spacing solo sul contorno esatto; 11 STEP popolato sempre alzato.
+REVISIONE AVVERSARIALE GUI/packaging (nessun alto): IN CORREZIONE (agente GUI) 1 _document_sides non riallineato dopo
+modifica manuale dei lati (falsi avvisi etichette); 2 risposte contact_style/side_numbering senza invalidare lo STEP; 3
+motivo «footprint mancante» sbagliato per row_spacing/contact_style; 4 schema dell'anteprima bloccato da eeschema aperto
+blocca anche la scheda; 5 finestra immagine 3D sopravvive al cambio progetto; 6 _logged_pin_notes mai svuotato; 7
+tooltip «Solo nome principale» (anche «/»); 8 tooltip delle opzioni non escapati; 10 ACTION_LINK_STEP_MODEL morto.
+DA DIRE ALL'UTENTE / note di rilascio: con «solo nome principale» attivo di default i progetti esistenti con nomi
+«NOME (ALT…)» risultano «Simbolo non aggiornato» finche' non si riesporta il simbolo (atteso, nessuna perdita di dati).
+FATTE tutte le correzioni sopra (estrazione: 1161 test mirati verdi; GUI: 294 verdi, nuovo
+tests/test_precommit_review_fixes.py; contratti cambiati marcati «CONTRACT CHANGED 2026-11-13»). Nel catalogo restano due
+voci «Nessun footprint: …» inutilizzate (da togliere in un giro futuro). Suite completa rilanciata
+(.venv/claude-suite-1113o.log) e in parallelo analisi vera ESP32 + SRD (realrun7, non pytest).
+AGGIUNTO dall'utente: «poi pubblica anche MSI rimuovendo i pacchetti vecchi» -> dopo merge+push: release GitHub con
+publish-release.ps1 (gate: «Tests» verde su GitHub per l'HEAD) e rimozione dei pacchetti vecchi. MAI toccare la release
+«models» (pesi). Prima di cancellare: mostrare all'utente l'elenco concreto delle release/asset e avere la conferma.
+ESITO realrun7 (0.53 USD, totale ~3.07 USD): SRD PASS identico a realrun6 (vista «bottom» dichiarata dalla lettura,
+nessuna domanda). ESP32 FAIL: il modello (gpt-5.6-sol, entrambe le letture principali) ha etichettato al contrario le
+quote stampate (21.8 = contact_rows, 22.86 = mounting_holes; in Dimensioni.png e' il contrario) -> row_spacing 21.8
+«read», nessuna domanda, file a +-10.90 invece di +-11.43 (realrun4 A/B erano giusti). NON e' una regressione delle
+correzioni di oggi (nessuna tocca la quota fra le file) ma un difetto di classe: una distanza fra le file «letta» una
+volta non ha testimoni (foto calibrata con i fori visibili, contorno/fori disegnati) e la verifica componente non la
+confronta con le quote stampate. Nomi ESP32 corretti, nessuna alternativa prodotta (split non esercitato). Chiesto
+all'utente se committare ora o correggere prima.
+DECISO dall'utente: «Correggi prima». Suite fermata. PIANO (round 11): una distanza fra le file letta solo
+dall'etichetta che il modello da' alle quote (una lettura, anche due risposte dello stesso modello) non e' una misura
+confermata: (a) se la foto calibrata misura le due file di contatti (fori/piazzole visibili) la si confronta con la
+lettura, entro l'incertezza della calibrazione; (b) se altre quote stampate sono fisicamente possibili come distanza fra
+le file e nessun testimone conferma la lettura -> domanda row_spacing esistente fra le quote stampate, consigliata solo
+la quota confermata da un testimone; (c) se la foto conferma la lettura, nessuna domanda. Poi test pos/neg, prova vera
+ESP32 (+ SRD/T7N/TEL se toccati), suite, commit/merge/MSI/pubblicazione (lista delle release vecchie all'utente prima
+di cancellare).
+FATTO round 11 (921 test mirati verdi): NESSUN testimone della distanza fra le file esiste oggi (edge_lands misura il
+segmento del foro chiuso ma esporta solo stile/conteggi/drill/chord, niente centri ne' incertezza; drawing_holes gira
+solo sui pad di parti singole) -> (b) non implementabile ora. Implementato (c): _ask_row_spacing spostata in
+_params_from_tool_arguments DOPO le domande foto sul tipo di contatto (prima girava nella validazione, prima della foto,
+e con «half_hole» dichiarato non chiedeva); domanda quando un modulo castellated ha fori passanti su due lati opposti e
+la distanza manca/derivata/stimata oppure e' «read» ma un'altra quota stampata e' possibile (< ingombro della scheda
+fra le file): letta per prima, NON consigliata. Chiave risposta salvata «row_spacing:» + quote ordinate + «estimate»
+(nessun digest). Replay offline realrun7: domanda 21.80 / 22.86 / stima, nessuna consigliata, 25.40 escluso.
+PROPOSTA per dopo (non autorizzata): testimone foto = edge_lands esporta la profondita' mediana del centro del foro
+chiuso per lato con incertezza -> la quota confermata dalla foto diventa consigliata.
+In corso: stringhe (agente GUI), revisione di generalita' del round 11, poi prova vera ESP32.
+Stringhe fatte e verificate (chiavi = testo del codice). Revisione round 11: nessun alto, IN CORREZIONE M1 (la funzione
+gira due volte, prima e dopo la foto: domanda vecchia che sopravvive, nota doppia), M2 (stile foto «settled» unito a
+quello dichiarato invece di sostituirlo), M3 (quote «possibili» con limiti piu' larghi del generatore: anello/2 e
+tolleranza di contorno), M4 (risposta salvata per valore scelto, controllata prima dell'uscita «unica quota»), L2 lati
+normalizzati.
+FATTE M1-M4 e L2 (902 test mirati verdi; _row_spacing_photo_styles, _row_spacing_possible, _smallest_row_ring,
+_saved_row_spacing, _row_spacing_settled). Suite completa lanciata (.venv/claude-suite-1113p.log) e in parallelo prova
+vera realrun8 su ESP32 (due volte sulla stessa copia per la risposta salvata), T7N, TEL.
+ESITO realrun8 (0.75 USD, totale ~3.82 USD): TUTTI PASS. ESP32: domanda row_spacing 21.80/22.86/stima senza consigliata
+(etichette del modello di nuovo scambiate), scelto 22.86 -> file +-11.43; seconda analisi sulla stessa copia: domanda
+NON ripetuta, 22.86 dalla risposta salvata (chiave row_spacing:21.80|22.86|estimate). T7N 5 pad giusti (A1/A2/11/12/14),
+TEL 6 pad giusti dalla risposta salvata. Verifiche «UTILIZZABILE CON RISERVE», registri senza errori. Anomalie aperte:
+contacts_view T7N chiesta a ogni analisi (chiave legata al digest); ESP32 4 nomi doppi «USB_D- GPIO19» variabili fra
+letture; TEL pin 8 «NC [Common]»; le opzioni row_spacing mostrano le etichette (sbagliate) del modello («22.86 fra fori
+di montaggio, secondo l'analisi») -> possibile fuorviare.
+PRE-COMMIT: segreti 0 (DB e diff), solo percorsi previsti, commenti inglesi. Versione prossima 1.0.9 (publish-release.ps1,
+la release la costruisce release.yml). DECISO dall'utente: dopo la pubblicazione della v1.0.9 CANCELLARE le release
+KiCadGen v1.0.8 e v1.0.7 (con i loro MSI); la release «models» resta; i tag v* restano (ruleset).
+
+## NOTTE 13-14/11/2026 — giro notturno (utente: «puoi usare 5 euro di credito LLM rifai dei test completi per ogni
+progetto e correggi eventuali problemi, magari adatta i prompt … non fare ne' commit ne' push solo correzioni nel branch»)
+
+INTERPRETAZIONE: commit/push/merge/pubblicazione v1.0.9 SOSPESI (l'ultimo messaggio dice di non committare ne'
+pushare): si riprendono solo con un nuovo OK al mattino. Budget notturno 5 EUR (~5.4 USD) di chiamate AI reali, solo su
+copie in scratchpad. Piano: (1) suite completa in corso (.venv/claude-suite-1113p.log) come base; (2) analisi vere
+complete su ogni progetto dell'utente; (3) correzioni generali delle anomalie (aperte: contacts_view chiesta a ogni
+analisi; etichette del modello sbagliate mostrate nelle opzioni row_spacing; nomi doppi ESP32 «USB_D- GPIO19»; TEL pin 8
+«NC [Common]»; lettura principale SRD 12.2) anche adattando i prompt del profilo; (4) per ogni correzione test mirati,
+revisione read-only, nuova prova vera; (5) resoconto al mattino qui e in chat.
+Progetti in generated/: ESP32-S3-DEVKIT-NXRX, HLK-5M05B, RS485, SRD-05VDC-SL-C, T7NS5D4-12, TEL 87-2411WI, VE12H-K.
+Suite 1113p FERMATA prima della fine della prima meta' (nessun conteggio): le correzioni notturne la invaliderebbero;
+la suite completa si rifa' a codice fermo a fine notte. IN CORSO: base reale night1-<nome> su tutti e 7 (<= 2 USD);
+agente estrazione su A) contacts_view non riusata (diagnosi su realrun8-t7n) e B) opzioni row_spacing senza le
+etichette non verificate del modello.
+BASE night1 (0.96 USD, notte totale ~0.96): 6/7 generati e corretti (T7N, TEL con pin 8 NC ora giusto, SRD, HLK
+esattamente come il disegno, ESP32 geometria giusta dopo la domanda row_spacing, RS485 generato). VE12H-K VICOLO CIECO:
+principale con X sbagliata (pin 4 a x=0), dedicata con X giusta ma Y scambiata (5.08/7.62) -> «Nessuna domanda puo'
+chiudere il caso», nessun file; domanda contacts_view fatta prima pur senza layout. Difetti: (1) VE12H vicolo cieco;
+(2) RS485 «half_and_through» dichiarato senza fori interni visti in foto -> ovali forati tutti stimati + F.Paste su THT;
+(3) nomi ESP32 composti «USB_D-/GPIO19» senza alternative; (4) etichette sbagliate nelle opzioni row_spacing (in corso
+B); (5) HLK «V0» con zero invece di «VO» (OCR del modello); (6) contacts_view ripetuta (in corso A); (7) riconteggio
+ESP32 0.17 USD a ogni analisi.
+ASSEGNATI: agente estrazione A, B, poi C = VE12H (ricombinazione per asse confermata dai fori disegnati -> opzione
+consigliata; altrimenti una rilettura mirata dell'asse che non torna; mai «nessuna domanda»; contacts_view solo dopo il
+layout). Agente foto (nuovo) RS485 su photo_inventory/edge_lands/castellated_module. Agente nomi (nuovo) su symbol.py /
+prompt_catalog. datasheet_extractor.py solo all'agente estrazione.
+A DIAGNOSTICATA: causa vera in kicadgen/gui/workers.py ExtractWorker: main_window imposta .answers ma run() non li
+passa a extract() -> l'analisi completa riceve sempre answers=None; funzionano solo le chiavi ESATTE riapplicate dalla
+finestra (~11544), mai il confronto tollerante (~shape, row_spacing per valore). Replay offline: con l'inoltro la
+domanda T7N non compare. Correzione assegnata all'agente GUI (+ controllo degli altri worker). B FATTA: opzioni
+row_spacing senza le etichette del modello («{value} mm (quota stampata)»), stringhe all'agente GUI.
+A FATTA (agente GUI): ExtractWorker(answers=...) con copia presa all'avvio, inoltrata solo se extract la accetta; test
+in tests/test_real_run_fixes.py; gli altri worker non perdevano risposte. Catalogo: +«quota stampata», -8 voci
+inutilizzate. ATTENZIONE per le prove vere: ora il confronto tollerante delle risposte salvate gira davvero
+nell'analisi completa -> verificare che non riapplichi risposte vecchie a letture diverse (pad_layout, side_numbering).
+NOMI FATTI (agente nomi, 433 test): causa = nomi senza parentesi («USB_D-/GPIO19») mai divisi per contratto;
+_slash_joined_names (euristica dichiarata: parti identificatori, niente parti di un carattere -> I/O, R/W, N/C interi;
+non tutte parole di stato -> ON/OFF intero; spazio e «_» mai divisi); primario = primo nome scritto; guardia collisioni
+per primario + alternative. Replay offline: night1 ESP32 8 alternative, realrun3a 10. LIMITE: il primario dipende
+dall'ordine scritto dal modello -> prompt (schema pinout.items.name ~755) assegnato all'agente estrazione come D dopo
+C. Agente GUI: tooltip «Solo nome principale» e etichette dei pad del footprint con la stessa guardia del simbolo.
+Cambio di comportamento da dire all'utente: nomi salvati con «/» ora mostrano il primo nome + alternative KiCad.
+GUI FATTO: tooltip nuovo; _preview_pin_labels() usa symbol_inputs (stessa guardia del simbolo).
+RS485 FATTO (agente foto, 442 test): la premessa era sbagliata — in foto ogni contatto HA mezzo foro + foro interno,
+quindi «half_and_through» era giusto. Difetto vero: edge_lands.measure_edge_holes rifaceva la ricerca cieca delle
+piazzole (minimo 5) e scartava file di 3/4 gia' confermate dal contorno -> nessuna lettura, stile dichiarato passato
+senza testimone. Ora: piazzole lette ai centri delle tacche confermate (confirmed_centres_mm, land_inward_mm),
+hole_agreement_floor (cieca 5; localizzata = tutta la fila, min 2), foro chiuso alto almeno una parete, pareggio fra
+classi di colore = nessun verdetto. Replay offline: left 3/3 e right 4/4 half_and_through misurati. Cambio: file lunghe
+confermate dal contorno passano dal percorso localizzato (piu' conservativo) -> VERIFICARE ESP32 nella prova vera.
+F.Paste sui pad THT: decisione dell'utente del 24/09 (pin-in-paste), diversa dalla libreria KiCad (Pico: niente pasta
+sui THT, pad pasta separati) -> da riproporre all'utente, NON cambiato.
+REVISIONE foto+nomi (nessun alto). DECISIONI del coordinatore: foto — su file corte (< MIN_ROW_LANDS) una lettura che
+contraddice lo stile dichiarato non si assesta da sola ma va alla domanda contact_style consigliando cio' che vede la
+foto (fori riempiti/coperti sembrano assenti); pareggi anche quasi-pareggi fra classi = astensione; test fila lunga;
+floor dal conteggio dichiarato. Nomi — «/» fuori dalle parentheses NON si divide piu' (puo' essere un segnale unico:
+DE/RE, RX/TX half-duplex, D+/D-): le alternative arrivano dalle parentesi che il prompt (D) chiede di scrivere
+«PRIMARIO (ALT1, ALT2)», con PRIMARIO = etichetta stampata (anche se contiene «/»); guardia collisioni sul nome
+normalizzato; EN/DIS tolte dalle parole di stato.
+FATTO nomi (437 test): «/» in testa resta intero, alternative solo da «PRIMARIO (lista)»; guardia su nome normalizzato;
+tooltip tornato alla versione «solo parentesi». Replay: ESP32 vecchie letture 0 alternative (attese col prompt D).
+FATTO foto (496 test): short_row_contradiction -> domanda (consigliato lo stile della foto, campo why);
+choose_land_class si astiene se un'altra classe sopra la soglia dice altro, salvo la classe che RACCHIUDE (piu' larga di
+2 pareti per lato = il rame); tolta la regola «foro alto almeno una parete» (spezzava fori veri su ESP32); L2 centro
+fuori bordo = nessun verdetto. Replay offline: RS485 confermato 3/3 e 4/4 senza domanda; ESP32 identico alla prova.
+Coda agente estrazione: C (VE12H), D (prompt nomi), E (testo della domanda contact_style con «why»).
+FATTI C, D, E. C: _axis_recombinations (asse X da una lettura, Y dall'altra, solo assi con catene valide), offerta
+come opzione consigliata solo se i fori disegnati la confermano, mai adottata da sola; read_axis_chain = una rilettura
+a pagamento dell'asse che non torna (al massimo una per analisi) solo se nessuna ricombinazione; poi _ask_last_resort
+(tutte le letture con i loro errori + «Lascia bloccato»), mai piu' «nessuna domanda». contacts_view rimandata a dopo la
+scelta del layout. Replay VE12H: UNA domanda, consigliata la ricombinazione = disegno esatto (scarto 0.21, tol 0.40).
+D: schema pinout.items.name «PRIMARIO (ALT1, ALT2)», etichetta stampata con «/» tenuta intera; varianti di
+configurazione nella stessa lista. E: testo con «why». Contratti cambiati marcati. Restano 3 test GUI rossi
+(test_footprint_draft, test_review_pass2_alignment, test_review_round3_gui) -> agente GUI con 13 stringhe, domanda
+del lato rimandata e risposta «Lascia bloccato» nella finestra.
+REVISIONE C/D/E (nessun alto): IN CORREZIONE (estrazione) M1 niente ricombinazione con viste dichiarate diverse; M2
+solo una ricombinazione CONFERMATA tiene le letture smentite, «Lascia bloccato» sempre quando nulla e' consigliato; M3
+la rilettura dell'asse non deve ricevere il valore del corpo (renderebbe la rilettura non indipendente); M4 lato
+rimandato solo se esiste la domanda di layout, altrimenti resta in sospeso/bloccante; M5 ricombinazione consigliata solo
+se l'ordine dei pad per asse coincide fra le letture + clausola «numerazione non verificata»; L1 pad coincidenti
+esclusi anche nell'ultima domanda. (foto) L4: su file corte vince il lato gemello assestato dal contorno.
+FATTO foto L4 (recommended_from: like_edge > photo > None). FATTO GUI: _ask_opened_questions (domanda del lato aperta da
+una risposta di layout, chiesta subito, anche nel giro di domande dell'analisi); «Lascia bloccato» = blocco duro
+(_pads_kept_blocked salvato nel progetto, tolto da nuova analisi o da pad SPOSTATI nella bozza del footprint — scelta
+dell'agente da confermare con l'utente: un solo cambio di foro/forma non toglie il blocco); 13+1 stringhe. TROVATO e
+corretto: footprint_checks._finding passava pads in posizione e, dopo i campi fix/fix_value aggiunti a
+klc_checks.Finding in questo giro, ogni controllo geometrico perdeva i pad (era la causa dei 3 test GUI rossi).
+FATTE M1-M5, L1, L2 ed E (1663 + 103 test). Conseguenza M5: sul VE12H la ricombinazione NON e' piu' consigliata
+(lungo X le due letture ordinano i pad in modo diverso: e' proprio l'errore della principale) -> domanda con 3
+opzioni: ricombinazione (fori coincidono 0.21/0.40, clausola «i fori danno le posizioni, non i numeri»), principale
+(smentita), «Lascia bloccato». Separazione FRAGILE da dire all'utente: nel caso per cui e' nata la ricombinazione
+spesso l'ordine differisce, quindi l'utente conferma senza consiglio (nessun vicolo cieco). M3: rilettura dell'asse
+senza numeri. M4: lato rimandato solo con domanda di layout, _candidate_view_outcome per candidato.
+FATTO GUI: le risposte salvate (non contraddette, non di domande aperte) vanno a apply_answers insieme alla nuova
+risposta (_saved_answers_for_deferred); dopo «Lascia bloccato» la domanda del lato resta in sospeso senza essere
+chiesta. IN CORSO: prova vera night2 su tutti e 7 + seconda analisi T7N/ESP32 (risposte salvate), <= 2.5 USD.
+REVISIONE AVVERSARIALE GUI notte: DUE ALTI. (1) «Torna indietro» sulla domanda del lato aperta dopo la scelta del layout
+-> il footprint viene scritto lo stesso con vista sconosciuta (=dall'alto: specchiato se il disegno e' dal basso) e
+contacts_view non e' un campo che blocca il footprint; il test lo codifica. (2) una rilettura parziale (altezza del
+corpo) ricalcola _pads_kept_blocked da answered_questions dove «blocked» non c'e' -> il blocco «Lascia bloccato» cade
+e i pad provvisori vengono scritti; idem _side_numbering_key/_pin_numbers_printed/_convention_pinout azzerati.
+MEDI: (3) domanda contact_style/row_spacing senza candidates non risolvibile da «Rigenera footprint»; (4) «Dimentica le
+risposte» durante un'analisi: la copia nel worker le riapplica; (5) spostare un solo pad toglie il blocco a tutti. BASSI:
+bozza offerta dopo il rifiuto, gate KiCad e verifica ignorano il blocco, etichetta/tooltip su pin duplicati, risposte
+figlie salvate prima di validare il layout. Da assegnare all'agente GUI DOPO la fine di night2 (non toccare
+main_window mentre il driver reale lo usa).
+ESITO night2 (1.72 USD, notte ~2.68 USD): T7N giusto e contacts_view NON piu' richiesta (risposta salvata riusata); SRD
+e HLK giusti; VE12H GENERATO e giusto (fori confermano la dedicata, vista bottom dalla risposta salvata); ESP32 giusto
+(opzioni «quota stampata», 114 alternative nel simbolo; seconda analisi riusa 22.86). DIFETTI: (1) RS485 la domanda
+row_spacing offre 15.20 = LARGHEZZA della scheda (altro asse) -> scegliendola pad di 16 mm sovrapposti e la verifica
+dice «UTILIZZABILE CON RISERVE» (nessun controllo geometrico del footprint nella verifica); con «Non so» footprint
+plausibile; (2) TEL riuso SBAGLIATO: risposta pad_layout salvata per ruolo «dedicated» applicata a una nuova lettura
+dedicata con una quota letta male (1.27 invece di 1.77) -> file spostate di 0.5 mm, nessuna domanda; (3) RS485 nessuna
+traccia della correzione foto nel percorso reale; (4) TEL nome «+Vin (+Vin (Vcc))»; (5) HLK «V0»; (6) ESP32 primari
+USB_D-/U0RXD invece dei GPIO (ordine scritto dal modello); (7) riconteggio ESP32 0.30-0.38 USD.
+ASSEGNATI: GUI = alti/medi/bassi della revisione + controllo geometrico (sovrapposizioni) nella verifica componente;
+estrazione = F1 quote uguali a una dimensione del contorno escluse + niente domanda se non resta nulla, F2 riuso del
+layout salvato solo se le posizioni coincidono (posizioni salvate nella risposta); foto = perche' il percorso reale non
+misura i fori (cache?); nomi = parentesi annidate e alternativa uguale al primario.
+FATTI: foto — nessun difetto, il percorso reale HA misurato (log righe 58-59), ma la conferma non lasciava traccia ->
+F3 nota «confermato dalla foto». Nomi — «+Vin (+Vin (Vcc))» -> +Vin + Vcc, «GND (GND)» -> GND. Estrazione — F1
+_equals_board_outline: una quota uguale a lunghezza o larghezza della scheda non e' mai la distanza fra le file (lo
+schema non da' l'asse delle quote: dichiarato), se non resta nulla si stima senza domanda; F2 causa vera: il digest del
+layout tiene solo le distanze RELATIVE fra pad, una quota di bordo letta male sposta tutto insieme e il digest non
+cambia -> ogni valore di pad_layout porta «~at<x>,<y>» (posizione del primo pad rispetto al corpo) e una risposta
+salvata vale solo se la posizione coincide entro la tolleranza; le risposte vecchie senza posizione si richiedono una
+volta (TEL compreso). Replay: TEL ora chiede, RS485 non chiede piu' (stima).
+REVISIONE F1-F3 (nessun alto): IN CORREZIONE D1 (scarto della quota-contorno giudicato sullo stile dichiarato, prima
+della foto), D2 (quota uguale alla dimensione della scheda NON scartata in silenzio: resta opzione non consigliata con
+l'etichetta «uguale alla larghezza/lunghezza» e la distanza dal bordo che comporta), S2 (identita' del layout salvato
+include vista e orientamento del corpo), S3 (tolleranza in pollici), S4 (stessa identita' tollerante per le
+contraddizioni). DA DIRE ALL'UTENTE: le risposte salvate sulla disposizione dei pad verranno richieste una volta.
+FATTO GUI (tutti i punti della revisione notturna): H1 contacts_view e' un campo che blocca il footprint, «Torna
+indietro» sul lato = niente scrittura; L9 package costruito prima delle domande figlie, rollback; H2
+_settle_pad_state_from solo su analisi intera o rilettura dei pad; M3 domande contact_style/row_spacing/contacts_view
+risolvibili senza candidates; M4 «Dimentica le risposte» disabilitato durante il lavoro; M5 pad spostati con blocco
+attivo -> «Le posizioni di tutti i pad sono ora verificate sul disegno?»; L6/L7 (codice KiCad pads_kept_blocked, la
+verifica conosce il blocco); L8. NUOVO: component_check.footprint_geometry_checks -> pad sovrapposti = ERRORE
+importanza 1 (NON USARE); solo sovrapposizione/contatto, nessuna soglia di distanza (nessun valore pubblicato
+collegato). Comportamento da confermare: dopo «Lascia bloccato» la domanda del lato dei pad provvisori viene SCARTATA
+(tenuta in sospeso bloccherebbe il footprint e risposta dopo ricostruirebbe i pad provvisori sopra quelli a mano).
+FATTI D1, D2, S1-S4 (3495 + 109 test): scarto dopo la foto; quota uguale alla dimensione della scheda chiesta come
+opzione non consigliata con la distanza dal bordo («15.20 mm (… larghezza della scheda: fori a 13.80 mm dal bordo)»),
+valore «<mm>~outline»; identita' del layout salvato = digest + «~at<x>,<y>,<tol>/<vista>/<orientamento>».
+Replay: TEL chiede (una consigliata per la regola «letture concordi»), RS485 chiede 15.20(13.80 dal bordo)/Non so.
+Stringhe fatte (76 test i18n/doc verdi). IN CORSO: suite completa (.venv/claude-suite-1114a.log, basetemp
+.venv/claude-test-night-1114a) e in parallelo prova vera finale night3 su tutti e 7 (<= 2 USD).
+ESITO night3 (1.21 USD, notte ~3.89 USD): TUTTI E 7 GENERATI, controllo geometrico OK ovunque, nessun riuso sbagliato.
+T7N/HLK/VE12H giusti; TEL giusto (domanda di conferma richiesta come previsto, file centrate, «+Vin» + Vcc); ESP32
+giusto (22.86, primari GPIO19/20/44/43 con 115 alternative); RS485 domanda «15.20 (… fori a 13.80 mm dal bordo)»/Non so
+e «confermato dalla foto» su entrambi i lati. DIFETTO: SRD NC/NO SCAMBIATI (2=NC 3=NO; il datasheet ha 3=NC) — varia
+fra le esecuzioni, letto una volta dal simbolo, nessun testimone, la verifica non lo vede. Agente estrazione:
+progetto (solo lettura finche' gira la suite) di prompt + secondo testimone delle funzioni nella lettura dedicata +
+domanda se discordi. Altri aperti: RS485 diametri dei fori misurati in foto non usati (per scelta: canna != foro);
+TEL pin 8 «NC (Common)» (variante messa fra parentesi dal modello); HLK «V0»; riconteggio ESP32 ~0.35 USD.
+PROGETTO NC/NO (agente estrazione, approvato dal coordinatore, da applicare a suite finita): causa = funzioni solo
+dalla risposta principale (pinout[].function), la lettura dedicata non ha funzioni. (1) schema/prompt: NC = contatto
+che il braccio TOCCA nel disegno a riposo, NO = disegnato staccato, COM = perno; campo osservazione `symbol_contact`
+(arm_pivot/arm_touches/drawn_apart) da cui il programma ricava la funzione (stile questionario); (2) la lettura dei pad
+(stessa chiamata) trascrive `terminal_functions`; _confront_contact_functions: concordi -> nota (stesso modello = non
+indipendenti), discordi o autocontraddizione -> domanda «contact_nc» col disegno, nessuna consigliata; senza seconda
+lettura -> nota «letta una sola volta»; ExtractedParams.contact_function_witness per la verifica. Prompt nuovi -> digest
+vecchi in SUPERSEDED (DB profili da committare).
+SUITE COMPLETA 1114a (codice fermo, notte): meta' A 8962 passed / 9 skipped / 19 subtests / 1 failed, meta' B 5736
+passed / 4 skipped. Il rosso (test_footprint_back_anchor_zone_gui::test_the_component_check_is_refused_while_the_
+footprint_file_is_stale) era uno stub del dialogo senza `actions` (stesso caso gia' corretto in altri due file):
+stub aggiornato (CONTRACT CHANGED), file rieseguito da solo 50 passed. Totale 14698 passed, 13 skipped, 19 subtests.
+Poi: applicazione del progetto NC/NO (la suite andra' rifatta a fine lavoro).
+FATTO NC/NO estrazione (5513 test): schema function con regola del disegno, campo `symbol_contact`, pad call con
+`terminal_functions`, _confront_contact_functions, domanda contact_nc, ExtractedParams.contact_function_witness
+(single/same_model/two_models/asked/user); digest vecchi in SUPERSEDED; test_review_round7 digest aggiornati. Replay
+night2/night3 SRD: witness «single» (i log vecchi non hanno i campi nuovi) -> nota «lette una sola volta». GUI: domanda
+contact_nc (simbolo, non footprint), verifica (single -> importanza 2, same_model -> 3, asked -> 2), stringhe, DB.
+REVISIONE NC/NO: TRE ALTI (la domanda chiedeva solo «quale pin e' NC» e riscriveva tutti gli altri in «no»: comune
+confuso -> diventa NO; DPDT senza etichette = un solo gruppo; SPST-NO senza risposta giusta). RIPROGETTO in corso:
+opzioni = assegnazioni COMPLETE per lettura + «Nessuna delle due: correggo a mano nella tabella Pinout»; raggruppamento
+per etichetta o per `contact_common` (pin del perno); controllo strutturale per gruppo; risposta salvata = assegnazione
+scelta, applicata per prima; regola «braccio che tocca = NC» dichiarata euristica (presuppone disegno a riposo);
+motivo della seconda lettura mancante.
+FATTO riprogetto NC/NO (24 test nuovi, 5524 non-GUI): opzioni «<pin>=<ruolo>,…» o «none», gruppi contact=/pivot=/all,
+testimone per gruppo (two_models|user|same_model|single|manual|asked, globale = il piu' debole), risposta salvata
+applicata per prima e richiesta se le letture la smentiscono, motivi della seconda lettura mancante. GUI: domanda
+contact_nc (simbolo), «Rispondi alla domanda» nella verifica, testimone salvato nel progetto; stringhe finali in corso.
+LIMITE: i log vecchi dell'SRD non hanno i campi nuovi -> lo scambio NC/NO si verifica solo con una prova vera.
+FATTO GUI NC/NO finale: testimone «manual» = WARN 2 con «Apri la tabella Pinout» (ACTION_EDIT_PINOUT); scelta
+dell'agente DA CONFERMARE con l'utente: una modifica della tabella Pinout da li' porta il testimone a «user» (OK),
+nessuna modifica = resta «manual». 7 stringhe vecchie tolte, 20+4 aggiunte. IN CORSO: suite 1114b
+(.venv/claude-suite-1114b.log) e prova vera night4 (SRD x2, T7N, VE12H, TEL, HLK; <= 0.9 USD).
+ESITO night4 (0.80 USD, notte ~4.69 USD): la lettura dei pad restituisce terminal_functions ovunque; SRD x2: domanda
+contact_nc con assegnazioni complete, scelta quella del datasheet; T7N/VE12H letture concordi -> same_model WARN 3;
+pad invariati per SRD/T7N/VE12H/TEL. DIFETTI: (G1) SRD la risposta cambia le FUNZIONI ma non i NOMI (pin 2 «NC» con
+funzione NO nel .kicad_sym) e la verifica dice OK; (G2) HLK foro 0.8 = terminale 0.8 («Ø0.8*4» archiviato come foro),
+solo un avviso nel registro; (3) opzione TEL senza la posizione sul corpo. Suite 1114b FERMATA per correggere G1/G2.
+Assegnati: estrazione G1 (nomi-parola-di-ruolo riscritti col nuovo ruolo) e G2 (domanda «foro o terminale?»);
+GUI: verifica nome-vs-funzione e terminale-che-non-entra-nel-foro come ERRORI importanza 1.
+FATTI G1 (nomi che sono solo la parola del ruolo seguono la risposta nel loro stile; pin_role_conflicts), G2
+(_ask_hole_or_terminal: domanda «Ø… e' il foro o il terminale?» sul campo pad_layout, nessuna consigliata, blocca il
+footprint finche' non risposta), frase «CIRCUIT SYMBOL» del prompt dei pad ristretta ai ruoli (digest nuovo
+7c6ac6f7…, vecchio in SUPERSEDED). GUI: pin_role_checks e lead_hole_checks nella verifica (ERRORE importanza 1).
+Replay: SRD nomi e funzioni coerenti; HLK domanda foro/terminale.
+REVISIONE G1/G2: UN ALTO — la domanda «foro o terminale?» scatta su ogni foro che non lascia passare il terminale,
+anche con valori DIVERSI (e il «terminale» deriva il foro dal terminale letto, non dalla Ø nominata); press-fit
+(pin piu' grandi del foro per progetto) non gestito. MEDI: due vocabolari dei ruoli (verifica accetta «NO1», estrazione
+no -> ERRORE «NON USARE» dopo una risposta corretta su DPDT numerati); dopo «foro» la verifica da' un ERRORE
+irrisolvibile; ramo del terminale a livello di parte non passa dalla domanda. Suite 1114c FERMATA; correzioni
+dopo la fine della prova vera night5 in corso.
+ESITO night5 (0.23 USD, notte ~4.92 USD — budget quasi esaurito): HLK PASS (domanda foro/terminale -> «terminale»,
+foro 1.05, terminali entrano); SRD nomi e funzioni GIUSTI e coerenti nel .kicad_sym, ma NUOVO DIFETTO: posizioni dalla
+lettura dedicata e terminali per pad dalla risposta principale (sbagliati) -> pad 2 lama 1x0.4 in foro 0.85; la verifica
+NON ha mostrato nessuna riga terminale-nel-foro (controllo non collegato o dati in altra forma). Nota vecchia «non passa
+nel foro» rimasta dopo la risposta. Assegnati: estrazione = progetto H1/M1-M3/L1/L2 + D-a (terminali dalla lettura
+adottata) + D-b (note superate dalla risposta); GUI = diagnosi della verifica senza riga, helper unico dei ruoli,
+press_fit, terminale contraddetto = WARN 2.
+FATTI (5784 test non-GUI): _same_callout (domanda solo se foro e terminale sono la stessa quota entro l'arrotondamento),
+lead_fit «press_fit» nello schema, «contradicted» come provenienza del terminale (tht_estimates.LEAD_SOURCE_WORDS),
+ramo a livello di parte, gruppi per (foro, terminale), kicadgen/core/contact_roles.py (vocabolario unico NC/NO/COM +
+NA/NF + forme lunghe + numero di contatto), D-a terminali dalla lettura il cui layout e' adottato (nota con i pad
+scambiati), D-b note di conflitto rimosse quando una risposta le risolve («supersedes»). Replay: SRD pad 1,5 tondi
+foro 0.85 e 2,3 lame foro 1.35 (giusto); HLK risposta salvata applicata, nessuna nota vecchia. GUI: verifica diagnosticata
+(il controllo girava, ma con i terminali sbagliati i conti tornavano) + riga OK; in corso helper unico, lead_fit in
+PinSpec, stringhe.
+FATTI GUI: pin_role_checks su core/contact_roles (vocabolario unico), PinSpec.lead_fit + LEAD_FITS (Pad.lead_fit solo
+metadato, mai scritto nel file), check_hole_vs_lead e lead_hole_checks saltano press_fit, stringhe, DB.
+ESITO night6 SRD (0.249 USD, OLTRE il tetto di 0.16 che avevo dato; notte ~5.17 USD su ~5.4 = 5 EUR; NESSUN'ALTRA
+CHIAMATA): footprint e simbolo giusti (pad 1,5 tondi foro 0.85; 2,3 lame foro 1.35; 4 lama 1.1x0.3 foro 1.4; tutti
+entrano; nomi = funzioni = datasheet), verifica «UTILIZZABILE CON RISERVE» con «Terminali dichiarati nei fori: 5 pad
+controllati, tutti passano» OK e NC/NO same_model WARN 3. Lo scambio dei terminali di night5 NON si e' ripresentato:
+la correzione D-a e' verificata solo da test e replay offline.
+REVISIONE ultimo giro (nessun alto): IN CORREZIONE M1 (soglia 0.05 di _same_callout fissa: Ø0.80 foro vs Ø0.85 pin
+chiesti come «stessa quota»), M2 (due percorsi decidono foro/terminale: dopo una scelta tardiva del layout un foro
+stampato puo' diventare una stima dal terminale), L1 (press_fit: avviso solo per errori grossolani). Suite 1114d
+fermata; si rifa' a correzioni finite.
+FATTI M1 (_one_printed_value condiviso da _same_lead e _same_callout; margine = arrotondamenti noti, unita' del
+disegno solo se ignoti, _source_unit_factor), M2 (_adopted_reading_pad usato da entrambi i percorsi; un foro stampato
+non e' mai sostituito da una stima), L1 (press_fit: avviso solo se foro < meta' del terminale, guardia dichiarata).
+3851 test non-GUI verdi; replay SRD/HLK invariati.
+MATTINO 14/11: resoconto dato all'utente. L'utente: «prima testo ok?» -> PRIMA prova lui, POI (con OK) commit, push,
+merge, v1.0.9, cancellazione release v1.0.8/v1.0.7. Suite completa da rifare sul codice fermo prima del commit.
+RICHIESTA utente (14/11 mattina): «quando apri un progetto deve aprirsi il primo tab» -> FATTO: fine di _switch_project
+imposta TAB_PROJECT (indice 0) per ogni via d'apertura; nessuna chiave salvata da togliere (l'ultima scheda non era
+salvata per progetto); due test che codificavano il vecchio comportamento aggiornati (CONTRACT CHANGED);
+tests/test_open_project_tabs.py 18 passed. Suite completa 1114f lanciata (.venv/claude-suite-1114f.log).
+APPROVATO dall'utente (14/11 mattina: «possiamo rendere questa piu' intelligente e userfriendly?» + «si direi di
+aggiungere anche la possibilita' di fare DRC e ERC») — RIDISEGNO «Verifica componente per KiCad», da fare DOPO la suite
+1114f verde (non mescolare): (1) riga in alto «Per l'uso finale mancano N cose · M controlli superati», conteggio per
+COSA da fare, non per pin; (2) una riga per cosa da fare: icona ✖/⚠/✔, frase breve, pulsanti propri (tipi elettrici ->
+«Suggerisci con AI» + «Apri tabella Pinout»; numerazione convenzionale -> «Apri tabella Pinout»; libreria non installata
+-> «Vai alla scheda KiCad»; ERC/DRC -> «Prova in KiCad»); (3) evidenziato il pulsante che sblocca (primo errore, se no
+prima revisione); (4) ricontrollo automatico dopo un'azione; (5) dettagli tecnici chiusi e senza duplicati; (6)
+«Interrompi» solo mentre gira; (7) NUOVO: DRC del footprint con kicad-cli sulla scheda di prova (risultato vero + «Mostra
+in KiCad»), ERC del simbolo con kicad-cli sullo schema di prova filtrando «pin non collegato»; l'ERC dello schema
+dell'utente resta voce «da fare in KiCad». Pulsante «Esegui DRC/ERC» nella verifica. Prima: studio read-only di
+kicad-cli (sch erc / pcb drc, formati, versione minima) e del codice del dialogo.
+RICHIESTA utente: dopo la modifica, revisione AVVERSARIALE con agenti esperti read-only («prenditi il tempo che ti
+serve») -> skill adversarial-review su ambiti disgiunti (dialogo/GUI, component_check + kicad-cli DRC/ERC, packaging
+KiCad con kicad-workflow-reviewer, generalita'), correzione dei difetti confermati, poi suite e prova vera.
+PIANO PRONTO (agente Plan, prove con kicad-cli 10.0.8 su copie scratchpad\drc-probe\): JSON di `pcb drc`/`sch erc`,
+si leggono solo type/severity/uuid/pos (le descrizioni sono nella lingua di KiCad); filtrati gli artefatti della
+scheda/schema di prova (unconnected, parity, edge del riquadro di prova, lib_footprint_*, pin_not_connected,
+power_pin_not_driven -> frase nella riga manuale); deduplica per tipo + uuid e contro footprint_pads_overlap; errore
+KiCad -> WARN importanza 2, warning -> 3 (regole predefinite di KiCad, non del produttore); SKIP se kicad-cli manca o
+il JSON non e' leggibile; ERC sul simbolo APPLICATO; nuova riga «Libreria KiCad» (installata/diversa/non installata);
+tipi elettrici -> «Suggerisci con AI» + «Rivedi nella scheda Simbolo» (la tabella Pinout non edita i tipi: correzione
+detta all'utente). DECISO dall'utente: DRC/ERC AUTOMATICI a ogni verifica.
+RICHIESTA utente (14/11): nelle liste dei modelli DeepSeek e OpenRouter disattivare i modelli che non leggono immagini.
+FATTO verificato nel codice: il /models di DeepSeek non dichiara modalita'; OpenRouter le dichiara
+(architecture.input_modalities) anche per i modelli deepseek/<nome>; openrouter.deepseek_declared_text_only gia' le usa
+(euristica dichiarata) ma solo all'invio. PIANO (detto all'utente, nessuna sonda a pagamento): nelle liste dei passi
+che mandano immagini i modelli dichiarati solo-testo in grigio, non selezionabili, tooltip «non legge immagini
+(dichiarato da OpenRouter)»; modelli non nel catalogo restano selezionabili con nota «capacita' immagini non
+dichiarata»; passi solo testo invariati. Da fare in parallelo al ridisegno della verifica (file diversi), dopo la
+suite 1114f; poi revisione avversariale di entrambi.
+SUITE COMPLETA 1114f VERDE (codice di quanto provato dall'utente, con la prima scheda all'apertura): meta' A 9072
+passed / 9 skipped / 19 subtests, meta' B 5736 passed / 4 skipped, EXIT=0, nessun rosso. Totale 14808 passed, 13
+skipped, 19 subtests. Questo e' lo stato «committabile» se l'utente da' l'OK prima delle due modifiche nuove.
+IN CORSO (parallelo, file disgiunti): agente GUI = ridisegno verifica + DRC/ERC (component_check.py,
+component_check_dialog.py, main_window.py, kicad_library.py, i18n.py); agente modelli = liste con modelli solo-testo
+in grigio (model_dialog.py, openrouter.py, providers.py, prompt_models.py; stringhe e main_window via coordinatore).
+UTENTE: «prenditi il tempo che ti serve e fai piu' verifiche, voglio qualcosa di professionale». PIANO DI VERIFICA:
+(a) test mirati di ciascun agente; (b) revisione avversariale a piu' agenti su ambiti disgiunti (dialogo/GUI,
+component_check + DRC/ERC kicad-cli, flusso KiCad con kicad-workflow-reviewer, liste modelli, generalita'), con
+verifica dei rilievi gravi prima di correggerli; (c) correzioni e seconda revisione sulle correzioni; (d) prova
+pratica: la finestra di verifica aperta offscreen sui 7 progetti reali (copie) con screenshot, DRC/ERC reali con
+kicad-cli, e il dialogo dei modelli con il catalogo vero; (e) suite completa a codice fermo; solo allora «pronto».
+FATTO modelli (301+42 test): openrouter.image_capability (READ/NOT_READ/UNDECLARED, catalogo fresco, stale =
+undeclared), deepseek_declared_text_only la usa; prompt_models.usable_model per entrambi i fornitori (cambio: un
+modello OpenRouter solo-testo salvato per un passo con immagini ricade sul predefinito col log esistente);
+ModelPickerDialog: righe solo-testo disabilitate con tooltip nei passi con immagini (il picker lo sa gia' da
+settings_dialog._step_capabilities), non dichiarate selezionabili con nota, scelta salvata solo-testo visibile e
+non accettabile. 4 stringhe da aggiungere (agente GUI). In corso: nota DeepSeek senza nomi di modello, segno nella
+tabella dei passi; estrazione: _pad_reading_model sulla stessa regola.
+FATTO _pad_reading_model con image_capability (159 test). Saldi letti 14/11: OpenRouter 44.10 USD, DeepSeek 17.43 USD.
+NUOVA RICHIESTA utente (14/11): «puoi usare fino 10 euro, ma usali bene … test approfonditi … individua in OpenRouter
+quale modello usare, efficace e meno costoso, esempio Kimi K3, prova». PIANO: (1) dal catalogo pubblico di OpenRouter
+(gratis) i candidati con immagini + tool calling, prezzo inferiore a gpt-5.6-sol, Kimi K3 incluso se presente; max 5;
+(2) banco di prova sull'ESTRATTORE (non sulla finestra, che l'agente GUI sta modificando) sui 7 progetti, copie in
+scratchpad, modello impostato su una COPIA del DB dei profili (mai il DB del repo), risposte da utente attento,
+confronto con la verita' a terra dei documenti (driver night*-tools) e costo vero per analisi; (3) tabella
+correttezza/costo/tempo per modello e raccomandazione; budget: banco <= 6 USD, prova della nuova verifica <= 2 USD,
+resto riserva; totale dichiarato all'utente.
+FATTO modelli (190 test): nota DeepSeek senza nomi di modello; tabella dei passi e riga del modello predefinito segnano
+un modello dichiarato solo-testo (icona/colore/tooltip; il catalogo ~1 MB ora si legge a ogni apertura della
+finestra «Modello AI»). 8 stringhe + rimozione della vecchia nota DeepSeek affidate all'agente GUI (padrone di
+i18n.py). Agente modelli FERMO.
+UTENTE: «ok procedi! hai carta bianca» -> interpretato come autonomia su lavoro, verifiche e chiamate a pagamento
+entro i 10 EUR; commit/push/merge/pubblicazione/cancellazione release restano da confermare esplicitamente alla fine
+(irreversibili, regola «commit solo con OK»).
+FATTO ridisegno verifica + DRC/ERC (651 test mirati, prova reale SRD ~31 s: DRC OK, ERC OK 5 pin non collegati):
+anteprima unica in scratch col simbolo APPLICATO; kicad-cli pcb drc / sch erc JSON, mai ERRORE (SKIP se non riesce);
+uuid -> pad/pin dalla stessa esecuzione + ripiego per posizione (pad senza uuid); filtri artefatti; righe drc_/erc_
+(errore KiCad = WARN 2, warning = WARN 3) con «Mostra in KiCad»; riga «Libreria KiCad» (installs salvati nel progetto,
+confronto che ignora gli spazi di impaginazione); dialogo con righe CheckItem, icone, pulsanti propri, evidenziato,
+ripetizione automatica dopo una correzione riuscita, «Interrompi» solo mentre gira; SymbolTab.review_issue_items
+(tipi per genere, non per testo); 71 stringhe; DB. IN CORSO: revisione avversariale a 5 agenti read-only.
+IDEA dell'utente da riprendere DOPO (non autorizzata ancora: «intanto procedi, poi ne riparliamo»): modalita' nel
+programma per «verificare i modelli disponibili» su un progetto/immagine campione con risultato atteso noto, spendendo
+un po' all'inizio per sapere quale modello rende meglio. Base: il banco di prova di oggi (scratchpad\bench_*.py,
+bench-results). Da proporre: campioni con verita' a terra inclusi, stima del costo prima di partire, tabella
+correttezza/costo/tempo, scelta del modello con un clic.
+REVISIONE AVVERSARIALE (5 agenti read-only, NESSUN ALTO): in correzione all'agente GUI la lista A–O + P1–P10:
+libreria confrontata su footprint+modello+STEP+simbolo (tokenizzazione che rispetta le stringhe); difetti a distanza
+zero (shorting_items, fori che si intersecano, foro che taglia rame) = ERRORE 1; ripiego per posizione solo per pad
+senza uuid; filtri del bordo solo sull'uuid del riquadro di prova + controllo courtyard; NPTH = «foro di montaggio»;
+«Mostra in KiCad» col simbolo applicato e gli stessi blocchi di «Prova in KiCad»; cleanup tollerante; percorsi
+installazione solo locali (niente UNC), progetto relativo; SKIP tradotti + stderr + cwd neutro; porta KiCad bloccata con
+domanda del footprint aperta (nuovo codice); pin «²»; righe in area di scorrimento; argomenti ricostruiti a ogni
+ripetizione; Invio non attiva il pulsante evidenziato; riga libreria con l'ambito; accessibilita' dei livelli; test
+che liberano i dialoghi. All'agente modelli: M1 cache scaduta offline, M2 scelta salvata dopo cambio fornitore, cache
+del catalogo per mtime, controllo pre-analisi del modello predefinito, nota sull'euristica DeepSeek, eccezione della
+scelta salvata solo per le immagini. Testi da riallineare (li faccio io): CLAUDE.md, rules/kicad-packaging.md,
+skills/verify-kicad-component — l'anteprima scrive solo le proprie tabelle ${KIPRJMOD} dentro .kicad-preview.
+FATTO testi riallineati (CLAUDE.md riga «Preview…», rules/kicad-packaging.md, skills/verify-kicad-component §5).
+FATTO agente modelli M1/M2/L1-L4 (334 test): image_capability solo dal catalogo FRESCO (righe di cache scaduta =
+undeclared), _initial_capability alla apertura, OK sul predefinito non lo salva come modello del passo,
+openrouter.fresh_catalog() con cache per (percorso, mtime, dimensione) + lock, catalog_id(), tooltip con la voce del
+catalogo usata ({source}), prompt_models.default_model_image_problem (chiamata in _ensure_api_key affidata
+all'agente GUI), eccezione della scelta salvata solo per le immagini. 6 stringhe nuove + 5 vecchie da togliere
+affidate all'agente GUI. Agente modelli FERMO.
+BANCO MODELLI (2.95 USD su 6; raw in scratchpad\bench-results\): estrattore pilotato direttamente, copie, DB copia,
+candidato su lettura principale + pad. Esito corretti/7 e costo medio: gpt-5.6-sol 6/7 0.165 USD 61 s (manca solo
+«V0»); gemini-3.8-flash 5/7 0.079 USD 118 s (i 2 fallimenti sono limiti del PROGRAMMA: risposta troncata dal budget
+fisso di 16384 token, viste discordi = vicolo cieco); gpt-5.6-luna 3/7 0.017 (letture plausibili ma sbagliate, una
+consigliata); qwen3-vl-235b 0/7; glm-4.6v 0/7; kimi-k3 0/3 fermato (caro in uscita 16 USD/Mtok, troncato/illeggibile);
+deepseek-v4.1-flash 0/3 fermato (troncato); glm-5v-turbo HTTP 400 subito. Raccomandazione: tenere gpt-5.6-sol;
+Gemini 3.8 Flash unica alternativa credibile, da rivalutare con 2 giri in piu' DOPO le correzioni. DIFETTI DEL
+PROGRAMMA assegnati all'agente estrazione: (1) ritentativo con budget di completamento maggiore / meno ragionamento
+quando la risposta e' troncata; (2) viste discordi con geometria concorde -> domanda contacts_view; (3)
+_PinNumberConflict che usciva come crash. GLM-5V HTTP 400: causa ignota (webp? max_tokens?), da indagare.
+FATTI #1-#3 (estrazione; 333+230 test, contratti cambiati marcati): TruncatedAnswerError + un ritentativo con budget
+x4 limitato dal catalogo (o 65536, euristica dichiarata) e reasoning low se dichiarato, AI_CALL_RETRY nel registro;
+viste discordi con geometria concorde -> viste ritirate + domanda contacts_view; conflitto di numerazione persistente
+-> numerazione convenzionale + nota (in revisione di generalita': forse dovrebbe chiedere). In corso: revisione di
+generalita' dei 3 fix; secondo giro banco (Gemini x2 + gpt-5.6-sol x1 sui 7, <= 2.5 USD) in scratchpad\bench-results\round2.
+REVISIONE dei 3 fix: UN ALTO (#3 indovina una numerazione stampata con solo una nota: deve diventare una domanda o un
+blocco; errori di rete/credito non devono innescarlo), medi: il ritentativo si moltiplica col ciclo esterno (3x), avviso
+solo nell'estrattore, «reasoning low» cambia la qualita' senza traccia (da togliere). Correzioni preparate, applicate
+DOPO il secondo giro del banco (che usa quel codice). NOTA per l'utente: il ritentativo a pagamento rovescia una
+decisione precedente (audit 138 A5 «mai ritentato»): da confermare, con il costo massimo per chiamata.
+FATTO agente GUI A–O, P1–P10, Q1, Q2 (N saltato) — 740+172 test mirati. Note: l'installazione NON scrive una libreria
+simboli -> la riga libreria confronta footprint + collegamento STEP + STEP (SHA-256); Q1 usa QApplication.beep();
+Check.needs_cli; «Mostra in KiCad» con _kicad_block_now(ignore_busy=True) e simbolo applicato in
+.kicad-preview/applied-symbol; percorsi installazione: niente UNC/\\?\, progetto relativo; nuovo codice di blocco
+KiCad `footprint_question`. IN CORSO: seconda revisione avversariale sulle correzioni + prova pratica con screenshot.
+SECONDA REVISIONE (nessun alto) — da correggere DOPO la prova pratica in corso (usa quel codice): M1 installazione nel
+progetto in una cartella fuori dal componente non registrata -> «non installato» falso; M2 fori dello STESSO pin
+sovrapposti = ERRORE (deve seguire la severita' di KiCad); M3 sovrapposizioni senza considerare i layer (F.Cu vs B.Cu,
+apertura solo pasta sul pad esposto); L1 clearance 0 mm fra due pad = contatto; L2 «foro di montaggio» solo per
+np_thru_hole; L3 messaggi di «Mostra in KiCad» (fallimento come vista, motivo schematic_locked al dialogo); L4
+args() che solleva lascia il dialogo bloccato; L5 applied-symbol scritto non atomico e mai pulito; L6 motivo dello SKIP
+ERC se il simbolo applicato non si costruisce; L7 nota «regole del produttore» sulle righe di libreria + tabella
+SCHEMATIC_SKIP_TEXTS duplicata.
+BANCO ROUND 2 (2.07 USD; giro totale banco 5.02 USD su 10 EUR): Gemini 3.8 Flash g2 e g3 7/7 ciascuno -> 19/21 (90%)
+a 0.079 USD/analisi (max 0.154), 120 s medi; gpt-5.6-sol 12/14 (86%) a 0.152 (max 0.362), 68 s; Sol sbaglia sempre
+«−V0» su HLK (abitudine stabile). I tre fix (ritentativo budget, viste discordi, conflitto numerazione) NON sono
+scattati: non verificati su dati veri. DECISIONE DA CHIEDERE ALL'UTENTE alla fine: passare la lettura principale +
+pad a Gemini 3.8 Flash (meta' costo, 2x piu' lento) o restare su gpt-5.6-sol. Correzioni del dopo-banco applicate ora.
+Prova pratica: screenshot in scratchpad\practical\shots; prima occhiata (SRD): due righe duplicate sull'installazione
+(«Installa la libreria…» e «Componente non ancora installato…»), troppo spazio vuoto, DRC/ERC superati invisibili,
+manca la frase sotto il verdetto.
+PROVA PRATICA completata (7 progetti, kicad-cli reale, 10-13 s per verifica, screenshot IT/EN/DE in
+scratchpad\practical\shots*): tutti «UTILIZZABILE CON RISERVE», DRC/ERC/pin-pad/3D OK. PROBLEMI: (1, ALTO, picker
+modelli) scrivere in «Cerca» cambia in silenzio il modello scelto, anche con uno non visibile (probabilmente gia' in HEAD);
+(2) righe disabilitate non grigie col tema scuro; (3) SRD e T7N senza riga NC/NO (progetti senza testimone salvato);
+(4) installazione chiesta due volte («Collegamento 3D originale» + «Libreria KiCad») e parole diverse; (5) riga
+numerazione convenzionale troppo bassa e senza pulsante; (6) riga NC/NO senza pulsante; (7) riga manuale uguale alle
+altre; (8) spazi vuoti, icona non allineata; (9) dettagli tecnici con chiacchiere di kicad-cli e percorsi temporanei;
+(10) finestra «Modello AI»: colonna stretta, DE due passi «Anschlüsse», «(oggi nascosto)»; (11) spazio vuoto sotto
+«Fornitore». Assegnati: agente GUI (2a revisione M1-M3 L1-L7 + 3-9), agente modelli (1, 2, 10, 11).
+FATTO agente modelli (340 test; screenshot scratchpad\practical\shots-fix e shots-fix-de, controllati): la ricerca
+non cambia piu' la scelta («Nessuna selezione visibile: OK lascia il modello attuale …»), righe solo-testo grigie
+anche col tema scuro (#626477), colonne della finestra «Modello AI» adattate e descrizioni a capo, id propri non piu'
+neri, nota per predefinito non dichiarato, niente spazio sotto «Fornitore», descrizione «Piedini» senza «(oggi
+nascosto)». Stringhe + nomi tedeschi distinti affidati all'agente GUI. Agente modelli FERMO.
+FATTI fix del dopo-banco (4038 test non-GUI): conflitto di numerazione persistente -> domanda side_numbering
+(«dopo gli altri lati» / convenzionale / «lascia bloccato», nessuna consigliata, footprint bloccato), errori del
+provider -> blocco con «Ripeti l'analisi»; ritentativo del budget spostato in make_logged_call (una volta, separato dai
+ritentativi transitori, AI_CALL_RETRY nel registro dell'analisi, testato), niente piu' «reasoning low»; testo della
+domanda del lato quando le viste sono state ritirate. Replay: RS485 qwen -> una domanda; T7N gemini -> domanda del lato.
+17 stringhe all'agente GUI.
+FATTO agente GUI (seconda revisione + prova pratica; 546+99 test): screenshot scratchpad\practical\shots-v2 controllati
+dal coordinatore: frase sotto il verdetto, riga «mancano N cose» coerente, una riga per l'installazione, numerazione
+convenzionale e NC/NO a importanza 2 con «Apri la tabella Pinout» evidenziato, riga ✓ «pin-pad, geometria del
+footprint, terminali nei fori, DRC, ERC, lettura in KiCad, modello 3D: nessun problema», riga ☐ «Da fare in KiCad», niente
+buchi fra le righe. CONSEGUENZA da dire all'utente: SRD/T7N/VE12H (NC/NO letti una volta o due dallo stesso modello) e
+ESP32/RS485 (numerazione convenzionale) passano da «UTILIZZABILE CON RISERVE» a «DA RIVEDERE PRIMA DELL'USO». M1-M3,
+L1-L7 della seconda revisione fatti; DE nuovi nomi registrati in SUPERSEDED_DEFAULTS.
+PROVA VERA FINALE con la finestra (0.69 USD; giro totale ~5.71 USD su 10 EUR; screenshot scratchpad\final-shots):
+SRD domanda layout (consigliata la lettura giusta) + domanda NC/NO (scelta quella del datasheet) -> pad, fori, nomi
+giusti, verifica «UTILIZZABILE CON RISERVE», DRC/ERC OK; RS485 nessuna domanda, «confermato dalla foto», verifica «DA
+RIVEDERE PRIMA DELL'USO» solo per la numerazione convenzionale; ESP32 risposte salvate riusate (22.86), 113 alternative,
+verifica «DA RIVEDERE» per la numerazione convenzionale. Nessun ERRORE/Traceback, nessun AI_CALL_RETRY. APERTO: i
+primari ESP32 tornati USB_D-/MTCK/U0RXD (l'ordine dentro «PRIMARIO (ALT…)» varia fra le letture del modello; serigrafia
+19/20/RX/TX) -> da proporre all'utente una scelta stabile (es. domanda «quale categoria di nomi usare come principale»)
+— non fatto. Risposta salvata «pad_hole:…=block» nell'SRD: segnalata, non usata in questa analisi.
+TERZA REVISIONE (ultimo lotto): UN ALTO — risposta «convenzionale» data dal vivo alla domanda del conflitto di
+numerazione non sposta i nomi con i contatti (il percorso della risposta salvata si'): nomi sui pad sbagliati.
+Medi: pad duplicati (copie GA9) non piu' segnalati; _ask_side_numbering da proteggere con un marcatore di conflitto;
+risposta «sposta» dal vivo senza controllo di coerenza. Bassi: verifica interrotta con «non manca nulla» e riga ✓;
+riga ✓ in contraddizione con righe ⚠ dello stesso titolo; «modello 3D» (regola: «modello STEP»); installazioni non
+confrontabili senza riga; ritentativo che perde il tipo d'errore e numera male i tentativi. Tutto assegnato.
+FATTO tutto (estrazione 3752 test: _convention_outcome unico per risposta dal vivo e salvata, marcatore
+_numbering_conflict, coerenza dopo «sposta», errore del secondo tentativo col suo tipo; GUI 156+: copie GA9 di nuovo
+segnalate, verifica interrotta, famiglie della riga ✓, «modello STEP», libreria non confrontabile = SKIP, NC/NO
+corretti a mano = «user»). Coordinatore: contratto tedesco «Lesen — Einzelbauteil» in test_model_ai_step_table,
+tolta la voce inutilizzata «Secondo tentativo … non riuscito: {exc}» (109 test i18n/doc verdi). Tutti gli agenti
+FERMI. Suite completa 1114h lanciata (.venv/claude-suite-1114h.log, basetemp .venv/claude-test-1114h).
+SUITE COMPLETA 1114h VERDE (codice fermo): meta' A 9195 passed / 9 skipped / 19 subtests, meta' B 5737 passed / 4
+skipped, EXIT=0, nessun rosso. Totale 14932 passed, 13 skipped, 19 subtests. Spesa AI del giro (10 EUR concessi):
+~5.71 USD. Stato: pronto per commit/merge/pubblicazione v1.0.9 SOLO con OK esplicito dell'utente; decisioni aperte da
+chiedere una alla volta: (1) passare la lettura principale + pad a Gemini 3.8 Flash; (2) primario stabile dei nomi
+pin ESP32; (3) ritentativo a pagamento sulle risposte troncate (rovescia la decisione «mai ritentato»); (4)
+precedenti: «Nessuna delle due» NC/NO + tabella Pinout = «user», pasta su THT, domanda sui moduli corti.
+14/11 OK DELL'UTENTE («ok procedi, tralascia pubblicazione v1.0.9 e cancellazione v1.0.8/v1.0.7»): commit su
+FOOTPRINT-ADVANCE, push, merge in main, push. NIENTE release, NIENTE cancellazioni (v1.0.8/v1.0.7 restano).
+Modelli: alla domanda «conviene usare ovunque GPT sol?» risposto: si' per lettura principale + pad (differenza
+con Gemini non significativa sul campione, sol piu' veloce), passi foto mai confrontati; nessun default cambiato.
+
+## (era IN CORSO) 13/11/2026 tardo pomeriggio — prossimo giro, punti 1-8 (utente: «ok implementa tutto»)
+
+Punti approvati (dettagli piu' sotto, sezione «PROSSIMO GIRO APPROVATO» e Punti 4-7): 1 riga «Modelli AI …
+Modifica…» al posto della tendina di sessione; 2 «modello unico» -> «modello predefinito» (scelto da me su
+consiglio, l'utente non ha risposto alla domanda: puo' ancora chiedere «modello default»); 3 coerenza lati/pinout
+(docs/pinout-coherence-plan.md); 4 verifica componente (documento, verdetto nuovo «DA RIVEDERE PRIMA DELL'USO»,
+gruppi, rimedi con pulsanti: anche «Collega il modello STEP» e «Riesporta il simbolo»); 5 spunta «solo nome
+principale» nella finestra Pinout, funzioni alternative KiCad; 6 riga riassuntiva dei nomi con spazi; 7 pulsante
+«Correggi» sugli avvisi KLC (nome con spazi -> «_» con la rinomina esistente); 8 «Prova in KiCad» crea anche uno
+schema temporaneo col simbolo piazzato, apre Editor schemi + Editor PCB e mostra un'immagine 3D prodotta da
+kicad-cli (opzione B; il visualizzatore 3D di KiCad non si apre da riga di comando).
+ORGANIZZAZIONE (corretta): l'isolamento in worktree e' FALLITO (git rifiuta le cartelle .claude/worktrees
+create dallo strumento; 5 worktree vuoti a 140b274 rimasti li', bloccati: la loro rimozione e' stata negata dal
+classificatore dei permessi -> da togliere a mano con `git worktree remove --force --force` e `git branch -D
+worktree-agent-*`; rendono lente le ricerche su tutta la radice). Nuovo schema, stesso checkout, file disgiunti:
+FASE 1 in parallelo, nessuno tocca main_window.py: PIN (pinout_coherence.py nuovo, datasheet_extractor.py),
+CHECK (component_check.py, component_check_dialog.py, klc_checks.py), SYM (generators/symbol.py, gui/pinout_dialog.py,
+gui/symbol_tab.py, etichette dei pad nell'anteprima), KICAD (kicad_library.py + finestra nuova per l'immagine 3D),
+AI-TEXT (i18n.py solo rinomine, guide, settings_dialog.py, profile_dialog.py). FASE 2: un solo agente GUI su
+main_window.py collega 1, 3C, 4C, 5, 7, 8 e aggiunge le stringhe nuove a i18n. Poi revisioni read-only e suite.
+FASE 1 stato: AI-TEXT FATTO (rinomine, guide; 3 voci vecchie «unico» tenute finche' main_window non cambia);
+KICAD FATTO (schema temporaneo 20260306, sym-lib-table locale, eeschema+pcbnew, render kicad-cli «basic» 0.9 s,
+verificato con kicad-cli 10.0.8 sul rele'); CHECK FATTO (Check.category/importance/remedy/action/code/pins,
+verdetto nuovo, gruppi, azioni, KLC fix id) + ritocco chiesto: link_step_model e reexport_symbol a importanza 2.
+DECISIONE UTENTE (13/11, «ok»): la prova crea una fp-lib-table SOLO nella cartella temporanea (${KIPRJMOD} su
+una copia del .pretty) perche' lo schema di prova risolva il footprint; tabelle dell'utente e globali intatte;
+contratto del test «nessuna fp-lib-table» aggiornato di conseguenza. Note per la fase 2 in
+scratchpad/phase2_needs.md, phase2_strings_kicad.md, phase2_strings_check.md (copiare qui se la sessione cade).
+FASE 1 COMPLETA (13/11 sera): PIN (pinout_coherence.py, side_numbering; ESP32 offline: retry + domanda consigliata
+top 1-22 / bottom 23-44, 44 voci tenute), KICAD (+ fp-lib-table solo temporanea, ERC solo 5 «pin non collegato»),
+SYM (split_pin_name, alternate KiCad verificati con kicad-cli 10, riga riassuntiva, impostazione globale default ON:
+CAMBIA il simbolo scritto dei progetti esistenti con nomi «X (…)» — da dire all'utente), CHECK, AI-TEXT.
+DECISIONE coordinatore (detta all'utente, «ok procedi»): quando lati e pinout sono una sola numerazione i nomi
+dei pin vengono dal pinout del documento, non dalle sigle dei lati (invariante del progetto).
+FASE 2 FATTA dall'agente GUI (577+460+92+87 test mirati verdi; 5 file di test nuovi, 13 contratti aggiornati;
+87 voci i18n; rimossi modello di sessione e _vlm_model di sessione; FOOTPRINT_QUESTION_FIELDS; workers.PreviewRenderWorker;
+_apply_project_rename estratto). CORREZIONE di una mia decisione: «Collegamento 3D originale» NON e' un difetto (il
+.kicad_mod della cartella e' scritto apposta senza nodo model; installazione e prova lo aggiungono) -> torna
+importanza 3 informativa, pulsante tenuto; detto all'utente. In corso: quella correzione + lookup esatto della
+decisione side_numbering (chiave/digest, non qualsiasi risposta salvata). Due test LF convertiti in CRLF dal
+coordinatore. Replay offline ESP32/T7N/TEL OK; DB profili rinfrescato.
+REVISIONE DI GENERALITA' (13/11 sera): H1 verifica componente su vista DA SOTTO abbina etichette e pad sbagliati;
+H2 pad fuori dai lati (EP numerato, LGA) -> ritentativo pagato sempre + correzione che invita a togliere voci;
+H3 numero nudo vs indice con prefisso trattati come stesso spazio (Pico/Pro Micro: falso NON USARE); M1 controllo
+documento su ogni tipologia con rimedio dei lati; M2 lato con un contatto sempre ambiguo; M3 split_pin_name
+euristico («VCC(3.3V)», «RESET (active low)», parentesi sbilanciate). Suite FERMATA. Giro di correzioni: PIN
+(H2, H3 regola, M2, L1-L3), GUI (H1, H3 importanza max 2, M1, + richiesta utente: icona al posto del link
+«Modifica…» nella riga Modelli AI, model-edit.svg, riga impaginata come le vicine), SYM (M3). Revisione del flusso
+KiCad (kicad-workflow-reviewer) ancora in corso.
+REVISIONE FLUSSO KICAD: «Collega il modello STEP» peggiora il verdetto (${KIPRJMOD} -> SKIP) e si perde alla
+rigenerazione -> da TOGLIERE (avviso solo informativo); editor/kicad-cli con cwd dentro il progetto bloccano la
+rinomina della cartella (WinError 5) -> cwd fuori (KICAD agent); rinomina non aggiorna ki_fp_filters e
+_effective_fp_filters con nome con spazi genera due filtri sbagliati; pulizia anteprime vecchie incompleta; fix_value
+non ricontrollato; conferma non dice che le copie installate restano col nome vecchio; riesportazione senza la
+domanda di revisione; CLAUDE.md:13 e rules/kicad-packaging.md:29 da riformulare («mai le tabelle dell'utente o
+globali»). CORREZIONE: avevo detto all'utente che «Correggi» lascia la cartella invariata; la rinomina esistente
+rinomina ANCHE la cartella -> DECISO dall'utente («ok», 13/11 sera): «Correggi» rinomina anche la cartella,
+come «Rinomina progetto…» (comportamento attuale, nessuna modifica).
+DIFETTO REALE trovato dall'utente (ESP32, analisi vera, risposta renumber): stato salvato con lati reverse FALSE e
+pinout con i nomi INVERTITI per lato (pin 1 GND invece di 3V3, pin 24 GND invece di TX) -> la GUI applica la
+risposta perdendo/invertendo reverse (stesso cortocircuito di riferimento di H1) e costruisce il pinout dalle
+etichette dei lati. Mandato all'agente GUI con test end-to-end vista sopra e sotto. Il componente ESP32 generato
+ora NON va usato finche' non si rigenera dopo la correzione.
+CORREZIONE DELLA DIAGNOSI (agente GUI, verificata dal coordinatore guardando Pinout.png): NON e' un difetto della
+finestra. Pinout.png NON stampa numeri di pin (solo nomi e sigle serigrafate): la numerazione 1..44 e' una
+CONVENZIONE inventata dal modello (alle 15:29 ha contato ogni colonna dall'estremita' USB: 1 GND, 2 5V, …), la
+domanda ha proposto top 1-22 / bottom 23-44 in avanti, l'utente ha scelto renumber e la finestra ha applicato
+esattamente quello. La mia frase all'utente «nel datasheet il pin 1 e' 3V3» era SBAGLIATA: e' la numerazione
+ufficiale Espressif (che in realta' usa due header J1/J3 da 1-22), non deducibile dall'immagine. Rimedio vero:
+quando il pinout non ha numeri stampati la numerazione e' una convenzione e va CHIESTA (da dove parte il pin 1,
+verso) — da proporre all'utente insieme al cambio di schema «indice della voce di pinout per ogni pad».
+Guardia aggiunta: test che dopo renumber la finestra tiene il riferimento dell'estrattore e i nomi del documento
+sugli stessi numeri (vista sopra e sotto). H1, H3, M1, opzioni evidenziate (flag «recommended»), icona Modelli AI,
+A1-A7, tema chiaro predefinito: FATTI dall'agente GUI (862+591+215 test mirati verdi). Flag «recommended»
+nell'estrattore (side_numbering renumber se raccomandato; _flag_sole_confirmed per l'unica opzione confermata dai
+fori). Replay ESP32/T7N/TEL ok. Suite completa .venv/claude-full-1113h IN CORSO (log scratchpad/full_1113h.log).
+REVISIONE FINALE (13/11 ~16:15): H1/H2/H3/M1/M2/M3 e voci KiCad VERIFICATI corretti. NUOVI ALTI: HIGH-1 una
+differenza di nome euristica (GND/GND2, 3V3/VDD33: massa o alimentazione con suffisso lette come indice) apre una
+domanda side_numbering che BLOCCA il footprint con la sola opzione keep_sides (perde i nomi del documento);
+HIGH-2 regressione: uno sfasamento di uno su un modulo con pad centrale numerato passa in silenzio (la voce persa
+classificata off-side). Noto: numerazione per convenzione trattata come fatto del documento. Minori: flag consigliata
+anche su conferme solo da segni d'asse; debolezza per classe invece che per ripetizione del nome; progetti vecchi
+senza document_sides; pad senza voce non segnalati. PROPOSTA ALL'UTENTE (in attesa di OK): differenze di nome mai
+bloccanti + classi massa/alimentazione con suffisso; voci fuori dai lati -> domanda (non silenzio, nessun costo);
+attributo dichiarato «numeri dei pin stampati» -> se no: niente ritentativo, niente errori «del documento», domanda
+«da dove parte il pin 1 e in che verso». Suite lasciata finire per scoprire altro; sara' da rifare dopo.
+APPROVATO dall'utente («ok», 13/11 ~16:20) la proposta qui sopra. Suite 1113h FERMATA al 40% della prima meta'
+con UN rosso intorno al 21% (nome non noto: il log -q non stampa i nomi fino al riepilogo) -> da identificare alla
+prossima corsa. Lavoro: agente PIN (pinout_coherence, estrattore, schema/prompt «numeri stampati», domanda
+numerazione, flag consigliata escluse conferme solo da segni d'asse), poi agente GUI (domanda nuova nella finestra,
+verifica componente che non presenta convenzioni come fatti del documento, progetti vecchi senza document_sides).
+APPROVATO dall'utente («ok», 13/11 ~16:40) per il giro successivo alla numerazione: finestra «Verifica componente
+per KiCad» rifatta — una frase in cima con il pulsante di correzione accanto (via «Causa/Rimedio/Non ancora»);
+ogni punto col suo pulsante sulla stessa riga; pulsante evidenziato = correzione che sblocca il verdetto (non
+«Suggerisci tipi pin con AI», che costa); conteggio per punto non per pin («47 avvisi» = 44 pin + 3 -> «4 punti da
+vedere»); dopo una correzione la verifica si ripete da sola; dettagli tecnici solo elenco dei controlli con esito,
+senza ricopiare il riepilogo; icone/colori per gruppo; «Collegamento 3D originale» informativo senza rimedio
+(oggi gli e' associato «Installa la libreria…»); «Pinout del documento: coerenti» non deve dire «del documento»
+quando i numeri sono una convenzione (coperto dal giro numerazione).
+DIFETTO segnalato dall'utente (13/11 ~16:50, screenshot KiCad della prova ESP32 con header): il modulo e' troppo
+BASSO in Z — il distanziale plastico nero degli header sta sotto la superficie della scheda ospite. Criterio
+indicato dall'utente: con gli header, il piano di appoggio (Z=0, faccia superiore della scheda ospite) e' la
+faccia INFERIORE del distanziale nero; i piedini sotto attraversano la scheda. Diagnosi in corso (agente sola
+lettura: origine del STEP, offset del nodo model, piastra della prova; verificare che il modulo saldato piatto
+senza header resti giusto). CORREZIONE APPROVATA dall'utente («correggi questa cosa … mi raccomando!!!»):
+si fa appena arriva la diagnosi, su file disgiunti da quelli dell'agente PIN.
+DIAGNOSI (scratchpad/zdiag): con header lo STEP ha Z=0 al fondo della scheda del modulo (distanziale -2.5..0,
+piedini fino a -8.5); KiCad mette Z=0 sulla faccia della scheda ospite; offset del footprint sempre 0 -> distanziale
+dentro la scheda. Provato con kicad-cli: offset z +2.5 lo appoggia giusto. CORREZIONE in corso (agente): sollevare
+TUTTO lo STEP della altezza del distanziale disegnato (header_geometry.header_seating_lift, freecad_build_body),
+offset del footprint invariato, saldato piatto invariato (sollevamento 0). Da dire all'utente dopo: «Mostra gli
+header» spuntato con «Saldatura diretta» solleverebbe un modulo saldato piatto (decisione);
+CORREZIONE FATTA (agente zfix): header_geometry.spacer_height/header_seating_lift, freecad_build_body
+_apply_seating_lift su tutti gli oggetti e sulle ancore dei numeri dei pin prima di ogni esportazione; entrambi i
+percorsi; offset footprint invariato. 15 test nuovi (tests/test_header_seating_plane.py), 999 mirati verdi.
+FreeCAD 1.1 reale: distanziale 0..2.5, fondo scheda modulo a 2.5, senza header invariato; passo 2.0 -> 1.969.
+kicad-cli: distanziale 1.595..4.095 = faccia della scheda ospite (prima -0.905..1.595). APERTI: nessuna nota visibile
+che l'altezza del distanziale e' stimata; STEP gia' generati da rigenerare; preview_3d_vtk._viewing_from_below usa Z<0
+(con il sollevamento la scheda del modulo sta a +lift: caso limite); foro ospite 0.5 mm in quel
+progetto contro piedino quadro 0.64 mm (non ci entra) — nessun controllo oggi. Dopo la correzione lo STEP va
+RIGENERATO (FreeCAD) dall'utente.
+GIRO NUMERAZIONE FATTO (PIN round 3 + GUI): differenze di nome mai bloccanti; voci fuori dai lati solo se
+dichiarate (off_side), altrimenti domanda gratuita (shift:±d / off_side_entries); schema pin_numbers_printed: se
+false niente ritentativo e domanda numbering_convention (8 opzioni per due lati opposti: antiorario/orario/stesso
+verso × estremita', anteprima dei primi numeri); verifica componente: numeri non stampati -> sola nota «convenzione
+scelta dall'utente» (importanza 3), voci non spiegate WARN 2, dichiarate fuori dai lati nota 3, sfasamento ERROR 1.
+Replay: ESP32 12:27 con pin_numbers_printed=false -> domanda a 8 opzioni, same:top:b da' 1=3V3, 22=GND, 24=TX;
+T7N/TEL invariati. Risposte vecchie senza il campo lette come «stampati» (decisione dell'agente: DA CONFERMARE
+con l'utente). Suite completa: solo quando l'utente chiede il commit (nuova regola). Revisione di generalita' finale
+in corso.
+REVISIONE DI GENERALITA' del giro numerazione (audit1113i, p1-p5): H1 «sfasato» deciso da «una voce senza pad E un
+pad senza voce» anche quando sono due omissioni indipendenti -> ritentativo pagato e l'EP non dichiarato si puo'
+solo perdere; H2 in modalita' convenzione contact_entries usa l'allineamento delle etichette anche se debole/conteso
+-> nomi spostati su altri contatti da UNA etichetta, opzione detta «proposta dall'analisi»; M1 convenzioni
+incomplete oltre due lati opposti (3/4 lati, lati adiacenti) e manca «tieni la numerazione dell'analisi» -> vicolo
+cieco perche' la domanda blocca il footprint; M2 convenzione scarta in silenzio le voci fuori dai lati non
+dichiarate; M3 sollevamento dei pettini applicato anche con pettini parziali (contatti a mezzo foro saldati piatti
+fluttuano di 2.5 mm) e nessuna nota della stima; M4 GND1/GND2 sfuggono alla «debolezza per ripetizione»; L1 campo
+pin_numbers_printed non obbligatorio; L2 VINP/VBUS_DET classificati alimentazione; L4 conferma assente non «debole»;
+L5 uniform_shifts usa numeri dichiarati fuori dai lati; L6 EP mancante importanza 3.
+PROPOSTA ALL'UTENTE (dopo la sua protesta «non è riuscito a leggere bene la scheda?»): numerazione intelligente —
+l'AI dichiara il segno del pin 1 (pad quadrato, puntino, «1», freccia) e dove; se c'e', una sola conferma con la
+figura (antiorario standard KiCad, consigliata); se no, poche opzioni sensate + «tieni la numerazione dell'analisi»
+(non verificata), anteprima visiva sull'immagine; piu' tutte le correzioni H1-L6. SUPERATA dalla decisione sotto.
+DECISIONE DELL'UTENTE (13/11 sera, «ok ora va bene! bravo»), dopo la sua obiezione «in una scheda di quel tipo il
+PIN1 non ha senso, non è un IC»: NESSUNA domanda sulla numerazione. Quando il documento non stampa i numeri dei pin,
+il programma usa SEMPRE la stessa convenzione fissa: vista dall'alto, si parte dall'angolo in alto a sinistra e si
+gira in senso ANTIORARIO lungo il perimetro (prima giu' per il lato sinistro, poi il lato inferiore verso destra,
+poi su per il destro, poi il superiore verso sinistra); il primo contatto incontrato e' il pin 1 (regola dei DIP;
+per due file orizzontali il pin 1 risulta in basso a sinistra). I NOMI restano sui contatti fisici (la mappa
+nome->contatto letta dall'analisi; le sigle serigrafate solo come indizio, mai per spostare nomi). Nota nel
+componente: «numerazione convenzionale, non quella del costruttore». Insieme: H1 (sfasato solo con prova di
+sfasamento; off_side_entries sempre offerto), H2 (nomi secondo l'analisi, non da un'etichetta), M2 (pad fuori dai
+lati uguale in tutti i percorsi), M3 (sollevamento solo se TUTTI i contatti hanno il pettine + nota della stima),
+M4 (debolezza per classe di relazione), L1 (pin_numbers_printed obbligatorio nello schema), L2 (VINP/VBUS_DET non
+alimentazione), L4 (conferma assente = debole), L5, L6 (EP mancante importanza 2). Agenti: PIN (estrazione),
+zfix (M3), poi GUI (togliere il campo numbering_convention dalle domande, nota nel controllo, stringhe).
+PIN round 4 FATTO (convention_numbers/convention_pinout, domanda tolta, H1 M2 M4 L1 L2 L4 L5; 134+935 verdi).
+SCOPERTA nel replay ESP32 12:27: la mappa nome->contatto dell'analisi era SBAGLIATA (pinout 1-22 sui contatti in
+basso con serigrafia G, G, 19…) e con «sigle solo indizio» i nomi restano sbagliati -> aggiunta (detta all'utente):
+contraddizione FORTE delle sigle (>= 2 accordi su nomi univoci, collocazione unica, diversa dalla mappa) -> UNA
+ricorrezione pagata «metti ogni nome sul contatto la cui sigla corrisponde»; se resta -> finding etichette diverse,
+verifica «DA RIVEDERE». Una sola etichetta mai (p5). In corso (agente PIN).
+M3 FATTO (zfix): header_seating_plan in step_generator: sollevamento solo se TUTTI i contatti hanno il pettine,
+altrimenti 0 + nota; nota «sollevato di … stimata da catalogo»; 171 verdi; FreeCAD reale ok. APERTO (decisione utente):
+nel caso misto i pettini disegnati restano con il distanziale dentro la scheda ospite: disegnarli o no?
+GUI FATTO: numbering_convention tolto; verifica: numeri non stampati -> nota convenzionale; L6; label_placement
+WARN 2 senza doppioni; stringhe (anche zfix); 160 test (i18n, localizzazione, verifica, numerazione) verdi; DB
+sincronizzato. PIN round 5 FATTO: strong_label_conflicts -> UNA ricorrezione _SIDE_LABEL_CORRECTION, poi
+FINDING_LABEL_PLACEMENT; 143 + 675 verdi. Replay ESP32 12:27 (AI che ripete la stessa risposta): nessuna finestra,
+nessun nome spostato, 21 contatti con la sola sigla e 21 voci numerate dopo i contatti (45-65), verifica «DA RIVEDERE».
+T7N/TEL invariati. Revisione di generalita' finale (audit1113j): HIGH 1 in modalita' convenzione la verifica
+componente taceva tutto (confronto tra pinout dell'analisi e lati convenzionali, due riferimenti diversi) -> deve
+confrontare il pinout ASSESTATO con i lati assestati; MEDIUM 2 numeri sbagliati e rimedio con domanda inesistente;
+MEDIUM 3 conflitti calcolati dopo la rinumerazione (si perde un lato); MEDIUM 4 sigla ripetuta sulla scheda (TX/RX
+su due lati) -> ricorrezione pagata su risposta giusta; LOW 5 numero doppio perso; LOW 6 off_side con numero di un
+contatto; LOW 7 label_name dal modello da togliere; nota con la regola precisa per moduli a un lato. Correzioni
+mandate: GUI (HIGH 1, MEDIUM 2), PIN (MEDIUM 3-4, LOW 5-7, nota). H1/H2/M1-M4/L1-L6 precedenti VERIFICATI.
+FATTE (13/11 sera): PIN round 6 (ExtractedParams.label_conflicts nel riferimento assestato, conflitti calcolati
+sulla mappa dell'analisi prima della rinumerazione e tradotti, unicita' delle sigle anche sulla scheda,
+convention_pinout -> (rows, unattached, clashes), label_name tolto dalle risposte del modello, nota con la regola
+precisa); GUI (_convention_pinout salvato, controlli normali nello stesso riferimento, solo le affermazioni sui
+numeri del costruttore soppresse, rimedio senza domanda). 190 test verdi. Sonde del revisore rilanciate dal
+coordinatore: p4 -> WARN 2 su entrambi i lati (prima: niente); p3 -> nessuna ricorrezione; T7N/TEL invariati.
+STATO: pronto per il commit quando l'utente lo chiede (allora suite completa, regola del 13/11).
+DECISIONI APERTE (una alla volta): risposte vecchie senza pin_numbers_printed lette come «stampati»; pettini
+disegnati nel caso misto; controllo foro ospite troppo piccolo per il piedino (0.5 vs 0.64 mm). Approvati per il
+giro dopo: finestra «Verifica componente» rifatta; vista 3D (scritta «guarda da sotto», icona piu' evidente,
+_viewing_from_below con il sollevamento). Suite completa: solo alla richiesta di
+commit.
+DIFETTO trovato dall'utente e CORRETTO dal coordinatore (13/11): la domanda dell'analisi mostrava l'HTML delle
+opzioni come testo («<html><body><p style=…») perche' _ask_extraction_question impostava setTextFormat(PlainText),
+che QMessageBox applica a ENTRAMBE le etichette. Ora: domanda sanificata (escape, \n -> <br>) e RichText per
+tutte e due. Il test di prima controllava solo la presenza di «<b>» nel testo, non la resa: aggiunte asserzioni sul
+formato RichText, sul testo reso (nessun «<» visibile) e sul negativo «Pin <A&B>?» letterale. 58 test verdi.
+Vista 3D: l'utente non trovava i numeri dei pin (pulsante solo icona, numeri visibili solo da sotto); trovato.
+Proposti (prossimo giro, non ancora fatti): scritta nella vista «Numeri pin visibili guardando da sotto — clic su
+SOTTO nel cubo» quando accesi e vista da sopra; stato acceso/spento dell'icona piu' evidente.
+PIN GIRO FATTO (H2 off_side_entries mai rimosse e niente ritentativo; H3 numero nudo vs prefisso = unknown; M2;
+L1 weak_sides/contested_sides; L2 digest coi nomi; L3). CONSEGUENZA ONESTA: sull'ESP32 la rinumerazione resta
+offerta ma NON piu' consigliata (le sigle sono numeri nudi = nessuna prova; lato inferiore distinto solo da TX/RX:
+separazione fragile, da dire all'utente). Rimedio vero proposto dall'agente: il modello restituisce per ogni pad
+l'indice della sua voce di pinout (cambio di schema -> decisione dell'utente, DA CHIEDERE dopo la domanda cartella).
+DECISO dall'utente («A», 13/11 sera): la scheda «Simbolo elettrico» parte nel tema CHIARO (colori di KiCad:
+corpo giallo), scelta ricordata; stessa cosa per l'anteprima footprint se ha lo stesso interruttore (agente GUI).
+Domande utente: «metti in evidenza le Opzioni» -> intestazioni in grassetto/colore, consigliata evidenziata e
+pulsante predefinito (affidato all'agente GUI); icona al posto del link «Modifica…» (agente GUI).
+Commit SOLO con OK dell'utente.
+
 ## STATO 13/11/2026 POMERIGGIO — giro «pannello + vicoli ciechi dei pad» COMMITTATO su FOOTPRINT-ADVANCE come `f58bf0b`, pushato e mergiato in main (utente: «committa tutto pusha, poi mergia in main pusha»; pacchetto MSI ANNULLATO dall'utente). Suite completa VERDE sul codice fermo: prima meta' 8528 passati / 9 saltati / 19 sottotest (rilanciata da sola: il riepilogo della corsa doppia era perso dietro un `| tail`), seconda meta' 5435 / 4 = 13963 passati, 13 saltati, 19 sottotest. Prossimo giro APPROVATO: punti 1-6 qui sotto (modelli AI, «modello predefinito», coerenza lati/pinout, verifica componente, nomi corti dei pin, riga riassuntiva); piano dei punti 3-4 in docs/pinout-coherence-plan.md.
 
 ## (FATTO) 13/11/2026 — pannello laterale della scheda Footprint (utente, con screenshot)
@@ -221,6 +1075,13 @@ delle coordinate -8.90/-6.85). Il coordinatore integra, replay, generality-audit
     modulo nuovo pinout_coherence.py, domanda side_numbering, Check con category/importance/remedy, verdetto
     per categoria. DECISO dall'utente: verdetto NUOVO «DA RIVEDERE PRIMA DELL'USO». Da dire ancora: una
     chiamata pagata in più quando la prima risposta e' incoerente (gia' detto all'utente, nessuna obiezione).
+    Punto 7 APPROVATO («ok», 13/11 pomeriggio, screenshot TEL): pulsante «Correggi» sulla riga di ogni
+    avviso KLC con correzione sicura e automatica (meccanismo generale, riusato dalla Verifica componente 4d);
+    primo caso «il nome contiene spazi» -> propone spazi -> «_» (es. «TEL_87-2411WI») con conferma che mostra il
+    nome nuovo, eseguito con la rinomina esistente (footprint, simbolo, STEP insieme; cartella del progetto
+    invariata). Notato e detto all'utente, NON autorizzato: descrizione del TEL ferma all'analisi vecchia
+    («TEL 8-2412WI … 2x3 grid pitch 2.54»).
+    In sospeso, domanda all'utente: «modello predefinito» (consigliato) o «modello default».
  (vecchia nota) PROSSIMO GIRO (dopo commit/merge/pacchetto), DECISO dall'utente 13/11 («io la rimuoverei oppure mettiamo un
     link alla modale che definisce i modelli»): in «Strumenti AI» di TUTTE le tipologie togliere la tendina
     «Modello AI (questa sessione)» e mettere una riga di sola lettura col modello predefinito (e quanti passi

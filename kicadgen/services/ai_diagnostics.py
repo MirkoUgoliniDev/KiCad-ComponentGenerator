@@ -338,6 +338,29 @@ def retry_delay(attempt: int, retry_after=None) -> float:
     return min(BACKOFF_BASE_S * 2 ** (max(1, attempt) - 1), BACKOFF_CAP_S)
 
 
+def _after_budget_retry(truncation: BaseException, failure: BaseException, budget) -> BaseException:
+    """The error of a completion-budget retry that did not succeed, saying BOTH outcomes.
+
+    The second failure is raised ITSELF -- its type and attributes
+    (http_status, unreachable, possibly_billed, retryable...) are what the
+    callers read (third review, L8) -- with the truncation said in its
+    message and chained as its cause: a second cut says it was cut again
+    with the larger budget; any other failure (a 400 on the larger request,
+    a network error) says it followed a truncated answer.
+    """
+    from .messages import tx
+    if type(failure) is type(truncation):
+        note = tx("Ripetuta una volta con {budget} token di completamento: troncata di nuovo.",
+                  budget=budget)
+    else:
+        note = tx("(Secondo tentativo con {budget} token di completamento, dopo una risposta "
+                  "troncata dal budget: {truncation})", budget=budget, truncation=truncation)
+    if failure.args and isinstance(failure.args[0], str):
+        failure.args = (failure.args[0] + " " + note,) + tuple(failure.args[1:])
+    failure.__cause__ = truncation
+    return failure
+
+
 def make_logged_call(call_tool: Callable, progress: Optional[Callable[[str], None]], *,
                      log_prompt: bool = False,
                      cancel: Optional[Callable[[], None]] = None,
@@ -380,8 +403,14 @@ def make_logged_call(call_tool: Callable, progress: Optional[Callable[[str], Non
         bounded exponential backoff that honours the provider Retry-After; an
         error marked `compatibility` (a 400 about the tool_choice form) gets up
         to COMPATIBILITY_LEVELS immediate retries, each in a less specific
-        form (`compatibility_retry` 1, then 2), when the callable supports it. Any other error, a plain 400 included, is not retried:
-        repeating an invalid request only pays for the same refusal.
+        form (`compatibility_retry` 1, then 2), when the callable supports it; an
+        answer cut by the completion budget (an error carrying `budget_retry`,
+        openrouter.TruncatedAnswerError) gets ONE more attempt with that larger
+        `max_tokens`, announced as `AI_CALL_RETRY … reason=completion_budget`,
+        apart from the other two counts (model benchmark 2026-11-14). An error
+        after that attempt is reported WITH the truncation, never in place of
+        it. Any other error, a plain 400 included, is not retried: repeating
+        an invalid request only pays for the same refusal.
     """
     if progress is None and cancel is None:
         return call_tool
@@ -462,6 +491,10 @@ def make_logged_call(call_tool: Callable, progress: Optional[Callable[[str], Non
         attempt_kwargs = kwargs
         attempt = 1
         compatibility_level = 0
+        # The one completion-budget retry: the truncation it answers, kept
+        # to be reported with whatever the larger attempt ends in.
+        budget_error = None
+        budget_attempts = 0
         while True:
             watch = _CancelWatch(cancel) if cancel is not None else None
             try:
@@ -480,15 +513,34 @@ def make_logged_call(call_tool: Callable, progress: Optional[Callable[[str], Non
                     raise watch.cancelled from exc
                 if isinstance(exc, CallCancelled):
                     raise
+                budget = getattr(exc, "budget_retry", None)
+                if (budget_error is None and isinstance(budget, int) and not isinstance(budget, bool)
+                        and signature is not None and "max_tokens" in signature.parameters):
+                    budget_error = exc
+                    attempt_kwargs = dict(attempt_kwargs, max_tokens=budget)
+                    # Counted in the attempts the log shows, never against
+                    # MAX_ATTEMPTS of the transient retries (third review, L8).
+                    attempt += 1
+                    budget_attempts = 1
+                    emit(f"AI_CALL_RETRY {context} attempt={attempt} reason=completion_budget "
+                         f"max_tokens={budget}")
+                    check_cancel()
+                    if log_prompt:
+                        log_prompt_lines(context, bound_arguments(args, attempt_kwargs),
+                                         f" attempt={attempt}")
+                    continue
                 compatibility = (getattr(exc, "compatibility", False) is True
                                  and compatibility_level < COMPATIBILITY_LEVELS
                                  and signature is not None
                                  and "compatibility_retry" in signature.parameters)
                 transient = getattr(exc, "retryable", False) is True
-                if attempt >= MAX_ATTEMPTS or not (compatibility or transient):
+                if attempt - budget_attempts >= MAX_ATTEMPTS or not (compatibility or transient):
                     elapsed = perf_counter() - started
                     emit(f"AI_CALL_FAILURE {context} elapsed={elapsed:.3f}s attempts={attempt} "
                          f"error={_identifier(type(exc).__name__)}")
+                    if budget_error is not None:
+                        raise _after_budget_retry(budget_error, exc,
+                                                  attempt_kwargs.get("max_tokens"))
                     raise
                 attempt += 1
                 if compatibility:

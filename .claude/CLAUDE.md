@@ -10,7 +10,9 @@ This repository generates KiCad component libraries from mechanical and electric
 - Treat estimated mechanical dimensions as estimates and record them in notes.
 - Do not commit `.env`, `config.json`, Python caches, generated output or local KiCad state.
 - Keep generated KiCad output isolated until it has been reviewed in the KiCad tab.
-- Preview must not modify `fp-lib-table`; project installation uses `${KIPRJMOD}` and
+- Preview never touches the user's project or global `fp-lib-table`/`sym-lib-table`: it writes
+  only its own one-row `${KIPRJMOD}` tables inside `.kicad-preview` (user decision 2026-11-13,
+  schematic + symbol in the preview); project installation uses `${KIPRJMOD}` and
   global installation uses explicit absolute paths with overwrite confirmation.
 - Preserve unrelated library entries and make packaging operations rollback-safe.
 

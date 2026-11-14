@@ -78,6 +78,11 @@ SOURCE_KEYS = ("drill_mm", "pad_size", "shape", "lead")
 #: user), «derived» is computed by the program from read values (a hole from
 #: a read lead), «estimated» is a guess with no printed basis.
 SOURCE_WORDS = ("read", "derived", "estimated")
+#: Provenance words of the terminal only: the SOURCE_WORDS plus
+#: «contradicted», a lead reading the user's chosen hole contradicts (the
+#: printed diameter was the hole, so the terminal read is the doubtful value;
+#: night4 real run, 2026-11-14). The component check warns, never blocks, on it.
+LEAD_SOURCE_WORDS = SOURCE_WORDS + ("contradicted",)
 #: The words that are not a reading: the values carrying them must be
 #: verified on the drawing or the manufacturer's land pattern.
 UNVERIFIED_SOURCE_WORDS = ("derived", "estimated")
@@ -141,7 +146,7 @@ def normalised_sources(raw, number: str = "") -> Optional[dict]:
     """@brief Validate the per-pad provenance words and return a clean copy.
 
     @param raw None, or a mapping with any of the keys SOURCE_KEYS, each one
-        of SOURCE_WORDS.
+        of SOURCE_WORDS («lead» also LEAD_SOURCE_WORDS).
     @param number Pin number named in the error message.
     @return None for None or an empty mapping (nothing is stated: the same as
         a project saved before the provenance existed); otherwise a new dict
@@ -163,7 +168,8 @@ def normalised_sources(raw, number: str = "") -> Optional[dict]:
         if key not in raw:
             continue
         word = raw[key]
-        if not isinstance(word, str) or word not in SOURCE_WORDS:
+        allowed = LEAD_SOURCE_WORDS if key == "lead" else SOURCE_WORDS
+        if not isinstance(word, str) or word not in allowed:
             raise ValueError(tx("pin {number}: provenienza non valida per {key}: {word!r}",
                                 number=number, key=key, word=word))
         clean[key] = word

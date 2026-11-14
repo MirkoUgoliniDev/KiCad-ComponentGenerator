@@ -2125,6 +2125,65 @@ class CastellatedModuleParams:
                    row_spacing=self.row_spacing)
             )
 
+    def half_and_through_wall(self, side: CastellatedSide) -> Optional[float]:
+        """@brief Board left between the half-hole and the through-hole of one contact, in mm.
+
+        @param side A side of this module.
+        @return The wall (negative when the two holes would merge), or None
+            when the side carries no closed through-hole (another style, or a
+            half_and_through side whose rows leave no room for one).
+        @throws ValueError From side_geometry, when a declared size does not fit.
+        @note The same quantity `_validate_double_contacts` checks against
+            MIN_HOLE_WALL_MM.
+        """
+        geometry = self.side_geometry(side)
+        if side.contact_style != CONTACT_HALF_AND_THROUGH or not geometry.has_thru_holes:
+            return None
+        return (geometry.thru_inset - geometry.half_hole_inset
+                - geometry.half_hole / 2 - geometry.drill / 2)
+
+    def through_hole_alternative(self, side: CastellatedSide) -> Optional[SideGeometry]:
+        """@brief The geometry `side` would have as a plain through-hole contact, when it is buildable.
+
+        @param side A side of this module (any style).
+        @return The SideGeometry of the same side with contact_style
+            CONTACT_THROUGH_HOLE when every check of `_validate_through_hole_sides`
+            holds for it (a drill, a ring wider than the drill, the ring
+            closed inside the body and clear of the opposite row); None
+            otherwise.
+        @note Used to name a remedy, or to settle an impossible
+            half_and_through side, by the type of contact: the same position
+            (the declared row spacing) with no half-hole cut by the edge.
+            Never applied by the generator on its own.
+        """
+        through = replace(side, contact_style=CONTACT_THROUGH_HOLE)
+        try:
+            geometry = self.side_geometry(through)
+        except (TypeError, ValueError, ArithmeticError):
+            return None
+        if (geometry.thru_inset is None or geometry.drill <= 0 or geometry.ring <= geometry.drill
+                or geometry.thru_inset < geometry.ring / 2):
+            return None
+        extent = self.edge_extent(side.edge)
+        if geometry.thru_inset + geometry.ring / 2 > extent + 1e-6:
+            return None
+        opposite = {"left": "right", "right": "left", "top": "bottom", "bottom": "top"}.get(side.edge)
+        if (any(other.edge == opposite for other in self.sides)
+                and 2 * geometry.thru_inset + geometry.ring > extent + 1e-6):
+            return None
+        return geometry
+
+    def _through_hole_remedy(self, side: CastellatedSide) -> str:
+        """The remedy naming the contact type when a plain through-hole fits where the double contact cannot; '' otherwise."""
+        geometry = self.through_hole_alternative(side)
+        if geometry is None:
+            return ""
+        return " " + tx(
+            "Se sul bordo non c'e' un semi-foro, il tipo di contatto e' «foro passante»: con "
+            "questa geometria i fori passanti ci stanno (corona di {ring:.2f}mm a {inset:.2f}mm "
+            "dal bordo). Cambia il tipo di contatto del lato {label}.",
+            ring=geometry.ring, inset=geometry.thru_inset, label=EDGE_LABELS[side.edge])
+
     def _validate_double_contacts(self) -> None:
         """Checks for half_and_through sides that carry a closed through-hole.
 
@@ -2169,6 +2228,7 @@ class CastellatedModuleParams:
                        inset=inset,
                        wall=gap,
                        minimum=MIN_HOLE_WALL_MM)
+                    + self._through_hole_remedy(side)
                 )
             if gap < 0:
                 raise ValueError(
@@ -2180,6 +2240,7 @@ class CastellatedModuleParams:
                        value=inset - geometry.half_hole_inset,
                        value2=geometry.half_hole / 2 + geometry.drill / 2,
                        minimum=minimum)
+                    + self._through_hole_remedy(side)
                 )
             if gap < MIN_HOLE_WALL_MM - 1e-6:
                 raise ValueError(
@@ -2191,6 +2252,7 @@ class CastellatedModuleParams:
                        wall=gap,
                        wall_min=MIN_HOLE_WALL_MM,
                        minimum=minimum)
+                    + self._through_hole_remedy(side)
                 )
             if inset < geometry.ring / 2:
                 raise ValueError(

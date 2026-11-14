@@ -233,14 +233,19 @@ def test_the_balance_line_asks_for_the_provider_at_every_refresh(qapp):
 
 
 def test_restoring_a_project_model_moves_the_balance_to_its_provider(window):
-    """User, 27/09: a project reopened with a DeepSeek session model still showed
-    «Saldo OpenRouter». The restore path goes through _refresh_model_combo."""
-    window._session_model = "deepseek-api/deepseek-flash"     # as the restore does
-    window._refresh_model_combo()
+    """User, 27/09: a project reopened with a DeepSeek model still showed
+    «Saldo OpenRouter». Every path that changes the model goes through
+    _refresh_ai_models_line.
+
+    CONTRACT CHANGED 2026-11-13: no per-session model exists any more (user
+    decision); the saved default model decides the provider of the balance.
+    """
+    window.profile_store.save_defaults({"model": "deepseek-api/deepseek-flash"})
+    window._refresh_ai_models_line()
     assert window.ai_account.provider == "deepseek"
-    window._session_model = None
-    window._refresh_model_combo()
-    assert window.ai_account.provider == providers.provider_of(window._default_model())
+    window.profile_store.save_defaults({"model": "openai/gpt-4o"})
+    window._refresh_ai_models_line()
+    assert window.ai_account.provider == providers.provider_of("openai/gpt-4o") != "deepseek"
 
 
 # ── DeepSeek cost from the balance (user, 27/09: «il costo non e' 1.05 USD») ──

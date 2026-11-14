@@ -19,7 +19,8 @@ from ..generators.symbol import (ELECTRICAL_TYPES, PIN_GRID_MM, PIN_NAMES_HIDDEN
                                  symbol_pin_names_hidden,
                                  PROPERTY_ANCHOR_BOTTOM_LEFT, PROPERTY_ANCHOR_FIELD, property_anchors,
                                  normalize_pins, property_texts, symbol_inputs, layout_symbol,
-                                 symbol_property_positions)
+                                 symbol_property_positions, primary_pin_names_enabled,
+                                 set_primary_pin_names, summarize_pin_notes)
 from ..core.kicad_text import KICAD_PIN_NUMBER_ANCHOR_MM, SCHEMATIC_DEFAULT_PEN_MM, kicad_unescape
 from .kicad_text_item import REFERENCE_PX, cap_height_px, kicad_text_item, reference_font, text_baseline_px
 from . import canvas_menus
@@ -59,6 +60,10 @@ OBJECT_SNAP_REACH_PX = object_snap.SNAP_REACH_PX
 #: Symbol-specific: the footprint preview keeps its own angle mode and snap.
 CONFIG_ANGLE_MODE = 'symbol_angle_mode'
 CONFIG_OBJECT_SNAP = 'symbol_object_snap'
+#: Canvas theme of the symbol editor: "light" (KiCad's schematic colours, the
+#: default, user decision 2026-11-13) or "dark" (the application's). Only an
+#: explicit "dark" keeps the dark canvas.
+CONFIG_CANVAS_THEME = 'symbol_canvas_theme'
 
 #: Tag of the typed snap marker items this tab adds to its scene.
 SNAP_MARKER_TAG = 'symbol-object-snap'
@@ -1454,6 +1459,10 @@ class SymbolTab(QWidget):
     pin_types_ai_requested = pyqtSignal()
     export_requested = pyqtSignal()
     export_enabled_changed = pyqtSignal(bool)
+    #: A detail line for the log/registro (already in the interface
+    #: language), e.g. the per-pin space rewrites summarised on the status
+    #: line; sent once per distinct text. The owner appends it to its log.
+    log_message = pyqtSignal(str)
     #: The canvas colour scheme changed (`set_kicad_colors`): other views that
     #: borrow `theme` (the footprint selection highlight) restyle on it.
     theme_changed = pyqtSignal()
@@ -2071,6 +2080,9 @@ class SymbolTab(QWidget):
         self._history_index = -1
         self._selected_pin = None
         self._selected_pins = set()
+        # The per-pin notes already sent to the log belong to the rows just
+        # replaced: a new load logs its own once (review 2026-11-13).
+        self.__dict__.pop('_logged_pin_notes', None)
         if not same_project:
             # The element selection is made of indices into the previous
             # project's `symbol_graphics`: kept, it would select (and let
@@ -2355,23 +2367,63 @@ class SymbolTab(QWidget):
         """@brief Notes of the silent pin normalisations, in the interface language.
 
         @param pins SymbolPin list that already passed `layout_symbol`.
-        @return One translated line per note of `normalize_pins` (a pin name
-            whose spaces KiCad turns into «_»), without duplicates; [] when
-            nothing was rewritten.
+        @return The translated status lines without duplicates: the per-pin
+            space rewrites (a pin name whose spaces KiCad turns into «_»)
+            folded into ONE summary line (`summarize_pin_notes`), every
+            other note as it is; [] when nothing was rewritten.
         @note `layout_symbol` normalises the pins but discards the notes;
             asking `normalize_pins` again with a list is the only way to read
             them, and on pins that already validated it cannot raise.
+        @note The per-pin lines go to the log through `log_message`, each
+            distinct text once per tab (this runs at every redraw, a drag
+            included): the user asked for one line on the status, the
+            detail in the registro (2026-11-13).
         """
         if not pins:
             return []
         notes = []
         normalize_pins(pins, notes)
+        visible, detail = summarize_pin_notes(notes)
         lines = []
-        for note in notes:
+        for note in visible:
             text = note.localized(self.tx)
             if text not in lines:
                 lines.append(text)
+        logged = self.__dict__.setdefault('_logged_pin_notes', set())
+        for note in detail:
+            text = note.localized(self.tx)
+            if text not in logged:
+                logged.add(text)
+                self.log_message.emit(text)
         return lines
+
+    def set_primary_pin_names(self, enabled: bool) -> None:
+        """@brief Apply the «Solo nome principale» preference (only the primary name) and redraw.
+
+        @param enabled True: the symbol pin is named by the text before «(»
+            and the listed functions become KiCad alternates; False: the
+            full pinout text is the pin name (`symbol_inputs`).
+        @note The choice is process-wide (`set_primary_pin_names` of the
+            generator), so the export, the component check and this canvas
+            agree. A change bumps `source_revision`, so a text rendered from
+            the applied rows under the other choice is not reused, and
+            redraws the canvas (the names and the body width change); the
+            draft rows themselves are untouched.
+        """
+        enabled = bool(enabled)
+        if enabled == primary_pin_names_enabled():
+            return
+        set_primary_pin_names(enabled)
+        self._source_revision = getattr(self, '_source_revision', 0) + 1
+        self._changed()
+
+    @staticmethod
+    def primary_pin_names() -> bool:
+        """@brief The current «Solo nome principale» choice (see `set_primary_pin_names`).
+
+        @return True when symbol pins take the primary name plus alternates.
+        """
+        return primary_pin_names_enabled()
 
     @staticmethod
     def _layout_fails(rows):
@@ -2881,25 +2933,39 @@ class SymbolTab(QWidget):
 
         @return List of translated issue strings, empty when nothing is wrong.
         """
+        return [item[1] for item in self.review_issue_items()]
+
+    def review_issue_items(self):
+        """@brief The findings of `review_issues` with their KIND.
+
+        @return [(kind, translated text, pins)], kind one of «geometry»,
+            «missing_name», «electrical_type», «text_overlap»; `pins` the pin
+            numbers concerned (empty for «geometry»). The component check
+            drops the kinds it reports per row by kind, never by comparing
+            translated texts, and folds the overlaps into one row by their
+            pins (review 2026-11-14).
+        """
         issues = []
         rows = self.draft_rows()
         if not rows or self._symbol is None or self._error:
-            issues.append(self.tx('Geometria o corrispondenza pin non valida.'))
+            issues.append(('geometry', self.tx('Geometria o corrispondenza pin non valida.'), ()))
         for row in rows:
             number = str(row.get('pin', ''))
             if not str(row.get('name') or '').strip():
-                issues.append(f"{self.tx('Nome mancante')}: {number}")
+                issues.append(('missing_name', f"{self.tx('Nome mancante')}: {number}", (number,)))
             if (row.get('electrical_type_reviewed') is False or
                     row.get('electrical_type', 'passive') in ('passive', 'unspecified')
                     and not row.get('electrical_type_reviewed')):
-                issues.append(f"{self.tx('Tipo elettrico da verificare')}: {number}")
+                issues.append(('electrical_type', f"{self.tx('Tipo elettrico da verificare')}: {number}",
+                               (number,)))
         overlaps = set()
         for index, (number, rect) in enumerate(self._text_bounds):
             for other, other_rect in self._text_bounds[index + 1:]:
                 if number != other and rect.intersects(other_rect):
                     overlaps.add(tuple(sorted((number, other))))
         for first, second in sorted(overlaps):
-            issues.append(f"{self.tx('Testi sovrapposti')}: {first}, {second}")
+            issues.append(('text_overlap', f"{self.tx('Testi sovrapposti')}: {first}, {second}",
+                           (first, second)))
         return issues
 
     def show_review(self, exporting=False):
@@ -3111,6 +3177,8 @@ class SymbolTab(QWidget):
             `theme_changed` once the preview is redrawn.
         """
         self._theme_key = 'kicad' if enabled else 'dark'
+        # Remembered in the bound configuration (no-op while restoring or unbound).
+        self._save_setting(CONFIG_CANVAS_THEME, 'light' if enabled else 'dark')
         self.view.theme = self.theme
         self.view.setBackgroundBrush(QColor(self.theme['canvas']))
         self.view.viewport().update()
@@ -3924,6 +3992,9 @@ class SymbolTab(QWidget):
             keys; invalid values keep the defaults) and applies them without
             saving back; later changes are written into `config` and `save()`
             is called. Until bound, the tab keeps its defaults (free, snap on).
+        @note `CONFIG_CANVAS_THEME`: the bound tab starts with KiCad's light
+            colours unless the configuration says exactly "dark" (user
+            decision 2026-11-13); an unbound tab keeps the dark canvas.
         """
         self._settings, self._settings_save = config, save
         self._restoring_settings = True
@@ -3934,6 +4005,8 @@ class SymbolTab(QWidget):
             snap = config.get(CONFIG_OBJECT_SNAP) if isinstance(config, dict) else None
             if isinstance(snap, bool):
                 self.set_object_snap(snap)
+            theme = config.get(CONFIG_CANVAS_THEME) if isinstance(config, dict) else None
+            self.set_kicad_colors(theme != 'dark')
         finally:
             self._restoring_settings = False
 

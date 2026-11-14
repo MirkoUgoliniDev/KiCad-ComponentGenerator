@@ -56,9 +56,12 @@ Without KiCad installed, say so: it is an environment limit, not a pass.
 ## 5. Delivery (KiCad tab)
 
 - The KiCad tab is available to standard users (not only in an expert mode).
-- Actions disabled until both footprint and STEP exist.
-- Isolated preview: no `fp-lib-table` created or modified; the preview board
-  resolves the copied STEP through `${KIPRJMOD}`.
+- Actions need the footprint; without a STEP model they still work and warn
+  (user decision 2026-11-12).
+- Isolated preview: the user's project and global library tables are never
+  touched; `.kicad-preview` holds its own one-row `${KIPRJMOD}` fp/sym tables,
+  a schematic with the symbol, and the board, which resolves the copied STEP
+  through `${KIPRJMOD}`.
 - Project installation: portable `${KIPRJMOD}` references. Global
   installation: absolute model paths, only the intended library entry
   changed, other entries preserved.

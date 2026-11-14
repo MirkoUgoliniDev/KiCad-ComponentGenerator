@@ -334,8 +334,12 @@ def test_the_verification_passes_the_footprint_draft_state(project, monkeypatch)
     captured = []
 
     class Dialog:
-        def __init__(self, args, parent, tx):
-            captured.append(args)
+        # CONTRACT CHANGED 2026-11-13: the check dialog also receives its fixes
+        # (`actions`, the symbol re-export); this stub only records `args`.
+        def __init__(self, args, parent, tx, actions=None):
+            # CONTRACT CHANGED 2026-11-14 (review P2): the window gives an args BUILDER,
+            # called by the dialog for every run; the stub calls it once.
+            captured.append(args() if callable(args) else args)
 
         def exec(self):
             return 0

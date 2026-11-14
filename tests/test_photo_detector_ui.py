@@ -35,6 +35,16 @@ def _rebuild_from_boxes(window):
     window._photo_rows = [window._photo_row(box, None)
                           for box in window._components_from_table()]
 
+def _use_default_model(window, model):
+    """@brief Save `model` as the default model of the test's profile database.
+
+    @note CONTRACT CHANGED 2026-11-13: the tests used to set a per-session
+        model (`_session_model`), removed by the user's decision; the saved
+        default model is now the only one an analysis starts from.
+    """
+    window.profile_store.save_models(defaults={"model": model})
+
+
 @pytest.fixture(autouse=True)
 def offline(monkeypatch):
     """@brief Block network requests even if a regression starts extraction."""
@@ -293,7 +303,7 @@ def test_preflight_happens_before_worker_and_busy_controls_restore(window, monke
     monkeypatch.setattr(gui.ExtractWorker, "start", lambda self: events.append(("start", self)))
     window.combo_photo_detector.setCurrentIndex(1)
     window.field_yolo_model.setText(path_text)
-    window._session_model = "configured/model"
+    _use_default_model(window, "configured/model")
 
     window._extract_with_ai()
 
@@ -308,7 +318,7 @@ def test_preflight_happens_before_worker_and_busy_controls_restore(window, monke
     # uno, segue il modello configurato: all'avvio la finestra non impone un
     # modello suo, altrimenti la chiamata a pagamento finisce a un modello che
     # l'utente non ha scelto e non vede scritto da nessuna parte.
-    assert window._vlm_model is None
+    assert not hasattr(window, "_vlm_model")
     assert worker.model == worker.vision_model == "configured/model"
     assert worker.verification_model == "configured/model"
     for control in (window.combo_photo_detector, window.field_yolo_model, window.btn_pick_yolo_model):
@@ -489,13 +499,16 @@ def test_gui_preserves_full_component_body_overhang_at_each_board_edge(window, k
 
 
 def test_without_a_vision_model_the_photo_call_falls_back_to_the_configured_one(window, monkeypatch):
-    """@brief Caso negativo: svuotare il campo non deve lasciare la chiamata senza modello."""
+    """@brief Caso negativo: la chiamata sulla foto non resta mai senza modello.
+
+    @note CONTRACT CHANGED 2026-11-13: there is no vision-model field to empty
+        any more (per-session models removed); the call follows the saved default.
+    """
     _fake_yolo(monkeypatch, lambda path: None)
     monkeypatch.setattr(window, "_selected_documents", lambda: ([Path("board.png")], None))
     monkeypatch.setattr(gui.ExtractWorker, "start", lambda self: None)
     window.combo_photo_detector.setCurrentIndex(window.combo_photo_detector.findData("yolo"))
-    window._session_model = "configured/model"
-    window._vlm_model = ""
+    _use_default_model(window, "configured/model")
     window._extract_with_ai()
     worker = window._extract_worker
     assert worker.model == worker.vision_model == worker.verification_model == "configured/model"
@@ -510,27 +523,27 @@ def test_at_boot_the_photo_call_follows_the_configured_model(window, monkeypatch
     apriva l'app trovava gia' scelto un modello che non aveva configurato --
     la riconciliazione ci finiva senza che nulla lo dicesse.
 
-    Scegliere un modello dal pannello resta possibile e vince: e' il caso in
-    cui si vuole spendere meno sulla fotografia che sui datasheet.
+    CONTRACT CHANGED 2026-11-13: the panel's per-session vision model was
+    removed (user decision); a cheaper model for the photo is the inventory
+    step's own model in Configurazione → «Modello AI...». Negative now: a new
+    SAVED default model is followed at once, never an older session choice.
     """
     _fake_yolo(monkeypatch, lambda path: None)
     monkeypatch.setattr(window, "_selected_documents", lambda: ([Path("board.png")], None))
     monkeypatch.setattr(gui.ExtractWorker, "start", lambda self: None)
     window.combo_photo_detector.setCurrentIndex(window.combo_photo_detector.findData("yolo"))
-    window._session_model = "configured/model"
+    _use_default_model(window, "configured/model")
 
-    # Appena aperta: nessuna scelta di sessione, e il campo mostra quello che
-    # verra' davvero usato.
-    assert window._vlm_model is None
+    assert not hasattr(window, "_vlm_model")
     assert window._photo_detector_model() == "configured/model"
     window._extract_with_ai()
     assert window._extract_worker.verification_model == "configured/model"
 
-    # Scelta esplicita dal pannello: vince, e resta solo per la sessione.
-    window._vlm_model = "cheap/vision-model"
-    assert window._photo_detector_model() == "cheap/vision-model"
+    # A new saved default is followed at once.
+    _use_default_model(window, "other/model")
+    assert window._photo_detector_model() == "other/model"
     window._extract_with_ai()
-    assert window._extract_worker.verification_model == "cheap/vision-model"
+    assert window._extract_worker.verification_model == "other/model"
 
 
 def test_the_photo_call_model_is_always_written_in_the_log(window, monkeypatch):
@@ -544,17 +557,14 @@ def test_the_photo_call_model_is_always_written_in_the_log(window, monkeypatch):
     monkeypatch.setattr(window, "_selected_documents", lambda: ([Path("board.png")], None))
     monkeypatch.setattr(gui.ExtractWorker, "start", lambda self: None)
     window.combo_photo_detector.setCurrentIndex(window.combo_photo_detector.findData("yolo"))
-    window._session_model = "configured/model"
+    _use_default_model(window, "configured/model")
     lines = []
     monkeypatch.setattr(window, "_on_ai_progress", lines.append)
 
     window._extract_with_ai()
     assert any("configured/model" in line and "fotografia" in line for line in lines), lines
-
-    lines.clear()
-    window._vlm_model = "cheap/vision-model"
-    window._extract_with_ai()
-    assert any("cheap/vision-model" in line and "sessione" in line for line in lines), lines
+    # CONTRACT CHANGED 2026-11-13: no line speaks of a per-session model any more.
+    assert not any("sessione" in line for line in lines), lines
 
 
 def test_the_yolo_browse_command_is_an_icon_with_a_tooltip(window):  # noqa: F811

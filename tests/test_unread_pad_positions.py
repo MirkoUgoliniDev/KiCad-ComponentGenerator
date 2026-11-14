@@ -126,17 +126,33 @@ _BODY = {"drawing_unit": "mm", "body_length": 18.0, "body_width": 9.5, "body_hei
 
 
 def test_end_to_end_unread_pads_no_longer_reject_the_paid_answer(offline, monkeypatch, tmp_path):
-    call = Mock(side_effect=[_answer(_pads(POSITIONS)), _CHAINS, _BODY])
+    # CONTRACT CHANGED (task C2, 2026-11-14): a chain the body contradicts
+    # earns ONE targeted re-read of its axis when nothing at hand is
+    # confirmed; here the model repeats the same X chain (third call).
+    call = Mock(side_effect=[_answer(_pads(POSITIONS)), _CHAINS, _CHAINS, _BODY])
     monkeypatch.setattr(ext, "call_tool", call)
     params = ext.extract_pin_header_params([_drawing(tmp_path)], component_family="single_tht",
                                            document_roles={"quote.png": ["pinout", "top"]})
-    assert call.call_count == 3
+    assert call.call_count == 4
     assert call.call_args_list[1].kwargs["tool"]["function"]["name"] == "report_pad_positions"
+    reread = call.call_args_list[2].kwargs
+    assert reread["tool"]["function"]["name"] == "report_pad_positions"
+    assert any("contradicts the drawing" in block.get("text", "")
+               for block in reread["content_blocks"])
     assert params.package_geometry is None
     assert params.body_length_mm == pytest.approx(18.0) and len(params.pinout) == 5
     assert "Geometria dei pad scartata" in params.notes
-    # The dedicated reading's own block stands, with its reason.
-    assert params.pin_map_conflict and "NON confermate" in params.pin_map_conflict
+    # CONTRACT CHANGED (task C2, 2026-11-14): the pads stay blocked (no
+    # position is confirmed), but no longer as a dead end: the dedicated
+    # reading is offered in the pad-layout question with what is wrong in
+    # it, beside «keep blocked», and nothing is recommended.
+    assert params.pin_map_conflict and "NON lette" in params.pin_map_conflict
+    question, = [q for q in params.questions if q["field"] == "pad_layout"]
+    values = [o["value"] for o in question["options"]]
+    assert any(v.startswith("dedicated") for v in values)
+    assert any(v.startswith(ext.LAYOUT_BLOCK_KIND) for v in values)
+    assert not any(o.get("recommended") for o in question["options"])
+    assert "sommano" in question["text"]
     # The answer as given keeps the pads, so «Rileggi posizioni» can still settle them.
     assert len(params.raw_main["package_geometry"]["pins"]) == 5
 

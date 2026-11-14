@@ -17,6 +17,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 
@@ -139,11 +140,22 @@ class ComponentArtifacts:
 
 @dataclass(frozen=True)
 class PreviewProject:
-    """@brief Describe an isolated KiCad project created for visual review."""
+    """@brief Describe an isolated KiCad project created for visual review.
+
+    @note ``schematic_path`` and ``symbol_library_path`` (USER DECISION
+        2026-11-13, option B) are the temporary schematic with the component
+        symbol placed and the project-local copy of the ``.kicad_sym`` its
+        ``sym-lib-table`` points to; both None when no schematic was written,
+        and ``schematic_skipped`` then holds the reason code (see
+        `PREVIEW_SCHEMATIC_SKIP_REASONS`). The board is written in every case.
+    """
 
     directory: Path
     board_path: Path
     project_path: Path
+    schematic_path: Path | None = None
+    symbol_library_path: Path | None = None
+    schematic_skipped: str | None = None
 
 
 @dataclass(frozen=True)
@@ -663,6 +675,10 @@ PREVIEW_DIR_NAME = ".kicad-preview"
 
 #: Position of the footprint on the preview board, mm.
 _PREVIEW_ORIGIN = (100.0, 100.0)
+#: Public name of `_PREVIEW_ORIGIN`: where the footprint sits on the preview
+#: board (mm), so a reader of a DRC report can bring a position back to the
+#: footprint's own coordinates.
+PREVIEW_FOOTPRINT_ORIGIN = _PREVIEW_ORIGIN
 
 #: Smallest preview outline, as (min x, min y, max x, max y) in board mm: the
 #: historical 70 x 50 mm frame around the footprint, kept for small parts.
@@ -779,15 +795,310 @@ def preview_board_outline(footprint_text: str) -> tuple[float, float, float, flo
             round(max(outline[2], grown[2]), 4), round(max(outline[3], grown[3]), 4))
 
 
+#: Nickname of the symbol library in the preview project's own
+#: ``sym-lib-table`` and of the library part of the schematic's footprint
+#: field. It names only the copy inside the temporary project.
+PREVIEW_LIBRARY_NICKNAME = "KiCadGen_Preview"
+
+#: Schematic file format written by `preview_schematic_text`: the
+#: ``(version ...)`` token that ``kicad-cli 10.0.8 sch upgrade`` writes
+#: (checked 2026-11-13), the same that KiCad 10's demo schematics carry. It
+#: needs KiCad 10, the oldest version the generated files already require
+#: (`MINIMUM_KICAD_VERSION`).
+SCHEMATIC_FORMAT_VERSION = 20260306
+
+#: Centre of the placed symbol on the A4 sheet (297 x 210 mm), in schematic
+#: mm (Y down), on the 1.27 mm (50 mil) grid KiCad snaps symbols to.
+_SCHEMATIC_CENTRE = (148.59, 105.41)
+
+#: Horizontal distance between two units of a multi-unit symbol, mm (40 x
+#: 1.27, on the grid).
+_SCHEMATIC_UNIT_STEP = 50.8
+
+#: Reasons why no preview schematic was written, as the codes stored in
+#: `PreviewProject.schematic_skipped`; the GUI words them.
+PREVIEW_SCHEMATIC_SKIP_REASONS = (
+    "symbol_missing",          # no <name>.kicad_sym next to the footprint
+    "symbol_unreadable",       # not UTF-8 or not a balanced S-expression
+    "symbol_not_found",        # the library holds no symbol of that name
+    "symbol_derived",          # the symbol extends another one (not flattened)
+    "sym_lib_table_foreign",   # a caller-chosen folder already has another table
+    "fp_lib_table_foreign",    # same, for the footprint library table
+    "symbol_copy_foreign",     # same, for an existing <name>.kicad_sym
+    "footprint_copy_foreign",  # same, for KiCadGen_Preview.pretty
+    "schematic_locked",        # the Schematic Editor holds the preview schematic open
+)
+
+_SYMBOL_HEAD = re.compile(r'\A(\(\s*symbol\s+)("(?:[^"\\]|\\.)*"|[^\s()"]+)')
+_PROPERTY_HEAD = re.compile(
+    r'\A(\(\s*property\s+)("(?:[^"\\]|\\.)*"|[^\s()"]+)(\s+)("(?:[^"\\]|\\.)*"|[^\s()"]+)')
+_PROPERTY_AT = re.compile(r"\(at\s+" + _NUMBER + r"\s+" + _NUMBER + r"(?:\s+" + _NUMBER + r")?\s*\)")
+_PIN_NUMBER = re.compile(r'\(number\s+("(?:[^"\\]|\\.)*"|[^\s()"]+)')
+_UNIT_NAME = re.compile(r"_(\d+)_(\d+)\Z")
+_FLAG = re.compile(r"\((exclude_from_sim|in_bom|on_board|in_pos_files)\s+(yes|no)\s*\)")
+
+
+def _atom_value(token: str) -> str:
+    """Text of one S-expression atom: a quoted string unescaped, a bare atom as is."""
+    if token.startswith('"'):
+        return _node_arguments(f"(x {token})")[0]
+    return token
+
+
+class _SymbolUnusable(Exception):
+    """A symbol library that cannot feed the preview schematic; ``args[0]`` is the reason code."""
+
+
+def _library_symbol(library_text: str, name: str) -> str:
+    """@brief Text of the top-level symbol `name` of a ``.kicad_sym`` file.
+
+    @param library_text Content of the symbol library.
+    @param name Symbol name; when the library holds exactly one symbol of
+        another name, that one is taken (a library renamed by hand).
+    @return The ``(symbol ...)`` block, verbatim.
+    @throws _SymbolUnusable ``symbol_unreadable``, ``symbol_not_found`` or
+        ``symbol_derived``.
+    """
+    if not library_text.lstrip().startswith("(kicad_symbol_lib"):
+        raise _SymbolUnusable("symbol_unreadable")
+    try:
+        ranges = _direct_child_ranges(library_text, "symbol")
+    except KiCadLibraryError as exc:
+        raise _SymbolUnusable("symbol_unreadable") from exc
+    blocks = [library_text[start:end] for start, end in ranges]
+    named = [block for block in blocks
+             if (head := _SYMBOL_HEAD.match(block)) and _atom_value(head.group(2)) == name]
+    chosen = named[0] if named else (blocks[0] if len(blocks) == 1 else None)
+    if chosen is None:
+        raise _SymbolUnusable("symbol_not_found")
+    if _direct_child_ranges(chosen, "extends"):
+        # A derived symbol must be flattened with its parent before it can be
+        # embedded in lib_symbols; the generators never write one.
+        raise _SymbolUnusable("symbol_derived")
+    return chosen
+
+
+def _symbol_units(symbol_block: str, name: str) -> dict[int, list[str]]:
+    """@brief Pin numbers of each unit of a library symbol.
+
+    @param symbol_block The ``(symbol ...)`` block of the library.
+    @param name Its name, prefix of the unit names ``<name>_<unit>_<style>``.
+    @return {unit number: sorted unique pin numbers}; pins of unit 0 belong
+        to every unit. A symbol without numbered units yields {1: pins}.
+    """
+    common: list[str] = []
+    per_unit: dict[int, list[str]] = {}
+    for start, end in _direct_child_ranges(symbol_block, "symbol"):
+        block = symbol_block[start:end]
+        head = _SYMBOL_HEAD.match(block)
+        unit_match = _UNIT_NAME.search(_atom_value(head.group(2))) if head else None
+        unit = int(unit_match.group(1)) if unit_match else 1
+        numbers = [_atom_value(token) for token in _PIN_NUMBER.findall(block)]
+        (common if unit == 0 else per_unit.setdefault(unit, [])).extend(numbers)
+    if not per_unit:
+        per_unit[1] = []
+    return {unit: sorted(set(pins + common), key=_pin_sort_key)
+            for unit, pins in sorted(per_unit.items())}
+
+
+def _pin_sort_key(number: str) -> tuple:
+    """Natural order of pin numbers (``2`` before ``10``, ``A1`` before ``A10``).
+
+    Only ASCII digit runs are numbers: ``str.isdigit`` accepts «²», which
+    ``int`` refuses, and the key would raise instead of sorting (review
+    2026-11-14).
+    """
+    return tuple((0, int(part), "") if part.isascii() and part.isdigit() else (1, 0, part)
+                 for part in re.findall(r"[0-9]+|[^0-9]+", number))
+
+
+def preview_reference(prefix: str) -> str:
+    """@brief Reference of the placed preview symbol: the designator plus 1.
+
+    @param prefix Value of the library symbol's ``Reference`` property
+        (``U``, ``K``, ``J?``...).
+    @return The designator with trailing ``?`` and digits removed, followed
+        by ``1``; ``U1`` when nothing usable is left.
+    """
+    letters = re.sub(r"[?\d\s]+\Z", "", prefix or "")
+    return f"{letters or 'U'}1"
+
+
+def preview_schematic_text(symbol_block: str, name: str, *, footprint_id: str,
+                           project_name: str, nickname: str = PREVIEW_LIBRARY_NICKNAME,
+                           sheet_uuid: str | None = None) -> str:
+    """@brief A KiCad 10 schematic with the component symbol placed on an A4 sheet.
+
+    @param symbol_block The ``(symbol ...)`` block of the component library.
+    @param name Symbol name (also the placed Value).
+    @param footprint_id Footprint field of the placed symbol, ``nick:name``.
+    @param project_name Stem of the ``.kicad_pro`` the schematic belongs to,
+        named in the symbol instances as KiCad writes them.
+    @param nickname Library nickname of the ``lib_id``.
+    @param sheet_uuid UUID of the root sheet; a fresh one when None.
+    @return The schematic text (format `SCHEMATIC_FORMAT_VERSION`).
+    @throws KiCadLibraryError ``malformed_file`` for an unbalanced block.
+    @note The symbol is embedded in ``lib_symbols`` as KiCad writes it: the
+        top-level name becomes ``nickname:name`` and the unit children keep
+        their unprefixed ``name_<unit>_<style>`` names. Every unit is placed,
+        side by side, with the same reference. The placed properties copy the
+        library ones (effects, visibility) with their positions moved by the
+        placement (library Y up, schematic Y down); ``ki_*`` properties stay
+        in the library, as KiCad does.
+    """
+    lib_id = f"{nickname}:{name}"
+    head = _SYMBOL_HEAD.match(symbol_block)
+    if not head:
+        raise KiCadLibraryError("The symbol block is not a KiCad symbol.",
+                                code="malformed_file")
+    embedded = f"{head.group(1)}{quote(lib_id)}{symbol_block[head.end():]}"
+    units = _symbol_units(symbol_block, _atom_value(head.group(2)))
+    # The placed symbol keeps the library's BOM/board/simulation flags.
+    flags: dict[str, str] = {}
+    for node in ("exclude_from_sim", "in_bom", "on_board", "in_pos_files"):
+        for start, _end in _direct_child_ranges(symbol_block, node):
+            found = _FLAG.match(symbol_block, start)
+            if found:
+                flags[found.group(1)] = found.group(2)
+    properties = [symbol_block[start:end]
+                  for start, end in _direct_child_ranges(symbol_block, "property")]
+    reference = "U1"
+    for block in properties:
+        match = _PROPERTY_HEAD.match(block)
+        if match and _atom_value(match.group(2)) == "Reference":
+            reference = preview_reference(_atom_value(match.group(4)))
+    overrides = {"Reference": reference, "Value": name, "Footprint": footprint_id}
+    sheet = sheet_uuid or str(uuid.uuid4())
+    centre_x, centre_y = _SCHEMATIC_CENTRE
+    first_x = centre_x - _SCHEMATIC_UNIT_STEP * (len(units) - 1) / 2
+    placed: list[str] = []
+    for index, (unit, pins) in enumerate(units.items()):
+        x, y = round(first_x + index * _SCHEMATIC_UNIT_STEP, 4), centre_y
+        rows = [
+            "\t(symbol",
+            f"\t\t(lib_id {quote(lib_id)})",
+            f"\t\t(at {_mm(x)} {_mm(y)} 0)",
+            f"\t\t(unit {unit})",
+            "\t\t(body_style 1)",
+        ]
+        rows.extend(f"\t\t({flag} {flags.get(flag, default)})" for flag, default in (
+            ("exclude_from_sim", "no"), ("in_bom", "yes"), ("on_board", "yes"),
+            ("in_pos_files", "yes")))
+        rows.append("\t\t(dnp no)")
+        rows.append(f"\t\t(uuid {quote(str(uuid.uuid4()))})")
+        for block in properties:
+            match = _PROPERTY_HEAD.match(block)
+            if not match:
+                continue
+            key = _atom_value(match.group(2))
+            if key.startswith("ki_"):
+                continue
+            value = overrides.get(key, _atom_value(match.group(4)))
+            text = f"{match.group(1)}{quote(key)}{match.group(3)}{quote(value)}{block[match.end():]}"
+
+            def moved(at: re.Match, x=x, y=y) -> str:
+                """Library position of a property moved onto the sheet."""
+                angle = at.group(3) or "0"
+                return (f"(at {_mm(x + float(at.group(1)))} "
+                        f"{_mm(y - float(at.group(2)))} {angle})")
+            rows.append("\t\t" + _PROPERTY_AT.sub(moved, text, count=1))
+        rows.extend(f"\t\t(pin {quote(pin)} (uuid {quote(str(uuid.uuid4()))}))" for pin in pins)
+        rows.extend((
+            "\t\t(instances",
+            f"\t\t\t(project {quote(project_name)}",
+            f"\t\t\t\t(path {quote('/' + sheet)}",
+            f"\t\t\t\t\t(reference {quote(reference)})",
+            f"\t\t\t\t\t(unit {unit})",
+            "\t\t\t\t)",
+            "\t\t\t)",
+            "\t\t)",
+            "\t)",
+        ))
+        placed.append("\n".join(rows))
+    return (
+        "(kicad_sch\n"
+        f"\t(version {SCHEMATIC_FORMAT_VERSION})\n"
+        f"\t(generator {quote('kicadgen_tool')})\n"
+        f"\t(generator_version {quote(GENERATOR_VERSION)})\n"
+        f"\t(uuid {quote(sheet)})\n"
+        f"\t(paper {quote('A4')})\n"
+        "\t(lib_symbols\n"
+        f"\t\t{embedded.strip()}\n"
+        "\t)\n"
+        + "\n".join(placed) + "\n"
+        "\t(sheet_instances\n"
+        f"\t\t(path {quote('/')}\n"
+        f"\t\t\t(page {quote('1')})\n"
+        "\t\t)\n"
+        "\t)\n"
+        "\t(embedded_fonts no)\n"
+        ")\n"
+    )
+
+
+def preview_sym_lib_table(library_file_name: str,
+                          nickname: str = PREVIEW_LIBRARY_NICKNAME) -> str:
+    """@brief The preview project's own ``sym-lib-table``: ONE row, inside the project.
+
+    @param library_file_name File name of the symbol library copy in the
+        preview folder.
+    @param nickname Library nickname.
+    @return The table text; its only URI is ``${KIPRJMOD}/<file>``, so
+        nothing outside the temporary project is named.
+    """
+    uri = "${KIPRJMOD}/" + library_file_name
+    return (
+        "(sym_lib_table\n"
+        "  (version 7)\n"
+        f"  (lib (name {quote(nickname)})(type {quote('KiCad')})(uri {quote(uri)})"
+        f"(options {quote('')})(descr {quote('KiCadGen preview copy')}))\n"
+        ")\n"
+    )
+
+
+def preview_fp_lib_table(nickname: str = PREVIEW_LIBRARY_NICKNAME) -> str:
+    """@brief The preview project's own ``fp-lib-table``: ONE row, inside the project.
+
+    @param nickname Library nickname, the one of the schematic's footprint field.
+    @return The table text; its only URI is ``${KIPRJMOD}/<nickname>.pretty``,
+        the footprint copy inside the temporary project.
+    @note USER DECISION 2026-11-13: this temporary, project-local table is
+        the only ``fp-lib-table`` the preview writes; the user's project
+        tables and KiCad's global table are never written or read.
+    """
+    uri = "${KIPRJMOD}/" + nickname + ".pretty"
+    return (
+        "(fp_lib_table\n"
+        "  (version 7)\n"
+        f"  (lib (name {quote(nickname)})(type {quote('KiCad')})(uri {quote(uri)})"
+        f"(options {quote('')})(descr {quote('KiCadGen preview copy')}))\n"
+        ")\n"
+    )
+
+
 def create_preview_project(
         artifacts: ComponentArtifacts,
         output_dir: str | os.PathLike[str] | None = None) -> PreviewProject:
     """@brief Create an isolated board that can be opened in KiCad for review.
 
     @details The generated board embeds the footprint and references a local copy
-    of the STEP model through ``${KIPRJMOD}``. No KiCad library table is changed.
+    of the STEP model through ``${KIPRJMOD}``. No library table of the user's
+    projects or of KiCad's configuration is changed: the only tables written
+    are the preview folder's own one-row ``sym-lib-table`` and
+    ``fp-lib-table``, through ``${KIPRJMOD}`` (below).
     Without a STEP (`ComponentArtifacts.has_step` False) the board footprint
     has no model node and no model is copied.
+    USER DECISION 2026-11-13 (option B): the same folder also receives a
+    schematic ``<name>-preview.kicad_sch`` with the component symbol placed
+    (`preview_schematic_text`), a copy ``<name>.kicad_sym`` of the symbol
+    library and a project-local ``sym-lib-table`` whose only row points to
+    that copy through ``${KIPRJMOD}`` (`preview_sym_lib_table`), and (same
+    decision, follow-up) a copy of the footprint in
+    ``KiCadGen_Preview.pretty`` with a project-local ``fp-lib-table`` naming
+    only it (`preview_fp_lib_table`), so the schematic's footprint field
+    resolves. No other library table, project or global, is written. Without
+    a usable symbol the schematic and both tables are skipped
+    (`PreviewProject.schematic_skipped`), never the board.
     The board outline is at least 70 x 50 mm and grows to keep the footprint
     courtyard plus a margin inside (see preview_board_outline).
     The footprint is parsed before anything is written, the board and model
@@ -845,6 +1156,35 @@ def create_preview_project(
             "Close it in KiCad before refreshing the preview.",
             code="preview_locked", path=lock_path, board=board_path,
         )
+    own_folder = preview_dir.name == PREVIEW_DIR_NAME
+    schematic_path = preview_dir / f"{artifacts.name}-preview.kicad_sch"
+    symbol_copy = preview_dir / f"{artifacts.name}.kicad_sym"
+    table_path = preview_dir / "sym-lib-table"
+    # Footprint library of the preview project (USER DECISION 2026-11-13):
+    # a copy of the footprint inside the temporary folder, named by a table
+    # inside the same folder, so the schematic's footprint field resolves.
+    footprint_library = preview_dir / f"{PREVIEW_LIBRARY_NICKNAME}.pretty"
+    footprint_copy = footprint_library / f"{artifacts.name}.kicad_mod"
+    fp_table_path = preview_dir / "fp-lib-table"
+    # Only the schematic open in the Schematic Editor (review 2026-11-13): the
+    # board is still refreshed, the schematic set is left exactly as it is
+    # (neither rewritten nor removed) and the reason is reported.
+    schematic_locked = kicad_lock_file(schematic_path).exists()
+    # The schematic is composed before the first write too; a symbol that
+    # cannot feed it only skips the schematic, the board is still written.
+    # The library footprint carries the same model node as the board one, so
+    # «Update PCB from schematic» brings the 3D model too.
+    library_footprint = (
+        attach_3d_model(footprint_text, f"${{KIPRJMOD}}/{artifacts.name}.step",
+                        artifacts.model_offset)
+        if with_model else detach_3d_model(footprint_text))
+    if schematic_locked:
+        schematic, table, fp_table, skipped = None, None, None, "schematic_locked"
+    else:
+        schematic, table, fp_table, skipped = _preview_schematic_parts(
+            artifacts, project_path.stem, own_folder,
+            {table_path: None, fp_table_path: None, symbol_copy: None,
+             footprint_copy: library_footprint})
     outline_uuid = uuid.uuid4()
     layer_rows = "".join(
         f"\t\t({ordinal} {quote(name)} {kind}"
@@ -878,7 +1218,9 @@ def create_preview_project(
             # by older versions (shutil.copy2), never set to protect content.
             for own in (preview_dir / f"{artifacts.name}.step",
                         preview_dir / f"{artifacts.name}.wrl",
-                        board_path, project_path):
+                        board_path, project_path,
+                        schematic_path, symbol_copy, table_path,
+                        fp_table_path, footprint_copy):
                 if own.is_file():
                     _clear_readonly(own)
         preview_step = preview_dir / f"{artifacts.name}.step"
@@ -899,6 +1241,27 @@ def create_preview_project(
             # nothing is user content.
             _remove_clearing_readonly(preview_wrl)
         _atomic_write_text(board_path, board)
+        if schematic is not None:
+            _write_preview_set(
+                ((symbol_copy, _component_symbol_path(artifacts).read_bytes()),
+                 (footprint_copy, library_footprint), (table_path, table),
+                 (fp_table_path, fp_table), (schematic_path, schematic)))
+        elif schematic_locked and footprint_copy.is_file():
+            # The open schematic is left alone, but its footprint library is
+            # refreshed: «Aggiorna PCB dallo schema» (Update PCB from
+            # schematic) would otherwise bring the OLD footprint back into the
+            # board just rewritten (review 2026-11-14).
+            _atomic_write_text(footprint_copy, library_footprint)
+        elif own_folder and not schematic_locked:
+            # No usable symbol now: the schematic of an earlier preview would
+            # show a stale part. Only in the program's own preview folder; an
+            # open schematic is never touched.
+            for stale in (schematic_path, symbol_copy, table_path,
+                          fp_table_path, footprint_copy):
+                if stale.is_file():
+                    _remove_clearing_readonly(stale)
+            if footprint_library.is_dir() and not any(footprint_library.iterdir()):
+                footprint_library.rmdir()
         if not project_path.exists():
             _atomic_write_text(project_path, "{}\n")
     except PermissionError as exc:
@@ -910,7 +1273,137 @@ def create_preview_project(
             f"held open by another program ({exc}).",
             code="preview_write_refused", path=refused, error=exc,
         ) from exc
-    return PreviewProject(preview_dir, board_path, project_path)
+    if schematic is None:
+        return PreviewProject(preview_dir, board_path, project_path,
+                              schematic_skipped=skipped)
+    return PreviewProject(preview_dir, board_path, project_path,
+                          schematic_path, symbol_copy)
+
+
+def _write_preview_set(files) -> None:
+    """@brief Write the preview schematic's files as one set, as far as the file system allows.
+
+    @param files (path, text or bytes) pairs, the library copies first and the
+        schematic last, so a schematic never names a library that is missing.
+    @throws OSError The first failure, after the cleanup below.
+    @note Every text is first written to a sibling scratch file; only when
+        all scratch files exist are they moved onto their targets, each by an
+        atomic replace. A failure while preparing leaves every target as it
+        was. A failure while moving removes the targets this call CREATED
+        (they did not exist before), so no half-new set is left; a target it
+        had already replaced keeps its new, complete content (restoring the
+        old one would need a backup copy of every file, not worth it for a
+        generated preview).
+    """
+    staged: list[tuple[Path, Path, bool]] = []
+    created_dirs: list[Path] = []
+    try:
+        for path, content in files:
+            if not path.parent.is_dir():
+                path.parent.mkdir(parents=True)
+                created_dirs.append(path.parent)
+            target = _write_target(path)
+            scratch = _temporary_sibling(target)
+            staged.append((target, scratch, target.exists()))
+            _write_durably(scratch, content if isinstance(content, bytes)
+                           else content.encode("utf-8"))
+        published: list[tuple[Path, bool]] = []
+        try:
+            for target, scratch, existed in staged:
+                _publish_scratch(scratch, target)
+                published.append((target, existed))
+        except OSError:
+            for target, existed in published:
+                if not existed:
+                    _unlink_quietly(target)
+            raise
+    except OSError:
+        for directory in reversed(created_dirs):
+            try:
+                directory.rmdir()
+            except OSError:
+                pass
+        raise
+    finally:
+        for _target, scratch, _existed in staged:
+            _unlink_quietly(scratch)
+
+
+def _component_symbol_path(artifacts: ComponentArtifacts) -> Path:
+    """Symbol library the generator writes next to the footprint library: ``<dir>/<name>.kicad_sym``."""
+    return artifacts.component_dir / f"{artifacts.name}.kicad_sym"
+
+
+def _preview_schematic_parts(
+        artifacts: ComponentArtifacts, project_name: str, own_folder: bool,
+        targets: dict[Path, str | None],
+) -> tuple[str | None, str | None, str | None, str | None]:
+    """@brief Compose the preview schematic and its two library tables, writing nothing.
+
+    @param artifacts The component being previewed.
+    @param project_name Stem of the preview ``.kicad_pro``.
+    @param own_folder True for the program's ``.kicad-preview`` folder.
+    @param targets The library files the schematic needs, in this order:
+        ``sym-lib-table``, ``fp-lib-table``, the ``<name>.kicad_sym`` copy and
+        the footprint copy in ``KiCadGen_Preview.pretty``, each mapped to the
+        text it would receive (None for the first three: composed here).
+    @return (schematic, sym-lib-table, fp-lib-table, None), or (None, None,
+        None, reason code of `PREVIEW_SCHEMATIC_SKIP_REASONS`).
+    @note In a caller-chosen folder none of those files is overwritten when
+        it exists with other content, and the footprint copy is not added to
+        a ``KiCadGen_Preview.pretty`` that holds anything else (unrelated
+        library content is preserved): the schematic is skipped instead and
+        none of the four files is written.
+    """
+    table_path, fp_table_path, symbol_copy, footprint_copy = targets
+    nothing = (None, None, None)
+    source = _component_symbol_path(artifacts)
+    if not source.is_file():
+        return *nothing, "symbol_missing"
+    try:
+        library_text = _read_utf8(source)
+    except KiCadLibraryError:
+        return *nothing, "symbol_unreadable"
+    try:
+        block = _library_symbol(library_text, artifacts.name)
+        symbol_name = _atom_value(_SYMBOL_HEAD.match(block).group(2))
+        schematic = preview_schematic_text(
+            block, symbol_name,
+            footprint_id=f"{PREVIEW_LIBRARY_NICKNAME}:{artifacts.name}",
+            project_name=project_name)
+    except _SymbolUnusable as exc:
+        return *nothing, str(exc.args[0])
+    except KiCadLibraryError:
+        return *nothing, "symbol_unreadable"
+    table = preview_sym_lib_table(f"{artifacts.name}.kicad_sym")
+    fp_table = preview_fp_lib_table()
+    if not own_folder:
+        wanted_bytes = {
+            table_path: table.encode("utf-8"),
+            fp_table_path: fp_table.encode("utf-8"),
+            symbol_copy: source.read_bytes(),
+            footprint_copy: targets[footprint_copy].encode("utf-8"),
+        }
+        reasons = {table_path: "sym_lib_table_foreign", fp_table_path: "fp_lib_table_foreign",
+                   symbol_copy: "symbol_copy_foreign", footprint_copy: "footprint_copy_foreign"}
+        for path, wanted in wanted_bytes.items():
+            if not path.exists():
+                continue
+            try:
+                foreign = path.read_bytes() != wanted
+            except OSError:
+                foreign = True
+            if foreign:
+                return *nothing, reasons[path]
+        library = footprint_copy.parent
+        try:
+            others = library.is_dir() and any(
+                entry.name != footprint_copy.name for entry in library.iterdir())
+        except OSError:
+            others = True
+        if others or (library.exists() and not library.is_dir()):
+            return *nothing, "footprint_copy_foreign"
+    return schematic, table, fp_table, None
 
 
 def _refused_path(error: OSError, fallback: Path) -> Path:
@@ -1387,17 +1880,258 @@ def launch_preview(pcbnew_path: str | os.PathLike[str], board_path: Path) -> Non
             f"Preview board not found: {board_path}",
             code="preview_missing", path=board_path,
         )
-    creation_flags = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
     try:
-        subprocess.Popen(
-            [str(executable), str(board_path)], cwd=str(board_path.parent),
-            close_fds=True, creationflags=creation_flags,
-        )
+        _start_editor(executable, board_path, neutral_working_dir(executable))
     except OSError as exc:
         raise KiCadLibraryError(
             f"Unable to start KiCad: {exc}",
             code="launch_failed", error=exc,
         ) from exc
+
+
+def neutral_working_dir(executable: str | os.PathLike[str] | None) -> Path:
+    """@brief Working folder for a KiCad process, OUTSIDE the user's project.
+
+    @param executable The program about to run; None uses the system
+        temporary folder.
+    @return The executable's own folder when it exists, otherwise the system
+        temporary folder.
+    @note Review 2026-11-13: on Windows a process whose working folder lies
+        inside a folder keeps that folder from being renamed or deleted
+        ([WinError 5]); an editor opened by «Prova in KiCad» (Test in KiCad)
+        with its working folder in ``<project>/.kicad-preview`` blocked
+        renaming the project for as long as KiCad stayed open. Every file
+        argument is absolute, so the working folder carries no meaning;
+        KiCad resolves ``${KIPRJMOD}`` from the document's own folder.
+    """
+    if executable:
+        folder = Path(executable).absolute().parent
+        if folder.is_dir():
+            return folder
+    return Path(tempfile.gettempdir())
+
+
+def _start_editor(executable: Path, document: Path, cwd: Path) -> None:
+    """@brief Start one KiCad editor on one document, detached from this program.
+
+    @param executable Editor executable (pcbnew, eeschema).
+    @param document File to open, absolute path.
+    @param cwd Working folder, outside the project (`neutral_working_dir`).
+    @throws OSError When the process cannot be started.
+    """
+    creation_flags = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
+    subprocess.Popen(
+        [str(executable), str(Path(document).absolute())], cwd=str(cwd),
+        close_fds=True, creationflags=creation_flags,
+    )
+
+
+def eeschema_beside(pcbnew_path: str | os.PathLike[str] | None) -> Path | None:
+    """@brief The Schematic Editor installed with a given PCB Editor.
+
+    @param pcbnew_path Path of pcbnew; None gives None.
+    @return The ``eeschema`` executable in the same folder, when it exists:
+        both editors ship in KiCad's ``bin`` folder, so the sibling is the
+        one of the same KiCad version.
+    """
+    if not pcbnew_path:
+        return None
+    candidate = Path(pcbnew_path).with_name(
+        "eeschema.exe" if os.name == "nt" else "eeschema")
+    return candidate if candidate.is_file() else None
+
+
+@dataclass(frozen=True)
+class PreviewLaunch:
+    """@brief What `launch_preview_editors` opened.
+
+    @note ``launched`` lists (editor executable, document) in launch order;
+        the board is always first. ``schematic_skipped`` is None when the
+        schematic was opened, otherwise a reason code: one of
+        `PREVIEW_SCHEMATIC_SKIP_REASONS` (no schematic written),
+        ``eeschema_missing`` or ``eeschema_launch_failed``.
+    """
+
+    launched: tuple[tuple[Path, Path], ...]
+    schematic_skipped: str | None = None
+    schematic_error: str | None = None
+
+
+def launch_preview_editors(
+        preview: PreviewProject, pcbnew_path: str | os.PathLike[str],
+        eeschema_path: str | os.PathLike[str] | None = None, *,
+        launcher=None) -> PreviewLaunch:
+    """@brief Open the preview board in the PCB Editor and its schematic in the Schematic Editor.
+
+    @param preview Result of `create_preview_project`.
+    @param pcbnew_path Path of pcbnew.
+    @param eeschema_path Path of eeschema; None looks for it beside pcbnew
+        (`eeschema_beside`).
+    @param launcher Callable ``(executable, document, cwd)`` starting one
+        editor; defaults to a detached process. Tests pass a fake. ``cwd`` is
+        always outside the project (`neutral_working_dir`).
+    @return The editors started and, when the schematic was not opened, why.
+    @throws KiCadLibraryError As `launch_preview` for the board
+        (``pcbnew_missing``, ``preview_missing``, ``launch_failed``): the
+        board is the preview's purpose, the schematic is an addition, so a
+        schematic that cannot be opened never raises.
+    """
+    start = launcher or _start_editor
+    executable = Path(pcbnew_path)
+    if not executable.is_file():
+        raise KiCadLibraryError(
+            f"KiCad PCB Editor not found: {executable}",
+            code="pcbnew_missing", path=executable,
+        )
+    if not preview.board_path.is_file():
+        raise KiCadLibraryError(
+            f"Preview board not found: {preview.board_path}",
+            code="preview_missing", path=preview.board_path,
+        )
+    try:
+        start(executable, preview.board_path.absolute(),
+              neutral_working_dir(executable))
+    except OSError as exc:
+        raise KiCadLibraryError(
+            f"Unable to start KiCad: {exc}",
+            code="launch_failed", error=exc,
+        ) from exc
+    launched = [(executable, preview.board_path)]
+    schematic = preview.schematic_path
+    if schematic is None or not schematic.is_file():
+        return PreviewLaunch(tuple(launched), preview.schematic_skipped or "symbol_missing")
+    editor = Path(eeschema_path) if eeschema_path else eeschema_beside(executable)
+    if editor is None or not editor.is_file():
+        return PreviewLaunch(tuple(launched), "eeschema_missing")
+    try:
+        start(editor, schematic.absolute(), neutral_working_dir(editor))
+    except OSError as exc:
+        return PreviewLaunch(tuple(launched), "eeschema_launch_failed", str(exc))
+    launched.append((editor, schematic))
+    return PreviewLaunch(tuple(launched))
+
+
+#: Image file `render_preview_image` writes into the preview folder.
+PREVIEW_RENDER_SUFFIX = "-preview-3d.png"
+
+#: Seconds `render_preview_image` waits for ``kicad-cli pcb render``. KiCad
+#: 10.0.8 renders the preview board of a relay in about 1 s at ``basic``
+#: quality (19 s at ``high``, measured 2026-11-13); the bound only keeps a
+#: hung kicad-cli from holding the preview forever.
+PREVIEW_RENDER_TIMEOUT_S = 60
+
+#: Size of the rendered image, px.
+PREVIEW_RENDER_SIZE = (1600, 1200)
+
+#: View of the render: the board turned like KiCad's isometric example of
+#: ``--rotate`` ('-45,0,45'), so the body's top and two sides are visible.
+PREVIEW_RENDER_ROTATION = "-45,0,45"
+
+
+@dataclass(frozen=True)
+class PreviewRender:
+    """@brief Outcome of `render_preview_image`.
+
+    @note ``image_path`` is the PNG when the render succeeded, otherwise
+        None and ``reason`` is one of ``no_step``, ``kicad_cli_missing``,
+        ``render_timeout``, ``render_failed``, ``render_no_image`` or
+        ``render_start_failed``; ``detail`` carries the last lines kicad-cli
+        printed or the OS error, for the log.
+    """
+
+    image_path: Path | None
+    reason: str | None = None
+    detail: str = ""
+
+
+def preview_render_command(kicad_cli: str | os.PathLike[str], board_path: Path,
+                           output_path: Path) -> list[str]:
+    """@brief The ``kicad-cli pcb render`` command of the preview image.
+
+    @param kicad_cli Path of kicad-cli.
+    @param board_path Preview board.
+    @param output_path PNG to write.
+    @return The argument list (options of kicad-cli 10's ``pcb render``).
+    @note Opaque background, so the image reads the same on a light and a
+        dark window; the isometric turn shows the body's height.
+        ``basic`` quality: ``high`` (ray tracing) took 19 s for the
+        same picture of a relay where ``basic`` took 1 s (kicad-cli 10.0.8).
+    """
+    width, height = PREVIEW_RENDER_SIZE
+    return [
+        str(kicad_cli), "pcb", "render",
+        "--output", str(output_path),
+        "--width", str(width), "--height", str(height),
+        "--side", "top",
+        "--rotate", PREVIEW_RENDER_ROTATION,
+        "--background", "opaque",
+        "--quality", "basic",
+        "--zoom", "1",
+        str(board_path),
+    ]
+
+
+def render_preview_image(preview: PreviewProject, kicad_cli: str | os.PathLike[str] | None,
+                         *, has_step: bool, runner=None,
+                         timeout: float = PREVIEW_RENDER_TIMEOUT_S) -> PreviewRender:
+    """@brief Render the preview board in 3D to a PNG with ``kicad-cli pcb render``.
+
+    @param preview Result of `create_preview_project`.
+    @param kicad_cli Path of kicad-cli; None when KiCad's CLI was not found.
+    @param has_step Whether the preview carries a STEP model
+        (`ComponentArtifacts.has_step`); without one there is nothing to see
+        in 3D but the bare board, so nothing is rendered.
+    @param runner Callable with the signature of ``subprocess.run``; tests
+        pass a fake.
+    @param timeout Seconds to wait for kicad-cli.
+    @return The image, or None with the reason. Never raises for a missing,
+        old, failing or hung kicad-cli: the preview opens without image.
+    @note Read-only for KiCad: kicad-cli reads the temporary board and
+        writes only the PNG, first to a scratch name in the preview folder,
+        then moved onto ``<name>-preview-3d.png``; an image of an earlier
+        preview is removed before rendering, so a failure never leaves a
+        stale picture of another footprint.
+    @note Slow (seconds): call it off the GUI thread.
+    """
+    image = preview.board_path.with_name(
+        preview.board_path.stem.removesuffix("-preview") + PREVIEW_RENDER_SUFFIX)
+    try:
+        if image.is_file():
+            _remove_clearing_readonly(image)
+    except OSError as exc:
+        return PreviewRender(None, "render_failed", str(exc))
+    if not has_step:
+        return PreviewRender(None, "no_step")
+    if not kicad_cli or not Path(kicad_cli).is_file():
+        return PreviewRender(None, "kicad_cli_missing")
+    scratch = image.with_name(f".{image.stem}.{uuid.uuid4().hex[:8]}.png")
+    run = runner or subprocess.run
+    try:
+        try:
+            proc = run(
+                preview_render_command(kicad_cli, preview.board_path.absolute(),
+                                       scratch.absolute()),
+                capture_output=True, text=True, errors="replace", timeout=timeout,
+                # Outside the project, see neutral_working_dir.
+                cwd=str(neutral_working_dir(kicad_cli)),
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        except subprocess.TimeoutExpired:
+            return PreviewRender(None, "render_timeout", f"{timeout:g} s")
+        except (OSError, subprocess.SubprocessError) as exc:
+            return PreviewRender(None, "render_start_failed", str(exc))
+        output = "\n".join(
+            ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip().splitlines()[-5:])
+        if proc.returncode != 0:
+            return PreviewRender(None, "render_failed", output)
+        if not scratch.is_file() or scratch.stat().st_size == 0:
+            return PreviewRender(None, "render_no_image", output)
+        try:
+            replace_file(scratch, image)
+        except OSError as exc:
+            return PreviewRender(None, "render_failed", str(exc))
+        return PreviewRender(image)
+    finally:
+        _unlink_quietly(scratch)
 
 
 _EMPTY_TABLE = "(fp_lib_table\n  (version 7)\n)\n"

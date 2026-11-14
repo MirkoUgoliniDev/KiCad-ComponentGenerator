@@ -342,5 +342,7 @@ def test_an_existing_block_keeps_its_reason_and_adds_the_view():
     data["_pin_map_conflict"] = "earlier reason"
     ext._require_declared_view(data)
     # The block keeps its own reason; the side is a question beside it (B3).
+    # Task C3 defers the side only while a pad-layout question offers
+    # layouts (generality audit 2026-11-14, M4): a hard block has none.
     assert data["_pin_map_conflict"] == "earlier reason"
     assert data["_questions"][0]["field"] == "contacts_view"

@@ -89,9 +89,12 @@ def test_a1_normalised_side_refuses_non_finite_numbers_and_keeps_defaults_for_ab
 
 # ── A2: the key gate covers the session vision model ─────────────────────
 
-def test_a2_a_deepseek_session_vision_model_without_its_key_stops_the_run(window, monkeypatch):
+def test_a2_a_deepseek_photo_model_without_its_key_stops_the_run(window, monkeypatch):
+    """CONTRACT CHANGED 2026-11-13: the photo model is the saved default model (the
+    per-session vision model was removed by the user's decision); a DeepSeek one
+    without its key still stops the run before anything is paid."""
     from kicadgen.services import providers
-    window._vlm_model = providers.DEEPSEEK_PREFIX + "deepseek-chat"
+    window.profile_store.save_defaults({"model": providers.DEEPSEEK_PREFIX + "deepseek-chat"})
     asked = []
 
     def missing():
@@ -108,9 +111,9 @@ def test_a2_a_deepseek_session_vision_model_without_its_key_stops_the_run(window
     assert asked and len(questions) == 1 and "DeepSeek" in questions[0][2]
 
 
-def test_a2_without_a_session_vision_model_the_set_is_the_extraction_model(window):
-    """Negative twin: the photo model then IS the extraction model, as before."""
-    window._vlm_model = None
+def test_a2_the_photo_model_is_the_extraction_model(window):
+    """Negative twin: the photo model IS the extraction model (no session vision model)."""
+    assert not hasattr(window, "_vlm_model")
     models = window._run_models()
     assert models[:2] == (window._effective_model(), window._effective_model())
 

@@ -10,6 +10,11 @@ one for the difficult ones.
 
 By default only the models usable for this job are listed (tool calling +
 reading of images and PDFs): the others would fail the call.
+
+In the list of a step that sends images, a model declared text only
+(openrouter.image_capability, the same rule as the send-time checks) is
+greyed out and cannot be chosen; an undeclared capability stays choosable
+with a note (user request, 2026-11-14).
 """
 
 from __future__ import annotations
@@ -18,14 +23,16 @@ from typing import Optional
 
 from PyQt6 import sip
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
     QDoubleSpinBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox,
     QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout,
 )
 
-from ..services.openrouter import (DATASHEET_CAPABILITIES, ModelInfo, OpenRouterError,
-                                   list_models)
+from ..services.openrouter import (DATASHEET_CAPABILITIES, IMAGES_NOT_READ, IMAGES_UNDECLARED,
+                                   ModelInfo, OpenRouterError, catalog_id, image_capabilities,
+                                   image_capability, list_models)
 from ..services.providers import (PROVIDER_DEEPSEEK, PROVIDER_LABELS, PROVIDER_SHORT_LABELS,
                                   PROVIDERS,
                                   deepseek_models, provider_of)
@@ -36,6 +43,12 @@ _CAPABILITY_LABELS = {"tools": "tool calling", "images": "immagini", "files": "P
 
 #: Columns of the table.
 _COL_ID, _COL_NAME, _COL_IN, _COL_OUT, _COL_CTX = range(5)
+
+#: Text of a row that cannot be chosen. The application style sheet gives
+#: QTableWidget one `color` for every state, so a disabled item would keep the
+#: normal text colour: the grey is set on the item itself. Same grey as the
+#: style sheet's disabled menu items and tabs (theme.APP_QSS).
+_DISABLED_TEXT = QColor("#626477")
 
 
 def _find_i18n(widget):
@@ -70,7 +83,10 @@ class _ModelsWorker(QThread):
     it instead of destroying it.
     """
 
-    done = pyqtSignal(object)
+    #: (models, {model id: image capability}); the capabilities are computed
+    #: here because a DeepSeek list borrows them from the ~1 MB catalogue
+    #: cache, which is not read on the GUI thread.
+    done = pyqtSignal(object, object)
     error = pyqtSignal(str)
 
     def __init__(self, force_refresh: bool = False, parent=None, provider="openrouter"):
@@ -97,9 +113,10 @@ class _ModelsWorker(QThread):
         """@brief QThread override: download the provider's model list and emit `done` or `error`."""
         try:
             if self.provider == PROVIDER_DEEPSEEK:
-                self.done.emit(deepseek_models())
+                models = deepseek_models()
             else:
-                self.done.emit(list_models(force_refresh=self.force_refresh))
+                models = list_models(force_refresh=self.force_refresh)
+            self.done.emit(models, image_capabilities(models))
         except OpenRouterError as exc:
             self.error.emit(str(exc))
         except Exception as exc:  # noqa: BLE001 - reported in the dialog
@@ -171,6 +188,10 @@ class ModelPickerDialog(QDialog):
         @param parent Parent widget; its `i18n` service, if any, translates the dialog.
         @param title Window title.
         @param capabilities Capabilities the model must have (ModelInfo.usable_for).
+            When "images" is among them the step sends images: a model
+            declared text only (openrouter.image_capability) is listed greyed
+            and cannot be chosen; one whose capability is undeclared stays
+            choosable with a note. Without "images" every model is choosable.
         @param provider Source fixed by the caller (the «Modello» tab of the
             LLM settings): only its models are listed and the source cannot be
             changed here. None lets the user choose, starting from the
@@ -191,7 +212,29 @@ class ModelPickerDialog(QDialog):
         self._models: list[ModelInfo] = []
         #: What the table rows show (models, language); see `_apply_filters`.
         self._shown_key = None
+        #: True while the rows are rebuilt or re-selected by the program: the
+        #: selection changes Qt makes then (rows removed under the current
+        #: one) are never the user's choice.
+        self._rebuilding = False
+        #: Identifiers of the rows shown, or None before a list is shown.
+        self._visible_ids: Optional[set] = None
         self._selected = current_model or ""
+        #: The choice saved before the dialog opened: kept visible (and
+        #: marked) even when the compatibility filter would hide it, so a
+        #: choice that is no longer allowed is never changed out of sight.
+        self._initial = (current_model or "").strip()
+        #: The step sends images: text-only models are not choosable.
+        self._needs_images = "images" in self.capabilities
+        #: {model id: openrouter IMAGES_*} of the loaded list.
+        self._image_caps: dict[str, str] = {}
+        #: Capability of the saved choice, from the fresh catalogue at open:
+        #: used while it is not in the loaded list (before the list arrives,
+        #: after a provider switch), so a saved text-only model never becomes
+        #: acceptable just because the list does not show it. The catalogue
+        #: parse is shared and memoised (openrouter.fresh_catalog).
+        self._initial_capability = (image_capability(self._initial)
+                                    if self._initial and self._needs_images
+                                    else IMAGES_UNDECLARED)
         self._worker: Optional[_ModelsWorker] = None
         self._closed = False
 
@@ -239,6 +282,7 @@ class ModelPickerDialog(QDialog):
         self.label_provider_note.setObjectName("providerNote")
         self.label_provider_note.setStyleSheet("color: palette(placeholder-text);")
         layout.addWidget(self.label_provider_note)
+        self._update_provider_note()
 
         filter_row = QHBoxLayout()
         filter_row.setSpacing(10)
@@ -374,19 +418,27 @@ class ModelPickerDialog(QDialog):
     def _on_provider_changed(self, _index) -> None:
         """Another provider: its list replaces the current one."""
         self._models = []
+        self._image_caps = {}
         self._apply_filters()
         if self._worker is not None and self._worker.isRunning():
             self._detach_worker()
         self._load_models()
 
     def _update_provider_note(self) -> None:
-        """What the chosen provider does not declare, said once above the table."""
-        note = ("L'API di DeepSeek non dichiara prezzi ne' capacita' dei modelli: la spesa "
-                "non viene riportata e le capacita' vanno verificate sulla sua "
-                "documentazione (le immagini le legge deepseek-flash, non la versione Pro)."
+        """What the chosen provider does not declare, said once above the table.
+
+        No model is named: which DeepSeek model reads images comes from
+        OpenRouter's catalogue (openrouter.image_capability), shown on the rows.
+        """
+        note = ("L'API di DeepSeek non dichiara prezzi né capacità: la spesa non viene "
+                "riportata e la lettura delle immagini si ricava dal catalogo di OpenRouter. "
+                "Nei passi che mandano immagini un modello che non le legge è in grigio; "
+                "uno non dichiarato porta una nota."
                 if self.provider() == PROVIDER_DEEPSEEK else "")
         self.label_provider_note.setText(self.i18n.text(note) if (note and self.i18n is not None)
                                          else note)
+        # An empty note would leave a blank gap under «Fornitore» (provider).
+        self.label_provider_note.setVisible(bool(note))
 
     def _worker_finished(self) -> None:
         """Re-enable the refresh, if there is still a window to re-enable it on.
@@ -444,12 +496,36 @@ class ModelPickerDialog(QDialog):
         self._detach_worker()
         super().done(result)
 
-    def _on_models_loaded(self, models: list) -> None:
+    def _on_models_loaded(self, models: list, image_caps: Optional[dict] = None) -> None:
+        """Show a loaded list; `image_caps` comes from the worker, else it is computed here."""
         if not self._alive():
             return
         self._models = models
+        self._image_caps = dict(image_caps) if image_caps is not None else image_capabilities(models)
         self._apply_filters()
-        self._update_selected_label()
+
+    def image_capability(self, model_id: str) -> str:
+        """@brief The image capability of a listed model (openrouter.IMAGES_*).
+
+        @param model_id Model identifier.
+        @return The capability computed when the list was loaded; for the
+            saved choice not in the list, the one computed at open;
+            IMAGES_UNDECLARED for any other model not (yet) in the list.
+        """
+        if model_id in self._image_caps:
+            return self._image_caps[model_id]
+        if model_id and model_id == self._initial:
+            return self._initial_capability
+        return IMAGES_UNDECLARED
+
+    def is_choosable(self, model_id: str) -> bool:
+        """@brief Whether `model_id` may be chosen for this step.
+
+        @param model_id Model identifier.
+        @return False only when the step sends images and the model is
+            declared text only; an undeclared capability is choosable.
+        """
+        return not (self._needs_images and self.image_capability(model_id) == IMAGES_NOT_READ)
 
     def _on_models_error(self, message: str) -> None:
         if not self._alive():
@@ -466,9 +542,21 @@ class ModelPickerDialog(QDialog):
         result = []
         for model in self._models:
             # Undeclared capabilities (DeepSeek API): neither known compatible
-            # nor known incompatible, so the filter does not hide it.
+            # nor known incompatible, so the filter does not hide it. Images
+            # are judged by the shared rule (openrouter.image_capability), not
+            # by the row: a row from an expired cache (offline fallback of
+            # list_models) is undeclared, as at the call. An entry with no
+            # modality list says nothing about PDF either. The saved choice
+            # is exempt from the image requirement only: it is shown greyed
+            # and explained; lacking tools or PDF it stays hidden as before.
+            dropped = set()
+            if self.image_capability(model.id) == IMAGES_UNDECLARED or model.id == self._initial:
+                dropped.add("images")
+            if not model.input_modalities:
+                dropped.add("files")
+            required = tuple(name for name in self.capabilities if name not in dropped)
             if (only_compatible and getattr(model, "capabilities_declared", True)
-                    and not model.usable_for(self.capabilities)):
+                    and not model.usable_for(required)):
                 continue
             if max_cost > 0 and model.prompt_usd_per_mtok > max_cost:
                 continue
@@ -485,15 +573,34 @@ class ModelPickerDialog(QDialog):
         keystroke that keeps the same models visible, as most do while a
         prefix is typed, re-sorts and re-selects without recreating several
         thousand cells.
+
+        The filters never change the choice (practical test 2026-11-14:
+        typing in «Cerca» picked whatever row Qt selected after the rebuild):
+        the chosen model is re-selected when visible, otherwise it stays the
+        choice and the label says that no selection is visible.
         """
+        self._rebuilding = True
+        try:
+            self._fill_rows()
+        finally:
+            self._rebuilding = False
+        self._update_selected_label()
+
+    def _fill_rows(self) -> None:
+        """Rebuild (or only re-sort) the rows of the visible models, then re-select the choice."""
         models = self._visible_models()
-        key = (tuple(models), getattr(self.i18n, "language", None))
+        self._visible_ids = {m.id for m in models} if self._models else None
+        # The capabilities belong to the key: the same rows greyed or not.
+        key = (tuple(models), tuple(self.image_capability(m.id) for m in models),
+               getattr(self.i18n, "language", None))
         if key == self._shown_key and self.table.rowCount() == len(models):
             self.table.sortItems(_COL_IN, Qt.SortOrder.AscendingOrder)
             self._restore_selection()
             return
         self._shown_key = key
 
+        # The old selection must not slide onto another row when rows go.
+        self.table.clearSelection()
         self.table.setSortingEnabled(False)
         self.table.setRowCount(len(models))
         for row, model in enumerate(models):
@@ -519,24 +626,70 @@ class ModelPickerDialog(QDialog):
                 row, _COL_CTX,
                 _NumericItem(f"{model.context_length:,}".replace(",", "."), model.context_length),
             )
+            self._mark_image_capability(row, model.id)
         self.table.setSortingEnabled(True)
         self.table.sortItems(_COL_IN, Qt.SortOrder.AscendingOrder)
         self.table.resizeColumnToContents(_COL_ID)
 
         self._restore_selection()
 
+    def _mark_image_capability(self, row: int, model_id: str) -> None:
+        """Grey out a text-only model in a step that sends images; note an undeclared capability.
+
+        A disabled item can be neither selected nor double-clicked, so the
+        model cannot be chosen; its tooltip says why. Steps that send only
+        text leave every row as it is.
+        """
+        if not self._needs_images:
+            return
+        capability = self.image_capability(model_id)
+        # The catalogue entry the answer comes from: borrowed for DeepSeek
+        # direct (a declared heuristic), so the user can judge it.
+        source = catalog_id(model_id)
+        if capability == IMAGES_NOT_READ:
+            tooltip = tx("Non legge immagini (dichiarato da OpenRouter per {source}): questo "
+                         "passo manda immagini, quindi il modello non si può scegliere.",
+                         source=source)
+            blocked = True
+        elif capability == IMAGES_UNDECLARED:
+            tooltip = tx("Capacità immagini non dichiarata per {source} nel catalogo aggiornato "
+                         "di OpenRouter: il modello si può scegliere, ma va verificato sulla "
+                         "documentazione del fornitore.", source=source)
+            blocked = False
+        else:
+            return
+        for column in range(self.table.columnCount()):
+            item = self.table.item(row, column)
+            if item is None:
+                continue
+            item.setToolTip(tooltip)
+            if blocked:
+                item.setFlags(item.flags() & ~(Qt.ItemFlag.ItemIsSelectable
+                                               | Qt.ItemFlag.ItemIsEnabled))
+                item.setForeground(_DISABLED_TEXT)
+
     def _restore_selection(self) -> None:
-        """Re-select the current model, if still visible with the filters."""
+        """Re-select the current model, if still visible with the filters.
+
+        A greyed (not choosable) saved model cannot be selected: the row is
+        only scrolled into view, and the label under the table says why.
+        """
         for row in range(self.table.rowCount()):
             item = self.table.item(row, _COL_ID)
             if item is not None and item.text() == self._selected:
-                self.table.selectRow(row)
+                if self.is_choosable(self._selected):
+                    self.table.selectRow(row)
                 self.table.scrollToItem(item)
                 return
+        # The choice is not shown: no other row may look selected.
+        self.table.clearSelection()
 
     # ── Selection ───────────────────────────────────────────────────
 
     def _on_selection_changed(self) -> None:
+        """A row the user selected becomes the choice; the program's own re-selections never do."""
+        if self._rebuilding:
+            return
         rows = self.table.selectionModel().selectedRows()
         if rows:
             item = self.table.item(rows[0].row(), _COL_ID)
@@ -545,7 +698,36 @@ class ModelPickerDialog(QDialog):
         self._update_selected_label()
 
     def _update_selected_label(self) -> None:
-        if self._selected:
+        """Name the chosen model; say so when it cannot serve this step, and lock OK then.
+
+        A saved choice that is now declared text only, in a step that sends
+        images, is not replaced behind the user's back: it stays the answer
+        of Cancel, OK is disabled until a choosable model is selected, and
+        the label says why.
+        """
+        choosable = self.is_choosable(self._selected) if self._selected else False
+        hidden = (self._selected and self._visible_ids is not None
+                  and self._selected not in self._visible_ids)
+        if self._selected and not choosable:
+            self.label_selected.setText(tx(
+                "Modello attuale: {model}. Non legge immagini (dichiarato da OpenRouter per "
+                "{source}) e questo passo manda immagini: scegline un altro, oppure Annulla per "
+                "lasciare la scelta com'è.", model=self._selected,
+                source=catalog_id(self._selected)))
+        elif hidden and self._selected == self._initial:
+            self.label_selected.setText(tx(
+                "Nessuna selezione visibile: OK lascia il modello attuale {model}.",
+                model=self._selected))
+        elif hidden:
+            self.label_selected.setText(tx(
+                "Nessuna selezione visibile ({model} è nascosto dai filtri): scegli un modello "
+                "nell'elenco.", model=self._selected))
+        elif (self._selected and self._needs_images
+              and self._models and self.image_capability(self._selected) == IMAGES_UNDECLARED):
+            self.label_selected.setText(tx(
+                "Modello scelto: {model} (capacità immagini non dichiarata).",
+                model=self._selected))
+        elif self._selected:
             self.label_selected.setText(
                 self.i18n.tr("model.selected", model=self._selected)
                 if self.i18n is not None else f"Modello scelto: {self._selected}"
@@ -557,7 +739,30 @@ class ModelPickerDialog(QDialog):
             )
         ok_button = self.buttons.button(QDialogButtonBox.StandardButton.Ok)
         if ok_button is not None:
-            ok_button.setEnabled(bool(self._selected))
+            ok_button.setEnabled(self._ok_allowed())
+
+    def _ok_allowed(self) -> bool:
+        """Whether OK may return the choice: choosable, and visible or the unchanged saved model.
+
+        Before a list is shown only the saved model can be the choice; once
+        shown, a choice hidden by the filters is returned only when it is the
+        saved one (OK then changes nothing).
+        """
+        if not self._selected or not self.is_choosable(self._selected):
+            return False
+        if self._visible_ids is None:
+            return True
+        return self._selected in self._visible_ids or self._selected == self._initial
+
+    def accept(self) -> None:
+        """@brief QDialog override: refuse to close on a model this step cannot use or cannot see.
+
+        OK is already disabled then; this also covers Enter and a double
+        click reaching `accept` by another route.
+        """
+        if not self._ok_allowed():
+            return
+        super().accept()
 
     def selected_model(self) -> str:
         """@brief Return the id of the model chosen in the dialog.
