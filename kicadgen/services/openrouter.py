@@ -576,6 +576,29 @@ def _calls(count: int) -> str:
     return tx("{count} chiamata", count=count) if count == 1 else tx("{count} chiamate", count=count)
 
 
+def format_model_lines(by_model) -> list:
+    """@brief One translated line per model, the most expensive first.
+
+    @param by_model Mapping model -> (cost_usd, calls, calls_without_cost):
+        the run tally (`UsageTotals.by_model`) or the current analysis of the
+        project cost file (`ProjectCosts.run_by_model`), so both read alike.
+    @return «model: amount USD (N calls)» lines; a model with calls that
+        reported no cost says its amount is a minimum. Empty without calls.
+    """
+    lines = []
+    ordered = sorted((by_model or {}).items(), key=lambda item: (-item[1][0], item[0]))
+    for model, (cost, calls, missing) in ordered:
+        # Below one cent four digits are not enough to tell anything apart.
+        amount = f"{cost:.4f}" if cost >= 0.01 else f"{cost:.6f}"
+        if missing:
+            lines.append(tx("{model}: almeno {amount} USD ({calls}, {missing} senza costo)",
+                            model=model, amount=amount, calls=_calls(calls), missing=missing))
+        else:
+            lines.append(tx("{model}: {amount} USD ({calls})", model=model, amount=amount,
+                            calls=_calls(calls)))
+    return lines
+
+
 @dataclass
 class UsageTotals:
     """@brief Totals of one processing run: calls, tokens and actual cost reported by OpenRouter.
@@ -617,17 +640,7 @@ class UsageTotals:
             calls that reported no cost says its amount is a minimum. Empty
             when no call was made.
         """
-        lines = []
-        ordered = sorted(self.by_model.items(), key=lambda item: (-item[1][0], item[0]))
-        for model, (cost, calls, missing) in ordered:
-            amount = f"{cost:.4f}" if cost >= 0.01 else f"{cost:.6f}"
-            if missing:
-                lines.append(tx("{model}: almeno {amount} USD ({calls}, {missing} senza costo)",
-                                model=model, amount=amount, calls=_calls(calls), missing=missing))
-            else:
-                lines.append(tx("{model}: {amount} USD ({calls})", model=model, amount=amount,
-                                calls=_calls(calls)))
-        return lines
+        return format_model_lines(self.by_model)
 
     def describe(self) -> str:
         """@brief Render the run total as one line for the AI log.

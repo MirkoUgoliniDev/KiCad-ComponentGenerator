@@ -572,10 +572,14 @@ def test_a_changed_step_is_saved_and_logged(window, monkeypatch):
 
 
 def test_the_menu_entries_say_what_each_window_decides(window):
-    """@brief Finding 11: prompts -> model -> account, each entry with its own tooltip."""
+    """@brief Finding 11: each entry with its own tooltip.
+
+    CONTRACT CHANGED 2026-11-14 (user: «mettiamo prima Account AI, poi il modello AI»):
+    prompts -> account -> model, instead of prompts -> model -> account.
+    """
     actions = [action for action in window.menu_config.actions() if not action.isSeparator()]
-    assert actions.index(window.action_profiles) < actions.index(window.action_defaults) \
-        < actions.index(window.action_ai_account)
+    assert actions.index(window.action_profiles) < actions.index(window.action_ai_account) \
+        < actions.index(window.action_defaults)
     assert "prompt" in window.action_profiles.toolTip()
     assert "passo" in window.action_defaults.toolTip()
     assert window.action_profiles.toolTip() != window.action_defaults.toolTip()

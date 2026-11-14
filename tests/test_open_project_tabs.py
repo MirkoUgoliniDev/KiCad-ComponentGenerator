@@ -303,7 +303,7 @@ def test_a_reread_with_its_key_does_not_move_the_page(window, monkeypatch):  # n
 
 
 def test_the_page_chosen_inside_a_session_stays(window, tmp_path):  # noqa: F811
-    """@brief Negative: without opening a project, «Continua», the workflow bar and a save keep page 2."""
+    """@brief Negative: without opening a project, «Continua», the page buttons and a save keep page 2."""
     window.field_library_root.setText(str(tmp_path))
     _generated(tmp_path, "RESTA")
     _open(window, "RESTA")
@@ -315,5 +315,6 @@ def test_the_page_chosen_inside_a_session_stays(window, tmp_path):  # noqa: F811
     window._save_project_config()
     assert wizard.stack.currentIndex() == 1
     wizard.set_page(0)
-    window._on_workflow_step_clicked("analysis")
+    # CONTRACT CHANGED 2026-11-14: the workflow step bar is gone (user); the page button remains.
+    wizard.steps[1].click()
     assert wizard.stack.currentIndex() == 1

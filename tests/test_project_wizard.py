@@ -29,7 +29,8 @@ def test_wizard_revisits_pages_and_keeps_extract_outside_scroll(window, app, tmp
     assert window.group_ai_tools.content.isVisible()
     wizard.back.click()
     assert wizard.stack.currentIndex() == 0
-    window._on_workflow_step_clicked('analysis')
+    # CONTRACT CHANGED 2026-11-14: the workflow step bar is gone (user); the page button remains.
+    wizard.steps[1].click()
     assert wizard.stack.currentIndex() == 1
     window.resize(1100, 820)
     app.processEvents()

@@ -228,51 +228,306 @@ def _pin_label_height(points) -> float:
         (a relay) without touching its neighbour on a dense one (a header, a
         fine-pitch grid, which keeps the former fixed height).
     """
-    if len(points) < 2:
-        return _LABEL_HEIGHT_MIN_MM
-    xy = np.asarray(points, dtype=float)[:, :2]
-    deltas = xy[:, None, :] - xy[None, :, :]
-    distances = np.sqrt((deltas ** 2).sum(axis=2))
-    distances[np.arange(len(xy)), np.arange(len(xy))] = np.inf
-    nearest = float(distances.min())
+    nearest = _nearest_anchor_gap(points)
     if not np.isfinite(nearest):
         return _LABEL_HEIGHT_MIN_MM
     return min(_LABEL_HEIGHT_MAX_MM, max(_LABEL_HEIGHT_MIN_MM, _LABEL_HEIGHT_OF_GAP * nearest))
 
 
-def _pin_text_mesh(points, labels):
-    """View-only planar text, with one shared reading direction on the pin face."""
+def _nearest_anchor_gap(points) -> float:
+    """Smallest XY distance between two distinct label anchors, mm; inf with fewer than two.
+
+    Coincident anchors (the same pin read twice, e.g. a FreeCAD duplicate
+    renamed «Pin001») are ignored: a zero room would draw every label at
+    scale 0 (review 2026-11-14, 3).
+    """
+    if len(points) < 2:
+        return float("inf")
+    xy = np.asarray(points, dtype=float)[:, :2]
+    deltas = xy[:, None, :] - xy[None, :, :]
+    distances = np.sqrt((deltas ** 2).sum(axis=2))
+    distances[distances <= 1e-6] = np.inf
+    return float(distances.min())
+
+
+#: Bound on the lines one pin label may wrap onto. Not the rule: the lines
+#: stop as soon as one more line no longer raises the label's scale (the room
+#: between neighbouring pins makes extra lines cost more than they give).
+#: The bound only limits the work on an absurdly long name.
+_LABEL_MAX_LINES = 8
+#: Share of the room between two neighbouring anchors that one label block may
+#: fill along the row, so stacked lines never touch the next pin's label.
+#: Heuristic, declared: it only keeps a visible gap; it is not a measure.
+_LABEL_ROW_FILL = 0.8
+#: Reference string for the glyph height: digits, capitals, a descender and a
+#: bracket, the tallest a pin name can draw. Every label is scaled by this
+#: one height, so «GND» and «1 (GND)» get the same glyph size (`height=` of
+#: Text3D scales each label to its OWN box: «GND» drew 30% larger).
+_LABEL_REFERENCE = "Ag(1"
+#: Characters vtkVectorText cannot draw, written with ASCII it can: they used
+#: to vanish («IN−» drew as «IN») or leave an empty mesh that crashed the view.
+_LABEL_ASCII = {"−": "-", "–": "-", "—": "-", "µ": "u", "μ": "u", "Ω": "Ohm", "°": "deg",
+                "±": "+/-", "×": "x", "’": "'", "‘": "'", "“": '"', "”": '"'}
+
+
+def _ascii_label(label):
+    """A pin label as vtkVectorText can draw it: printable ASCII on one line.
+
+    Known symbols are spelled out (`_LABEL_ASCII`), accents dropped (é -> e),
+    any other character removed; line breaks, tabs and runs of spaces become
+    one space, since the layout decides the lines (review 2026-11-14, 4 and 7).
+    """
+    import unicodedata
+    spelled = "".join(_LABEL_ASCII.get(char, char) for char in str(label))
+    plain = unicodedata.normalize("NFKD", spelled).encode("ascii", "ignore").decode("ascii")
+    return " ".join("".join(char if " " <= char <= "~" else " " for char in plain).split())
+
+
+#: Text3D width probes, natural units: one entry per probe string, kept for
+#: the session. Labels are ASCII (`_ascii_label`), so at most three probes per
+#: printable character: a few hundred floats in all.
+_TEXT_WIDTHS = {}
+
+
+def _probe_width(text):
+    """Drawn width of `text` in natural Text3D units, measured once."""
+    if text not in _TEXT_WIDTHS:
+        import pyvista as pv
+        points = pv.Text3D(text, depth=0).points
+        _TEXT_WIDTHS[text] = float(np.ptp(points[:, 0])) if len(points) else 0.0
+    return _TEXT_WIDTHS[text]
+
+
+def _text_width(line):
+    """Drawn width of one line in natural Text3D units.
+
+    vtkVectorText draws printable ASCII with fixed advances and no kerning,
+    so a line's width is the sum of its characters' advances, measured once
+    each between two «I» (the bearings cancel): exact against Text3D, without
+    a mesh per candidate line (the wrapping tries hundreds; one Text3D each
+    took 0.9 s on 44 names). Any other character is measured on the line.
+    """
+    line = line.strip()
+    if len(line) < 2 or any(not (" " <= char <= "~") for char in line):
+        return _probe_width(line) if line else 0.0
+    bar, pair = _probe_width("I"), _probe_width("II")
+    middle = sum(_probe_width("I" + char + "I") - pair for char in line[1:-1])
+    return ((_probe_width(line[0] + "I") - bar) + middle
+            + (_probe_width("I" + line[-1]) - bar) - (pair - 2 * bar))
+
+
+def _label_tokens(label):
+    """Break points of a pin name: after «/», before « (» and at spaces (kept in the pieces)."""
+    pieces, current = [], ""
+    for index, char in enumerate(label):
+        if char == " " and current:
+            pieces.append(current)
+            current = char
+            continue
+        current += char
+        if char == "/" and index + 1 < len(label):
+            pieces.append(current)
+            current = ""
+    if current:
+        pieces.append(current)
+    return pieces
+
+
+def _balanced_lines(pieces, count, width):
+    """Join `pieces` into `count` lines (fewer when there are fewer pieces) with the narrowest widest line.
+
+    @param pieces Break-point pieces of one name (`_label_tokens`).
+    @param count Number of lines wanted.
+    @param width Callable giving the drawn width of one line.
+    @return (widest line width, lines), the lines stripped of edge spaces.
+    """
+    pieces = tuple(pieces)
+    total = len(pieces)
+    memo = {}
+
+    def best(first, lines):
+        key = (first, lines)
+        if key not in memo:
+            if lines == 1:
+                line = "".join(pieces[first:]).strip()
+                memo[key] = (width(line), (line,))
+            else:
+                choice = None
+                for cut in range(first + 1, total - lines + 2):
+                    line = "".join(pieces[first:cut]).strip()
+                    rest = best(cut, lines - 1)
+                    candidate = (max(width(line), rest[0]), (line,) + rest[1])
+                    if choice is None or candidate[0] < choice[0]:
+                        choice = candidate
+                memo[key] = choice
+        return memo[key]
+
+    return best(0, max(1, min(count, total)))
+
+
+_LINE_ADVANCE = []
+
+
+def _line_advance():
+    """Distance between two baselines of vtkVectorText, natural units (measured once)."""
+    if not _LINE_ADVANCE:
+        import pyvista as pv
+        _LINE_ADVANCE.append(float(np.ptp(pv.Text3D("A\nA", depth=0).points[:, 1]))
+                             - float(np.ptp(pv.Text3D("A", depth=0).points[:, 1])))
+    return _LINE_ADVANCE[0]
+
+
+def _block_mesh(lines, right=False):
+    """One label block in natural units: its lines stacked, flush left or flush right.
+
+    vtkVectorText aligns a multi-line string on the left only; each line is
+    drawn alone and placed, so a block can be flush on the side of its own
+    pin strip (review 2026-11-14, 6). Empty lines draw nothing.
+    """
     import pyvista as pv
-    height = _pin_label_height(points)
+    from vtkmodules.vtkRenderingFreeType import vtkVectorText
+    drawn = []
+    for index, line in enumerate(lines):
+        if not line.strip():
+            continue
+        # The raw glyphs sit on their baseline (y = 0); Text3D would centre
+        # each line on its own box, and a line without brackets or
+        # descenders would then leave its baseline row.
+        source = vtkVectorText()
+        source.SetText(line)
+        source.Update()
+        mesh = pv.wrap(source.GetOutput()).copy()
+        if not mesh.n_points:
+            continue
+        coords = mesh.points.copy()
+        coords[:, 1] -= index * _line_advance()
+        mesh.points = coords
+        drawn.append(mesh)
+    if not drawn:
+        return pv.PolyData()
+    edge = (max(float(mesh.points[:, 0].max()) for mesh in drawn) if right
+            else min(float(mesh.points[:, 0].min()) for mesh in drawn))
+    for mesh in drawn:
+        coords = mesh.points.copy()
+        coords[:, 0] += edge - (coords[:, 0].max() if right else coords[:, 0].min())
+        mesh.points = coords
+    return pv.merge(drawn, merge_points=False) if len(drawn) > 1 else drawn[0]
+
+
+def _pin_label_geometry(points):
+    """Reading frame of the pin labels: (along_x, across, across_axis, middle, gap, max_width).
+
+    `max_width` is the room one label has across the board, mm: 42% of the
+    distance between the outer anchors, less the gap to the strip.
+    """
     span = np.ptp(points[:, :2], axis=0)
     along_x = span[0] >= span[1]
-    # Text normal faces -Z, so names read correctly from the underside.
-    horizontal = np.array([0., -1., 0.] if along_x else [1., 0., 0.])
-    vertical = np.array([-1., 0., 0.] if along_x else [0., -1., 0.])
     across = span[1] if along_x else span[0]
     across_axis = 1 if along_x else 0
     middle = (points[:, across_axis].min() + points[:, across_axis].max()) / 2
     gap = min(.8, across * .08)
-    max_width = max(1.0, across * .42 - gap)
+    return along_x, across, across_axis, middle, gap, max(1.0, across * .42 - gap)
+
+
+def _pin_label_layout(points, labels):
+    """Lines and the one shared scale of the pin labels.
+
+    One glyph size for every label (user, 2026-11-14: «uniformiamo la
+    dimensione delle scritte, badando che ci stiano»). Each name may wrap,
+    at its own break points, onto balanced lines; for each number of lines
+    the largest scale is the one at which the widest line fits the room
+    across the board AND the block fits the room between neighbouring pins.
+    The shared scale is the smallest of the names' best scales, so every
+    label fits; each name then uses the fewest lines that reach it. Before,
+    each label was shrunk alone, so long names became unreadable next to
+    large short ones (0.13 against 0.65 mm on the ESP32 module).
+    @note Fitting comes first: there is no legibility floor, because a floor
+        would let labels overlap. One very tight pair of pins shrinks every
+        label; the user can then read the names in the symbol or zoom in.
+
+    @return dict: ``height`` (nominal glyph height, mm), ``fraction`` (shared
+        scale, <= 1), ``scale`` (natural Text3D units -> mm), ``blocks``
+        (lines of each label), ``texts`` (natural block meshes, flush left),
+        ``max_width``, ``room`` and ``advance`` (mm).
+    """
+    import pyvista as pv
+    height = _pin_label_height(points)
+    max_width = _pin_label_geometry(points)[5]
+    # Natural Text3D units -> mm, from the one reference height.
+    unit = height / max(1e-9, float(np.ptp(pv.Text3D(_LABEL_REFERENCE, depth=0).points[:, 1])))
+    # A block of n lines is (n - 1) line advances plus one glyph height along
+    # the row (vtkVectorText advance measured, not assumed).
+    advance = unit * _line_advance()
+    room = _LABEL_ROW_FILL * _nearest_anchor_gap(points)
+
+    def options(label):
+        """(largest scale <= 1, lines) for 1, 2, ... lines, until one more line stops helping."""
+        pieces = _label_tokens(label) or [label]
+        found = []
+        for count in range(1, min(_LABEL_MAX_LINES, len(pieces)) + 1):
+            widest, lines = _balanced_lines(pieces, count, _text_width)
+            by_width = min(1.0, max_width / (widest * unit)) if widest > 0 else 1.0
+            by_height = min(1.0, room / ((len(lines) - 1) * advance + height))
+            fit = min(by_width, by_height)
+            if found and fit <= found[-1][0]:
+                break
+            found.append((fit, lines))
+        return found
+
+    choices = [options(_ascii_label(label)) for label in labels]
+    shared = min((max(fit for fit, _lines in found) for found in choices), default=1.0)
+    # Each name: the fewest lines that reach the shared scale.
+    blocks = [next(lines for fit, lines in found if fit >= shared - 1e-9) for found in choices]
+    texts = [_block_mesh(block) for block in blocks]
+    # Final check on the real blocks, width AND height: the widths that chose
+    # the breaks are a model (`_text_width`); the drawn block must fit.
+    shown = [text for text in texts if text.n_points]
+    drawn_width = max((float(np.ptp(text.points[:, 0])) for text in shown), default=0.0)
+    drawn_height = max((float(np.ptp(text.points[:, 1])) for text in shown), default=0.0)
+    if drawn_width > 0:
+        shared = min(shared, max_width / (drawn_width * unit))
+    if drawn_height > 0 and np.isfinite(room):
+        shared = min(shared, room / (drawn_height * unit))
+    return dict(height=height, fraction=shared, scale=unit * shared, blocks=blocks, texts=texts,
+                max_width=max_width, room=room, advance=advance)
+
+
+def _pin_text_mesh(points, labels):
+    """View-only planar text, with one shared reading direction on the pin face.
+
+    Sizes and lines come from `_pin_label_layout`: one glyph size for every
+    label, each one fitting; a block is flush on the side of its own strip.
+    """
+    import pyvista as pv
+    layout = _pin_label_layout(points, labels)
+    along_x, across, across_axis, middle, gap, _max_width = _pin_label_geometry(points)
+    # Text normal faces -Z, so names read correctly from the underside.
+    horizontal = np.array([0., -1., 0.] if along_x else [1., 0., 0.])
+    vertical = np.array([-1., 0., 0.] if along_x else [0., -1., 0.])
+    scale = layout["scale"]
     pieces = []
-    for point, label in zip(points, labels):
-        text = pv.Text3D(label, depth=0, height=height)
-        coords = text.points.copy()
+    for point, block in zip(points, layout["blocks"]):
+        inward = (1 if point[across_axis] < middle else -1) if across > 1e-6 else 0
+        # Flush on the strip side: the text's right end points outward when
+        # the reading direction runs from the middle towards this strip.
+        text = _block_mesh(block, right=inward != 0 and horizontal[across_axis] * -inward > 0)
+        if not text.n_points:
+            # Nothing drawable (an empty name): no piece, never an empty mesh.
+            continue
+        coords = text.points.copy() * scale
         coords -= (coords.min(axis=0) + coords.max(axis=0)) / 2
-        width = np.ptp(coords[:, 0])
-        if width > max_width:
-            coords *= max_width / width
         # Anchors already include an inward clearance. Bring the text 3 mm
         # closer to the strip without changing its size or reading direction.
         origin = point.copy()
-        if across > 1e-6:
-            inward = 1 if point[across_axis] < middle else -1
+        if inward:
             outward_adjustment = min(3.0, across * .225)
             origin[across_axis] += inward * (
                 np.ptp(coords[:, 0]) / 2 + gap - outward_adjustment)
         text.points = (origin + coords[:, 0, None] * horizontal
                        + coords[:, 1, None] * vertical)
         pieces.append(text)
+    if not pieces:
+        return pv.PolyData()
     return pv.merge(pieces, merge_points=False)
 
 
@@ -958,8 +1213,12 @@ class Preview3DVtk(QtInteractor):
         names = getattr(self, '_pin_functions', {})
         labels = [f"{pin} ({names[str(pin)]})" if names.get(str(pin)) else str(pin)
                   for pin, _, _, _ in anchors]
+        mesh = _pin_text_mesh(points, labels)
+        if not mesh.n_points:
+            # Nothing drawable: an empty mesh would raise inside add_mesh.
+            return
         self._label_actor = self.add_mesh(
-            _pin_text_mesh(points, labels), color=_LABEL_COLOR,
+            mesh, color=_LABEL_COLOR,
             lighting=False, pickable=False, name='pin-labels',
             reset_camera=False, render=False,
         )

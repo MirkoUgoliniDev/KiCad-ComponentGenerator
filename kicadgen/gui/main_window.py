@@ -99,7 +99,6 @@ from ..app_paths import (DEFAULT_YOLO_ONNX, DEFAULT_YOLO_PT, DEFAULT_YOLO_SMD_ON
 from ..services.photo_yolo import yolo_settings as validate_yolo_settings
 from .component_editor_dialog import ComponentEditorDialog
 from .finding_details import FINDING_DETAILS_ROLE, finding_details, show_finding_details
-from .workflow_bar import WorkflowBar
 from .project_wizard import CollapsibleTools, ProjectWizard
 from ..generators.host_mounting import header_footprint_params
 from .start_page import NO_PROJECTS_TOOLTIP, StartPage
@@ -2522,14 +2521,12 @@ class MainWindow(QMainWindow):
         self.action_profiles = config_menu.addAction(
             QIcon(str(Path(__file__).parent / 'assets' / 'profile-edit.svg')),
             self.i18n.text("Gestione tipologie e profili AI..."), self._edit_profiles)
-        # Prompts -> model -> account: what is sent, who runs it, who pays
-        # (UX review 2026-11-12, finding 11: two entries named «AI»).
+        # Prompts -> account -> model: the account comes before the model
+        # (user, 2026-11-14: «mettiamo prima Account AI, poi il modello AI»),
+        # because «Modello AI» lists only the models of sources with a key.
+        # Each entry keeps its own tooltip (UX review 2026-11-12, finding 11).
         self.action_profiles.setToolTip(self.i18n.text(
             "Testi (prompt) inviati all'AI, generali e per tipologia"))
-        self.action_defaults = config_menu.addAction(
-            self.i18n.text("Modello AI..."), self._edit_llm_settings)
-        self.action_defaults.setToolTip(self.i18n.text(
-            "Quale modello AI esegue ogni passo dell'analisi"))
         # OpenRouter and DeepSeek keys in the Windows Credential Manager
         # (PIANO-FIX 2, HANDOFF 129).
         self.action_ai_account = config_menu.addAction(
@@ -2537,6 +2534,10 @@ class MainWindow(QMainWindow):
         self.action_ai_account.setToolTip(self.i18n.text(
             "Chiavi OpenRouter e DeepSeek, credito e limiti: incolla, verifica e salva le "
             "chiavi nel Gestore credenziali di Windows."))
+        self.action_defaults = config_menu.addAction(
+            self.i18n.text("Modello AI..."), self._edit_llm_settings)
+        self.action_defaults.setToolTip(self.i18n.text(
+            "Quale modello AI esegue ogni passo dell'analisi"))
         config_menu.addSeparator()
 
         self.action_generation_options = config_menu.addAction(
@@ -4287,11 +4288,9 @@ class MainWindow(QMainWindow):
         # has none, and the combo box was stuck to the right border of the
         # window (user, 2026-09-24).
         language_row.setContentsMargins(0, 6, CONTENT_MARGIN_PX, 6)
-        # Workflow step bar (PIANO-FIX 4): to the left of the language,
-        # on the same row, so as not to take height away from the tabs.
-        self.workflow_bar = WorkflowBar(self.i18n.text)
-        self.workflow_bar.step_clicked.connect(self._on_workflow_step_clicked)
-        language_row.addWidget(self.workflow_bar)
+        # The workflow step bar that sat here (PIANO-FIX 4) is gone (user,
+        # 2026-11-14: «troppa confusione», too much clutter): it repeated the
+        # tabs and the two wizard pages; the body review keeps its toolbar icon.
         language_row.addStretch()
         # A globe instead of the «Lingua:» (language) label (user, 2026-09-24), like
         # the other icons: the name is in the tooltip and in the accessible name of
@@ -4376,7 +4375,7 @@ class MainWindow(QMainWindow):
             self.project_wizard.retranslate()
         # The status label is built after every earlier refresh, which skipped
         # it: without this pass it stayed empty until the first language switch.
-        self._refresh_workflow_state()
+        self._refresh_project_status()
 
     def _align_form(self, form: QFormLayout, panel: str) -> None:
         """@brief Align a form's labels now and after every language change, with its panel's forms.
@@ -4459,9 +4458,8 @@ class MainWindow(QMainWindow):
             # only a refresh writes them in the new language.
             self.guided_docs.refresh()
         self.project_wizard.retranslate()
-        if hasattr(self, "workflow_bar"):
-            self.workflow_bar.retranslate()
-            self._refresh_workflow_state()
+        if hasattr(self, "status_cost"):
+            self._refresh_project_status()
             if not self.analysis_overlay.isVisible():
                 self.statusBar().showMessage(self.i18n.text("Pronto"))
         self.ai_account.refresh()
@@ -4525,6 +4523,8 @@ class MainWindow(QMainWindow):
             self._file_paths_toggle_text(self.file_paths_toggle.isChecked()))
         # Icons of the progress modal: composed tooltips, not keys.
         self.analysis_overlay.refresh_command_texts()
+        # A held finished card: its cost lines are composed, not keys.
+        self._refresh_held_card_cost()
         self._draw_preview()
 
     def _retranslate_component_types(self) -> None:
@@ -5570,10 +5570,6 @@ class MainWindow(QMainWindow):
             # A profile switch: its prompts are checked once (see
             # _check_prompt_notice); before the first show, showEvent does it.
             self._schedule_prompt_notice()
-        # The type decides whether the body review step exists: the bar
-        # follows at once, not at the next unrelated refresh (review
-        # 2026-11-12, finding 1).
-        self._refresh_workflow_state()
 
     def _refresh_type_effect(self) -> None:
         """@brief Offer the header pins choice for boards only, showing the project's value.
@@ -5839,7 +5835,7 @@ class MainWindow(QMainWindow):
             self._refresh_mounting_actions()
             self._refresh_regen_3d_availability()
             self._refresh_kicad_remedies()
-            self._refresh_workflow_state()
+            self._refresh_project_status()
         finally:
             if outermost:
                 self._output_refresh_memo = None
@@ -5854,64 +5850,13 @@ class MainWindow(QMainWindow):
             memo[key] = compute()
         return memo[key]
 
-    def _workflow_facts(self) -> dict:
-        """@brief Facts of the open project that decide the workflow steps.
+    def _refresh_project_status(self) -> None:
+        """@brief Refresh the status bar after a change of the open project's state.
 
-        @return dict with name, documents, analysis, board, review, step (bools).
-        @note Only facts, no guesses: files on disk and what happened in this
-            session. A reopened project whose footprint exists has been
-            analysed, even if not in this session.
+        @note Formerly `_refresh_workflow_state`, which also drove the workflow
+            step bar removed on 2026-11-14 (user: «troppa confusione»).
         """
-        name = self._component_name()
-        facts = dict(name=bool(name), documents=False, analysis=False, board=False,
-                     review=False, step=False)
-        if not name:
-            return facts
-        project = self._project_dir()
-        footprint = (project / f"{name}.pretty" / f"{name}.kicad_mod").is_file()
-        facts["step"] = footprint and (project / f"{name}.3dshapes" / f"{name}.step").is_file()
-        docs_list = getattr(self, "docs_list", None)
-        facts["documents"] = bool(docs_list is not None and docs_list.count())
-        facts["analysis"] = bool(getattr(self, "_acquisition_completed", False)) or footprint
-        # ONE predicate for «a board with bodies to review», the same the
-        # hidden rule of `_refresh_workflow_state` reads: a board kind chosen
-        # in the wizard without a type is a board too (review 2026-11-12,
-        # finding 2: two predicates left the review shown but never tickable).
-        facts["board"] = self._photo_inventory_family() is True
-        facts["review"] = facts["board"] and (
-            bool(getattr(self, "_reviewed_this_extraction", False))
-            or self._review_bundle() is not None)
-        return facts
-
-    def _refresh_workflow_state(self) -> None:
-        """@brief Tick the done steps, highlight the next one, refresh the status bar."""
-        bar = getattr(self, "workflow_bar", None)
-        if bar is None:
-            return
-        facts = self._workflow_facts()
-        done = {key for key, flag in (("documents", facts["documents"]),
-                                      ("analysis", facts["analysis"]),
-                                      ("review", facts["review"]),
-                                      ("model3d", facts["step"])) if flag}
-        # The body review exists only for boards with components: for any
-        # other chosen type it is hidden, not struck through (user request,
-        # 2026-11-12). Hidden only when the chosen project kind or type
-        # DECLARES one single component (`_photo_inventory_family() is
-        # False`); with no project, no type, or a type that cannot decide
-        # (None), every step stays shown since which case applies is unknown.
-        family = self._photo_inventory_family()
-        hidden = set()
-        if facts["name"] and family is False:
-            hidden.add("review")
-        # A review still shown for an undecided type (family None) cannot be
-        # ticked: it is never proposed as the next step, otherwise the
-        # highlight would stay on it forever (review 2026-11-12, finding 2).
-        not_proposed = hidden | (set() if facts["board"] else {"review"})
-        order = ("documents", "analysis", "review", "model3d", "kicad")
-        current = (next((key for key in order if key not in done and key not in not_proposed), None)
-                   if facts["name"] else None)
-        bar.set_state(done, current, hidden)
-        self._refresh_status_bar(facts["name"])
+        self._refresh_status_bar(bool(self._component_name()))
 
     def _on_costs_changed(self) -> None:
         """@brief Refresh the status bar cost after the cost file changed (Qt slot).
@@ -5921,12 +5866,14 @@ class MainWindow(QMainWindow):
         try:
             self._refresh_status_bar(bool(self._component_name()))
             overlay = getattr(self, "analysis_overlay", None)
-            # Not on a held finished card: its total and per-model lines come
-            # from the analysis summary, and a late cost-file write would pair a
-            # project figure with lines of another tally (review 2026-11-14, 3).
-            if (overlay is not None and overlay.isVisible()
-                    and not self._generation_phase_active()
-                    and not overlay.is_holding_completed()):
+            if overlay is not None and overlay.isVisible() and overlay.is_holding_completed():
+                # A held finished card that shows the analysis cost follows a
+                # late write (a call queued while the file was busy) with its
+                # total AND its model lines from the same file; a card without
+                # cost (STEP regeneration) stays without (review 2026-11-14, 3).
+                self._refresh_held_card_cost()
+            elif (overlay is not None and overlay.isVisible()
+                    and not self._generation_phase_active()):
                 overlay.set_cost(self.status_cost.text())
                 if self.status_cost.toolTip():
                     overlay.cost.setToolTip(self.status_cost.toolTip())
@@ -5989,16 +5936,6 @@ class MainWindow(QMainWindow):
         self.status_cost.setToolTip(
             self.i18n.tr("status.project_cost", total=format_usd(costs.total_usd), calls=costs.calls)
             + ("" if costs.complete else " (+?)"))
-
-    def _on_workflow_step_clicked(self, step: str) -> None:
-        """@brief Open the tab where a step is done, when the tab is available."""
-        target = {"model3d": TAB_MODEL_3D, "kicad": TAB_KICAD}.get(step, TAB_PROJECT)
-        if self.tabs.isEnabled() and self.tabs.isTabEnabled(target):
-            self.tabs.setCurrentIndex(target)
-            if target == TAB_PROJECT and hasattr(self, "project_wizard"):
-                self.project_wizard.set_page(0 if step == "documents" else 1)
-                if step == "review" and self.btn_component_review.isEnabled():
-                    self._open_component_review()
 
     def _refresh_output_actions_inner(self) -> bool:
         name = self._component_name()
@@ -6505,8 +6442,6 @@ class MainWindow(QMainWindow):
                 say_unreadable(exc)
             # No retranslation here (review 2026-10-29, A4): `refresh` already
             # translates the box it rebuilt, and a language change refreshes it.
-        # The «Documenti» (documents) step follows the list just re-read.
-        self._refresh_workflow_state()
 
     def _selected_documents(self):
         return DocumentSet(self._docs_dir()).selected()
@@ -8266,13 +8201,20 @@ class MainWindow(QMainWindow):
                          notes=f"{notes} {suffix}".strip())
         self._on_extracted(params)
 
-    def _hold_completed_overlay(self, message: str, analysis_cost: bool = False) -> None:
+    def _hold_completed_overlay(self, message: str, analysis_cost: bool = False,
+                                partial: bool = False) -> None:
         """@brief Leave the modal open on a finished generation, steps ticked, until «Chiudi».
 
         @param message Italian source of the final outcome.
         @param analysis_cost True when the generation followed an AI analysis
             in the same run (the automatic generation): the finished card then
             shows that analysis' cost, total and one line per model.
+        @param partial True when something is left to do (STEP model to
+            complete): the outcome is highlighted as a warning, not a success.
+        @note The cost is the whole current analysis (user decision
+            2026-11-14): from the last «Estrai parametri con AI», re-reads,
+            inventory relaunches and terminal readings included, as the
+            status bar counts it (`_analysis_cost_for_card`).
         @note The window underneath is given back exactly as `_hide_analysis_overlay`
             does; only the card stays. Without steps (an operation of one
             phase) there is nothing to show ticked and the card simply closes.
@@ -8281,21 +8223,84 @@ class MainWindow(QMainWindow):
             split by model) narrows the decision of 2026-09-23 that kept it
             off the generation card: while the generation RUNS there is still
             no cost, so it cannot read as the price of FreeCAD; at the end the
-            line says «Costo ultima analisi», the analysis that started the run.
+            line gives the cost of the analysis that started the run.
             A generation started by hand, or a STEP regeneration, made no
             call and shows none.
         """
+        self._held_card_shows_cost = False
         if not self.analysis_overlay._step_labels:
             self._hide_analysis_overlay()
             return
         if self._analysis_tabs_enabled is not None:
             self.tabs.setEnabled(self._analysis_tabs_enabled)
             self._analysis_tabs_enabled = None
-        summary = getattr(self, "_last_analysis_cost", None) if analysis_cost else None
+        summary = self._analysis_cost_for_card() if analysis_cost else None
         if summary:
             self.analysis_overlay.set_cost(summary[0])
             self.analysis_overlay.set_cost_models(summary[1])
-        self.analysis_overlay.show_completed(self.i18n.text(message))
+            self._held_card_shows_cost = True
+        self.analysis_overlay.show_completed(self.i18n.text(message), partial=partial, source=message)
+
+    def _analysis_cost_for_card(self):
+        """@brief Total and per-model lines of the current analysis, for the finished card.
+
+        @return (total line, model lines, read from the file), or None when
+            nothing is known.
+        @note Source: the project cost file, the analysis that the status bar
+            shows -- from the last «Estrai parametri con AI», paid reruns
+            included (user decisions 2026-09-28 and 2026-11-14). The total
+            line is the status bar's own text, so the two never disagree;
+            paid calls still waiting for a busy file get a line of their own,
+            since the model lines cannot split them yet (review 2026-11-14, 4).
+        @note Fallback, the run tally of the last AI run
+            (`_last_analysis_cost`, third item False): without a project
+            folder, with the file unreadable, or while the start of the
+            analysis is still queued (the file's current analysis is then
+            the previous one).
+        """
+        stored = getattr(self, "_last_analysis_cost", None)
+        fallback = (stored[0], stored[1], False) if stored else None
+        try:
+            from ..services.openrouter import format_model_lines
+            from ..services.project_costs import load_project_costs
+            folder = self._project_dir_or_none()
+            if folder is None:
+                return fallback
+            account = getattr(self, "ai_account", None)
+            start_queued, waiting = account.queued_for(folder) if account is not None else (False, 0)
+            if start_queued:
+                return fallback
+            costs = load_project_costs(folder, account.shown_run(folder) if account else None)
+            if not costs.run or not (costs.run_calls or waiting):
+                return fallback
+            self._refresh_status_bar(bool(self._component_name()))
+            total = self.status_cost.text()
+        except Exception:  # noqa: BLE001 - the cost is informational
+            return fallback
+        if not total:
+            return fallback
+        lines = format_model_lines(costs.run_by_model)
+        if waiting:
+            lines.append(tx("+{count} in attesa, non ancora divise per modello", count=waiting))
+        return total, lines, True
+
+    def _refresh_held_card_cost(self) -> None:
+        """@brief Re-read the cost of a held finished card that shows one, from the file only.
+
+        @note Only a figure read from the cost file replaces the shown one: a
+            refresh while the file is busy or damaged would otherwise swap the
+            whole analysis for the last run's tally under another label
+            (review 2026-11-14, 2). Also called on a language change, so the
+            card's lines follow the language.
+        """
+        overlay = getattr(self, "analysis_overlay", None)
+        if (overlay is None or not overlay.is_holding_completed()
+                or not getattr(self, "_held_card_shows_cost", False)):
+            return
+        summary = self._analysis_cost_for_card()
+        if summary and summary[2]:
+            overlay.set_cost(summary[0])
+            overlay.set_cost_models(summary[1])
 
     def _on_completed_overlay_closed(self) -> None:
         """@brief The user closed the finished card: a regeneration waiting for it may start."""
@@ -12681,8 +12686,10 @@ class MainWindow(QMainWindow):
         worker_class = self._reread_worker_class()
         stored = self._main_answer_for_reread()
         model = profile['model']
-        if hasattr(self, "ai_account"):
-            self.ai_account.start_analysis(self._project_dir_or_none())
+        # No new analysis in the cost file: a partial re-read adds to the current
+        # one, like the inventory relaunch (user decisions 2026-09-28 and
+        # 2026-11-14: the cost runs from the last «Estrai parametri con AI»,
+        # reruns included; the start added here on 2026-11-05 reset it).
         self._begin_ai_run(self.REREAD_FIELDS[field])
         announcement = tx("Rilettura parziale ({what}) sulla risposta principale salvata: una sola "
                           "lettura a pagamento, nessuna nuova analisi completa. Modello principale "
@@ -20078,7 +20085,7 @@ class MainWindow(QMainWindow):
                                  fields=labels or self._automatic_3d_deferred_reason)
                 self._on_ai_progress(message)
                 self._hold_completed_overlay("Footprint generato; modello STEP da completare.",
-                                             analysis_cost=True)
+                                             analysis_cost=True, partial=True)
             else:
                 # Faithful final account: the 3D model was not requested.
                 self._on_ai_progress(tx("Footprint generato; modello STEP non richiesto. Verifica l’anteprima "
