@@ -397,7 +397,8 @@ def _fake_verification(monkeypatch, gate):
 def test_u7_interrompi_stops_after_the_running_command(app, monkeypatch):
     gate = threading.Event()
     _fake_verification(monkeypatch, gate)
-    dialog = ccd.ComponentCheckDialog({}, tx=lambda text: text)
+    dialog = ccd.ComponentCheckPanel(tx=lambda text: text)
+    dialog.run({})
     assert _wait_until(app, lambda: dialog.results)
     dialog.stop_button.click()
     assert not dialog.stop_button.isEnabled()
@@ -414,7 +415,8 @@ def test_u7_an_uninterrupted_verification_reaches_its_normal_verdict(app, monkey
     gate = threading.Event()
     gate.set()
     _fake_verification(monkeypatch, gate)
-    dialog = ccd.ComponentCheckDialog({}, tx=lambda text: text)
+    dialog = ccd.ComponentCheckPanel(tx=lambda text: text)
+    dialog.run({})
     assert _wait_until(app, lambda: not dialog._running)
     assert len(dialog.results) == 50
     assert dialog.verdict.text() == "PRONTO PER L’USO"

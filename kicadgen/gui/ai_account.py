@@ -30,7 +30,8 @@ from ..services import openrouter
 from ..services import providers
 from ..services.deepseek_pricing import PRICES_CHECKED
 from ..services.messages import tx
-from ..services.project_costs import ProjectCostsError, add_call, load_project_costs, start_run
+from ..services.project_costs import (ProjectCostsError, add_cached_answer, add_call,
+                                      load_project_costs, start_run)
 
 #: First wait (ms) before writing the queued calls again after the cost file
 #: stayed busy; it doubles at each failure up to FLUSH_RETRY_MAX_MS. One
@@ -38,6 +39,13 @@ from ..services.project_costs import ProjectCostsError, add_call, load_project_c
 #: retries plus lock timeout), so the attempts are spaced out, never looped.
 FLUSH_RETRY_FIRST_MS = 2000
 FLUSH_RETRY_MAX_MS = 60000
+#: Wait (ms) before answers replayed from a local cache are written. They
+#: arrive in bursts (a replayed analysis serves a hundred or more) and each
+#: write rewrites the whole cost file on the GUI thread (3.3 s for 150 of them
+#: one by one, review 2026-11-15, M2): grouped in the queue, they are written
+#: once per burst, or with the next paid call. A bound on how late the free
+#: «from the cache» line may be, not a tuned value.
+CACHED_FLUSH_MS = 1000
 
 
 def format_usd(amount: float) -> str:
@@ -201,6 +209,10 @@ class AiAccountLine(QLabel):
         self._retry_timer.setSingleShot(True)
         self._retry_timer.timeout.connect(self._retry_flush)
         self._retry_ms = FLUSH_RETRY_FIRST_MS
+        #: Writes the grouped cached answers once per burst (CACHED_FLUSH_MS).
+        self._cached_timer = QTimer(self)
+        self._cached_timer.setSingleShot(True)
+        self._cached_timer.timeout.connect(self._retry_flush)
         #: Analyses started by this instance: key -> run number in the file
         #: (None until the start is written); folder -> key of its last one.
         self._analysis_seq = 0
@@ -216,6 +228,11 @@ class AiAccountLine(QLabel):
         self._bridge.recorded.connect(self._on_paid_call)
         self._listener = self._stamp_and_forward
         openrouter.set_usage_listener(self._listener)
+        # Answers replayed from a local cache take the same road (stamped with
+        # the run's project and analysis, queued in order) but are marked, so
+        # they are noted apart and never counted as calls (user, 2026-11-15).
+        self._cached_listener = self._stamp_cached_and_forward
+        openrouter.set_cached_answer_listener(self._cached_listener)
         self.refresh()
 
     def bind_run_project(self, folder, analysis: Optional[int] = None) -> None:
@@ -303,6 +320,10 @@ class AiAccountLine(QLabel):
                               _analysis=self._run_analysis)
         self._bridge.recorded.emit(record)
 
+    def _stamp_cached_and_forward(self, record: dict) -> None:
+        """Worker-thread listener of cached answers: marked, then stamped like a paid call."""
+        self._stamp_and_forward(dict(record, _cached_answer=True))
+
     def detach(self) -> None:
         """@brief Write what is still queued, then stop listening, if this line is the listener.
 
@@ -311,9 +332,12 @@ class AiAccountLine(QLabel):
         """
         self._detached = True
         self._retry_timer.stop()
+        self._cached_timer.stop()
         self._flush_final()
         if openrouter._usage_listener == self._listener:
             openrouter.set_usage_listener(None)
+        if openrouter._cached_answer_listener == self._cached_listener:
+            openrouter.set_cached_answer_listener(None)
 
     def closeEvent(self, event) -> None:
         """@brief Qt override: write the queued calls before the line closes.
@@ -321,6 +345,7 @@ class AiAccountLine(QLabel):
         @param event The close event, accepted by the base class.
         """
         self._retry_timer.stop()
+        self._cached_timer.stop()
         self._flush_final()
         super().closeEvent(event)
 
@@ -400,6 +425,12 @@ class AiAccountLine(QLabel):
                 record.pop("_run_project", None)
                 record.pop("_analysis", None)
                 folder = self._project_dir()
+            if record.get("_cached_answer"):
+                # Free and not a call: without a project nothing is lost by
+                # not noting it; with one it is grouped and written later.
+                if folder is not None:
+                    self._queue_cached_answer(Path(folder), record)
+                return
             if folder is None:
                 # Every dropped cost gets its own line: a de-duplicated
                 # message would hide how much went unrecorded.
@@ -414,6 +445,33 @@ class AiAccountLine(QLabel):
             self._log(tx("Costo di una chiamata AI non registrato nel progetto ({cost} USD): "
                          "{exc}", cost=self._cost_text(record), exc=exc))
 
+    def _queue_cached_answer(self, folder: Path, record: dict) -> None:
+        """Group a cached answer with the queued ones of its project, analysis and model; write later.
+
+        Grouping stops at a queued analysis start of the same project: an
+        answer read after it must not be written into the analysis before it.
+        """
+        grouped = False
+        for queued_folder, item in reversed(self._pending):
+            if queued_folder != folder:
+                continue
+            if item.get("_start_run"):
+                break   # an earlier analysis: queue a new item after the start
+            if (item.get("_cached_answer") and item.get("_analysis") == record.get("_analysis")
+                    and item.get("model") == record.get("model")):
+                item["count"] = item.get("count", 1) + 1
+                grouped = True
+                break
+        if not grouped:
+            self._pending.append((folder, dict(record, count=1)))
+        # No timer once the line is detached: an answer delivered after the
+        # final write must not write the file later (as the busy-file rule;
+        # second review 2026-11-15). It is free, so dropping it loses nothing.
+        if getattr(self, "_detached", False):
+            return
+        if not self._retry_timer.isActive() and not self._cached_timer.isActive():
+            self._cached_timer.start(CACHED_FLUSH_MS)
+
     @staticmethod
     def _cost_text(record) -> str:
         """Cost of a record for a log line; «?» when it was not reported."""
@@ -423,11 +481,12 @@ class AiAccountLine(QLabel):
         return format_usd(float(cost))
 
     def _waiting_calls(self) -> int:
-        """Queued paid calls, analysis starts excluded (audit 138, B9)."""
-        return sum(1 for _folder, record in self._pending if not record.get("_start_run"))
+        """Queued paid calls, analysis starts and cached answers excluded (audit 138, B9)."""
+        return sum(1 for _folder, record in self._pending
+                   if not record.get("_start_run") and not record.get("_cached_answer"))
 
     def _write(self, folder: Path, record: dict) -> None:
-        """Write one queued item: an analysis start or a paid call."""
+        """Write one queued item: an analysis start, a paid call or a group of cached answers."""
         if record.get("_start_run"):
             costs = start_run(folder, _call_time(record))
             self._analysis_runs[record.get("_analysis")] = costs.run
@@ -437,6 +496,9 @@ class AiAccountLine(QLabel):
         run = self._analysis_runs.get(record.get("_analysis"))
         if run:
             call["run"] = run
+        if record.get("_cached_answer"):
+            add_cached_answer(folder, call, _call_time(record))
+            return
         add_call(folder, call, _call_time(record))
 
     def _flush_pending(self, final: bool = False) -> None:
@@ -457,9 +519,10 @@ class AiAccountLine(QLabel):
                     self._report(tx("File dei costi occupato ({exc}): {count} chiamate in "
                                     "attesa, saranno scritte alla prossima.", exc=exc,
                                     count=waiting))
-                else:
+                elif any(item.get("_start_run") for _folder, item in self._pending):
                     self._report(tx("File dei costi occupato ({exc}): l'inizio dell'analisi "
                                     "sarà scritto appena possibile.", exc=exc))
+                # Only free cached answers queued: nothing paid is waiting, no line.
                 # No new attempt once the window is closed: a call delivered
                 # after detach() must not restart the timer.
                 if (not final and not getattr(self, "_detached", False)
@@ -474,6 +537,12 @@ class AiAccountLine(QLabel):
                 if record.get("_start_run"):
                     self._log(tx("Inizio dell'analisi non registrato nel file dei costi: {exc}",
                                  exc=exc))
+                elif record.get("_cached_answer"):
+                    # Free answers: one line per distinct problem, not one per
+                    # answer (review 2026-11-15, L1); the per-item rule is for money.
+                    self._report(tx("Lettura dalla cache non registrata nel file dei costi "
+                                    "({model}): {exc}", model=record.get("model") or "?",
+                                    exc=exc))
                 else:
                     self._log(tx("Costo di una chiamata AI non registrato nel progetto "
                                  "({cost} USD): {exc}", cost=self._cost_text(record), exc=exc))
@@ -584,8 +653,9 @@ class AiAccountLine(QLabel):
         folder = self._project_dir()
         if folder is not None:
             self._cost_parts(Path(folder), parts, details)
+        # Counted per model on the finished card, never as calls (user, 2026-11-15).
         details.append(tx("Le risposte servite dalla cache locale non costano e non "
-                          "sono contate."))
+                          "contano come chiamate."))
         # A module's row: it stays in place even without data.
         self.setText("  ·  ".join(parts) or "—")
         self.setToolTip(tx("Credito e spesa AI") + "\n" + "\n".join(details))
@@ -608,7 +678,7 @@ class AiAccountLine(QLabel):
                 continue
             if record.get("_start_run"):
                 started, waiting = True, 0
-            else:
+            elif not record.get("_cached_answer"):
                 waiting += 1
         return started, waiting
 

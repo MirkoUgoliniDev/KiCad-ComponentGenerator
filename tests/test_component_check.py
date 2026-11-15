@@ -36,12 +36,17 @@ def test_timeout_does_not_hide_other_checks(tmp_path, monkeypatch):
     monkeypatch.setattr(check, 'find_kicad_cli', lambda: 'fake')
     def timeout(*args, **kwargs):
         raise subprocess.TimeoutExpired('fake', 60)
-    monkeypatch.setattr(check.subprocess, 'run', timeout)
+    monkeypatch.setattr(check, '_run_cli', timeout)
     results = check.verify_component(art.component_dir, 'Demo', [{'pin': '1', 'name': 'GPIO1'}])
-    assert sum(r.status == 'ERROR' for r in results) == 3
-    # CONTRACT CHANGED 2026-11-14 (automatic DRC/ERC): a kicad-cli that times
-    # out makes the DRC and the ERC SKIP («non eseguito»), never an ERROR, and
-    # the three file reads keep their ERRORs.
+    # CONTRACT CHANGED 2026-11-15 (guided KiCad tab, review H1): a kicad-cli
+    # that times out is a failure of the checking TOOL, not of the component:
+    # the three file reads are «not run» (SKIP, with a remedy), never ERRORs --
+    # an ERROR forbids the installation and a slow PC would block it for good.
+    # CONTRACT CHANGED 2026-11-14 (automatic DRC/ERC): the DRC and the ERC SKIP too.
+    assert sum(r.status == 'ERROR' for r in results) == 0
+    reads = [r for r in results if r.status == 'SKIP' and '60 secondi' in r.detail
+             and r.code not in ('drc', 'erc')]
+    assert len(reads) == 3 and all(r.remedy for r in reads)
     skipped = {r.code: r.detail for r in results if r.status == 'SKIP'}
     assert skipped['drc'].startswith('DRC non eseguito') and skipped['erc'].startswith('ERC non eseguito')
     assert results[-1].title == 'Verifiche manuali'
@@ -68,16 +73,18 @@ def test_real_kicad_reads_files_and_rejects_broken_step(tmp_path):
 
 def test_dialog_runs_without_blocking_ui(qapp, tmp_path, monkeypatch):
     from PyQt6.QtCore import QEventLoop, QTimer
-    from kicadgen.gui.component_check_dialog import ComponentCheckDialog
+    from kicadgen.gui.component_check_dialog import ComponentCheckPanel
     monkeypatch.setattr(check, 'find_kicad_cli', lambda: None)
-    dialog = ComponentCheckDialog(dict(directory=tmp_path, name='Demo', rows=[]))
+    # CONTRACT CHANGED 2026-11-15: the check is a panel of the KiCad tab.
+    dialog = ComponentCheckPanel()
+    dialog.run(dict(directory=tmp_path, name='Demo', rows=[]))
     loop = QEventLoop()
     dialog.worker.finished.connect(loop.quit)
     QTimer.singleShot(5000, loop.quit)
     dialog.show()
     loop.exec()
     assert not dialog.worker.isRunning()
-    assert dialog.close_button.isEnabled()
+    assert dialog.rerun_button.isEnabled() and not dialog.is_running()
     assert 'Footprint' in dialog.report.toPlainText()
     dialog.close()
 
@@ -134,7 +141,7 @@ def test_exit_zero_with_error_log_is_not_success(tmp_path, monkeypatch, message)
             output.mkdir(exist_ok=True, parents=True)
             (output / 'Demo.svg').write_text('<svg/>')
         return subprocess.CompletedProcess(args, 0, message, '')
-    monkeypatch.setattr(check.subprocess, 'run', fake_run)
+    monkeypatch.setattr(check, '_run_cli', fake_run)
     results = check.verify_component(art.component_dir, 'Demo', [{'pin': '1', 'name': 'GPIO1'}])
     assert any(r.title == 'Importazione 3D in KiCad' and r.status == 'ERROR' for r in results)
 
@@ -178,3 +185,34 @@ def test_a_truncated_step_is_still_an_error(tmp_path, monkeypatch):
     results = check.verify_component(art.component_dir, 'Demo', [{'pin': '1', 'name': 'GPIO1'}])
     assert any(r.status == 'ERROR' and r.title == 'Modello STEP' for r in results)
 
+
+
+def test_a_stop_kills_the_running_kicad_cli_and_ends_the_check():
+    """Review 2026-11-15 M3: a stop (window closed, project switched) kills the command in flight.
+
+    Negative twin: a command nobody stops returns its output as subprocess.run would.
+    """
+    import sys
+    import threading
+    import time
+    done = check._run_cli([sys.executable, '-c', 'print("ok")'], timeout=30)
+    assert done.returncode == 0 and done.stdout.strip() == 'ok'
+    outcome = {}
+
+    def slow():
+        started = time.monotonic()
+        try:
+            check._run_cli([sys.executable, '-c', 'import time; time.sleep(30)'], timeout=60)
+            outcome['result'] = 'finished'
+        except check.CliStopped:
+            outcome['result'] = 'stopped'
+        outcome['seconds'] = time.monotonic() - started
+    thread = threading.Thread(target=slow)
+    thread.start()
+    deadline = time.monotonic() + 10
+    while not check._CLI_PROCESSES and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert check.stop_cli_commands() == 1
+    thread.join(15)
+    assert outcome == {'result': 'stopped', 'seconds': outcome['seconds']} and outcome['seconds'] < 10
+    assert not check._CLI_PROCESSES and not check._CLI_STOPPED

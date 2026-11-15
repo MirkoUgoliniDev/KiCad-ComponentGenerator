@@ -329,27 +329,16 @@ def test_the_component_check_reports_a_footprint_draft(tmp_path):
 
 
 def test_the_verification_passes_the_footprint_draft_state(project, monkeypatch):
-    from kicadgen.gui import component_check_dialog
     window, _generations = project
     captured = []
 
-    class Dialog:
-        # CONTRACT CHANGED 2026-11-13: the check dialog also receives its fixes
-        # (`actions`, the symbol re-export); this stub only records `args`.
-        def __init__(self, args, parent, tx, actions=None):
-            # CONTRACT CHANGED 2026-11-14 (review P2): the window gives an args BUILDER,
-            # called by the dialog for every run; the stub calls it once.
-            captured.append(args() if callable(args) else args)
-
-        def exec(self):
-            return 0
-
-        # CONTRACT CHANGED 2026-10-27 (review B6): the window releases every modal
-        # it opens (`MainWindow._run_modal` calls `deleteLater`), so a fake dialog
-        # must answer it like the QDialog it stands for.
-        def deleteLater(self):
-            pass
-    monkeypatch.setattr(component_check_dialog, "ComponentCheckDialog", Dialog)
+    def run(args, actions=None, keep_status=False):
+        # CONTRACT CHANGED 2026-11-14 (review P2): the window gives an args BUILDER,
+        # called for every run; the stub calls it once. CONTRACT CHANGED
+        # 2026-11-15: the check runs in the KiCad tab's panel.
+        captured.append(args() if callable(args) else args)
+        return True
+    monkeypatch.setattr(window.kicad_check_panel, "run", run)
     window._verify_component()
     window._apply_footprint_drawings(validate_footprint_drawings([record()]))
     window._verify_component()

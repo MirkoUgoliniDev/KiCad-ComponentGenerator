@@ -56,3 +56,19 @@ def validate_output_name(name) -> None:
     """
     if not is_valid_output_name(name):
         raise ValueError(tx("Il nome del componente non è un nome di file valido."))
+
+
+def fp_filter_pattern(name: str) -> str:
+    """@brief The automatic footprint filter of a component: ONE token matching its footprint.
+
+    @param name The component (footprint) name.
+    @return ``<name>*`` with every blank replaced by KiCad's single-character
+        wildcard «?»: KiCad splits ``ki_fp_filters`` at spaces, so a name with
+        spaces would otherwise become several unrelated filters; '' for an
+        empty name.
+    @note Moved here from `gui.main_window` (2026-11-15) so the installation
+        (`services.kicad_library`), which renames a hand-renamed symbol, and
+        the window's own rename follow ONE rule; the window re-exports it.
+    """
+    name = str(name or "").strip()
+    return (re.sub(r"\s", "?", name) + "*") if name else ""

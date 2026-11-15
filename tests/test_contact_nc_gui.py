@@ -104,9 +104,12 @@ def test_contact_nc_is_a_symbol_question_that_blocks_no_footprint(window, monkey
     assert asked == ["contact_nc"] and held_back is False
     assert [q["key"] for q in window._extraction_questions] == [NC_KEY]
     assert window._pad_layout_question_block() == "" and window._stored_pad_layout_question() is None
-    assert any("Verifica componente per KiCad" in line for line in logged)
+    # CONTRACT CHANGED 2026-11-15: the «Verifica componente per KiCad» window is
+    # gone; the open question is asked again by the KiCad tab's step 1 check.
+    remedy = "controllo del componente (scheda KiCad, passo 1)"
+    assert any(remedy in line for line in logged)
     text = window._held_back_questions_text()
-    assert "Verifica componente per KiCad" in text and "ripetendo l'analisi" not in text
+    assert remedy in text and "ripetendo l'analisi" not in text
 
 
 def test_an_answer_in_the_pass_settles_the_witness(window, monkeypatch):

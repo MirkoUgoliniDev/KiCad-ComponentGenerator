@@ -530,14 +530,14 @@ writes the values into the footprint and the symbol.
   applied one, and — when `kicad-cli` is available — the real opening of
   footprint, symbol and 3D import in a temporary folder. It does not certify
   pinout, measures or visual alignment; ERC and DRC stay on the final design.
-- **Quick guide to using the component in KiCad** opens a five-page wizard on using the component in KiCad.
+- **Quick guide to using the component in KiCad** opens a three-page wizard: install, add the symbol to the schematic, update the PCB.
 
 **Library installation**:
 
 | Command | What it writes |
 |---|---|
-| **Install in KiCad project...** (recommended) | creates or updates `KiCadGen.pretty` and `KiCadGen.3dshapes` in the chosen KiCad project and registers the footprint library in that project's `fp-lib-table` with `${KIPRJMOD}` paths, so the project stays portable |
-| **Install as global library...** | copies the same files to a stable folder you choose and registers `KiCadGen.pretty` in the per-user global `fp-lib-table` of the installed KiCad (found through `kicad-cli version`), with absolute paths. It is refused while that table does not exist yet: start KiCad once, complete its initial library setup, then retry |
+| **Install in KiCad project...** (recommended) | creates or updates `KiCadGen.pretty`, `KiCadGen.3dshapes` and `KiCadGen.kicad_sym` in the chosen KiCad project and registers the footprint and symbol libraries in that project's `fp-lib-table` and `sym-lib-table` with `${KIPRJMOD}` paths, so the project stays portable |
+| **Install as global library...** | copies the same files to a stable folder you choose and registers `KiCadGen.pretty` and `KiCadGen.kicad_sym` in the per-user global `fp-lib-table` and `sym-lib-table` of the installed KiCad (found through `kicad-cli version`), with absolute paths. It is refused while those tables do not exist yet: start KiCad once, complete its initial library setup, then retry |
 
 Only the current component's files are replaced, after explicit confirmation;
 other components and other library rows are preserved. Before changing a
@@ -548,10 +548,10 @@ the real path.
 
 Further questions, asked only when they apply and before anything is written:
 
-- **KiCadGen library already registered**: for a project install, the global
-  table already has a `KiCadGen` library at another location. In that project
-  KiCad uses the project's library and no longer finds the global library's
-  footprints of the same name.
+- **KiCadGen library already registered**: for a project install, a global
+  table (footprints or symbols) already has a `KiCadGen` library at another
+  location. In that project KiCad uses the project's library and no longer
+  finds the global library's footprints or symbols of the same name.
 - **Project open in KiCad**: KiCad's lock files (`~<name>.kicad_pro.lck` and
   the like) show the project is open. KiCad sees the new library only after
   the project is reopened: close it first, without saving its library settings.
@@ -566,9 +566,11 @@ day (or delete it yourself). An export history that can no longer be read
 `kicad_exports.json.corrupt-<date-time>` and a new one is started, so no
 record is lost silently.
 
-The **symbol** is not registered in any `sym-lib-table`: export the
-`.kicad_sym` and add it in KiCad with *Manage Symbol Libraries*, then set
-the symbol's Footprint to `KiCadGen:<name>`.
+The **symbol** is installed too: it is added to the shared
+`KiCadGen.kicad_sym` (other symbols kept, one with the same name replaced
+after a confirmation) and already points to its footprint
+`KiCadGen:<name>`. Without a symbol file the installation brings footprint
+and STEP model only, and its report says how to add the symbol.
 
 The **Exports** tab keeps the history of every installation and symbol
 export made from this computer (component, kind, destination, date).

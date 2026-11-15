@@ -126,14 +126,20 @@ def test_editor_issues_carry_their_kind(window):
 
 def test_show_in_kicad_uses_the_applied_symbol_and_the_gate_minus_busy(window, monkeypatch, tmp_path):
     """@brief Positive (F): the preview is built from the APPLIED symbol staged in the preview
-    folder; the open dialog («busy») does not refuse. Negative: pads kept blocked -> refused."""
+    folder. Negative: pads kept blocked -> refused; work in progress -> refused.
+
+    @note CONTRACT CHANGED 2026-11-15 (guided KiCad tab, review L1): the
+        check is a panel, not a modal dialog counted as work, so «busy» is no
+        longer the check itself: work in progress refuses «Mostra in KiCad»
+        like «Prova in KiCad» (it would copy files being rewritten).
+    """
     from kicadgen.services.kicad_library import ComponentArtifacts
     opened, made = [], []
     _preview_ready(window, monkeypatch, tmp_path, opened)
     artifacts = ComponentArtifacts("X", tmp_path, tmp_path / "X.kicad_mod", tmp_path / "X.step")
     monkeypatch.setattr(window, "_current_kicad_artifacts", lambda: artifacts)
     monkeypatch.setattr(window, "_applied_symbol_full_text", lambda: "(kicad_symbol_lib APPLIED)")
-    monkeypatch.setattr(window, "_kicad_work_busy", lambda: True)
+    monkeypatch.setattr(window, "_kicad_work_busy", lambda: False)
     preview = PreviewProject(tmp_path, tmp_path / "X-preview.kicad_pcb", tmp_path / "X-preview.kicad_pro")
     monkeypatch.setattr(gui, "create_preview_project",
                         lambda artifacts, output_dir=None: made.append((artifacts, output_dir)) or preview)
@@ -147,6 +153,9 @@ def test_show_in_kicad_uses_the_applied_symbol_and_the_gate_minus_busy(window, m
             window._show_check_in_kicad()
     finally:
         window._pads_kept_blocked = False
+    monkeypatch.setattr(window, "_kicad_work_busy", lambda: True)
+    with pytest.raises(RuntimeError, match="lavoro"):
+        window._show_check_in_kicad()
     assert len(opened) == 1
 
 

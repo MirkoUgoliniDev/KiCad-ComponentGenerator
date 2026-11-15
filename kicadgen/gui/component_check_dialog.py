@@ -1,21 +1,22 @@
-"""@brief Background component verification: a verdict and one row per thing to do."""
+"""@brief Background component verification for the KiCad tab: a verdict and one row per thing to do."""
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from PyQt6.QtCore import QThread, pyqtSignal, QTimer, Qt, QSize
 from PyQt6.QtGui import QIcon
-from PyQt6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QLabel,
+from PyQt6.QtWidgets import (QApplication, QLabel,
                              QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QVBoxLayout,
                              QToolButton, QHBoxLayout, QWidget)
 from PyQt6 import sip
 from .theme import GREEN
-from ..services.component_check import (verify_component, Check, pin_ranges,
+from ..services.component_check import (verify_component, Check, CliStopped, pin_ranges,
+                                        stop_cli_commands,
                                         IMPORTANCE_BLOCKS_USE, IMPORTANCE_BEFORE_PRODUCTION,
                                         ACTION_REEXPORT_SYMBOL, ACTION_ANSWER_CONTACT_NC,
                                         ACTION_EDIT_PINOUT, ACTION_SHOW_IN_KICAD,
                                         ACTION_OPEN_KICAD_TAB, ACTION_OPEN_SYMBOL_TAB)
 
-#: Hand-off of the electrical types: the dialog closes and the window asks
+#: Hand-off of the electrical types: the panel hands it over and the window asks
 #: the AI for the types (`MainWindow._suggest_pin_types`).
 ACTION_SUGGEST_PIN_TYPES = 'suggest_pin_types'
 
@@ -34,7 +35,7 @@ ACTION_LABELS = {
 FIX_ACTIONS = frozenset({ACTION_REEXPORT_SYMBOL, ACTION_ANSWER_CONTACT_NC, ACTION_EDIT_PINOUT})
 #: Actions that only show something: no re-check.
 VIEW_ACTIONS = frozenset({ACTION_SHOW_IN_KICAD})
-#: Actions done by the window after the dialog closes (`handoff`).
+#: Actions done by the window when the panel hands them over (`handoff_requested`).
 HANDOFF_ACTIONS = frozenset({ACTION_SUGGEST_PIN_TYPES, ACTION_OPEN_SYMBOL_TAB, ACTION_OPEN_KICAD_TAB})
 #: Buttons of a row by check code, for the checks that name no action:
 #: the electrical types are suggested by the AI or reviewed in the Symbol tab
@@ -45,6 +46,8 @@ CODE_ACTIONS = {
     'text_overlap': (ACTION_OPEN_SYMBOL_TAB,),
     'contact_functions': (ACTION_OPEN_SYMBOL_TAB,),
     'pin_role_contradiction': (ACTION_OPEN_SYMBOL_TAB,),
+    # Unsaved symbol edits: «Applica» is in the Symbol tab.
+    'symbol_draft_pending': (ACTION_OPEN_SYMBOL_TAB,),
 }
 
 #: Per-pin checks merged into one line with their pins as ranges: code ->
@@ -79,12 +82,12 @@ class _CheckWorker(QThread):
     """Run `verify_component` off the GUI thread and stream each check back.
 
     @note Ownership (review 2026-10-27, C7): the thread belongs to
-        QApplication, not to the dialog, exactly like
+        QApplication, not to the panel, exactly like
         `model_dialog._ModelsWorker`. A QThread destroyed while running
-        aborts the whole process, and a dialog can be destroyed without
-        passing through `closeEvent` (a parent window deleted, an
+        aborts the whole process, and a panel can be destroyed without
+        its run ending (a parent window deleted, an
         application quit): with QApplication as the owner the worker
-        outlives the dialog, deletes itself when finished, and the
+        outlives the panel, deletes itself when finished, and the
         application exit waits for it instead of destroying it.
     """
 
@@ -94,11 +97,11 @@ class _CheckWorker(QThread):
         """@brief Prepare one verification run owned by QApplication.
 
         @param error An exception raised while building `args`: the run emits
-            it as one ERROR row and ends normally (the dialog never stays stuck).
+            it as one ERROR row and ends normally (the panel never stays stuck).
 
         @param args Keyword arguments of `verify_component`.
         @param parent Ignored for ownership: QApplication.instance() is the
-            owner when there is one, so that no dialog can destroy the
+            owner when there is one, so that no panel can destroy the
             running thread (see the class note). Kept for signature
             compatibility.
         """
@@ -119,14 +122,16 @@ class _CheckWorker(QThread):
         self.finished.connect(self._release)
 
     def stop(self):
-        """@brief Ask the verification to end after the KiCad command in flight.
+        """@brief End the verification now: the kicad-cli command in flight is killed.
 
-        @note `verify_component` offers no cancellation channel, so the stop
-            is checked each time a check result is emitted, i.e. between two
-            commands; the command already running is not killed (it still
-            ends within its 60 s limit).
+        @note The stop is also checked each time a check result is emitted;
+            a killed command raises `CliStopped` inside the verification,
+            which ends the run without a row (review 2026-11-15, M3: a check
+            left running at a window close or a project switch must not keep
+            kicad-cli alive for up to 60 s).
         """
         self.cancel.set()
+        stop_cli_commands()
 
     def _stop_for_quit(self):
         """Stop after the current command, waiting a BOUNDED time for the thread.
@@ -151,22 +156,29 @@ class _CheckWorker(QThread):
     def run(self):
         """@brief QThread override: run every check, emitting each result as it completes.
 
-        @note Any failure of the verification itself is reported as one ERROR
-            check so that the dialog always reaches its verdict. A stop asked
-            with `stop()` ends the run at the next emitted check and sets
-            `aborted`; the checks already emitted stay.
+        @note Any failure of the verification itself is reported as one check
+            «not run» (SKIP) so that the panel always reaches its verdict: a
+            failure of the checking tool says nothing about the component and
+            must not forbid its installation (review 2026-11-15, H1). A stop
+            asked with `stop()` ends the run and sets `aborted`; the checks
+            already emitted stay.
         """
         try:
             if self.cancel.is_set():
                 raise _CheckAborted()
             if self.error is not None:
-                self.result.emit(Check('ERROR', 'Verifica interrotta', str(self.error)))
+                self.result.emit(Check('SKIP', 'Controllo del componente', str(self.error),
+                                       remedy='Usa «Controlla di nuovo».', code='check_failed'))
                 return
             verify_component(**self.args, emit=self._emit)
-        except _CheckAborted:
+        except (_CheckAborted, CliStopped):
             self.aborted = True
         except Exception as exc:
-            self.result.emit(Check('ERROR', 'Verifica interrotta', str(exc)))
+            if self.cancel.is_set():
+                self.aborted = True
+                return
+            self.result.emit(Check('SKIP', 'Controllo del componente', str(exc),
+                                   remedy='Usa «Controlla di nuovo».', code='check_failed'))
 
     def _release(self):
         """Drop the exit-time wait and delete the thread once finished.
@@ -184,7 +196,7 @@ class _CheckWorker(QThread):
         self.deleteLater()
 
 
-#: Rank of an item in the dialog, in display order.
+#: Rank of an item in the panel, in display order.
 RANK_ERROR, RANK_BEFORE_PRODUCTION, RANK_FINAL_REVIEW, RANK_NOT_RUN, RANK_MANUAL, RANK_PASSED = range(6)
 #: Icon of each rank: a problem ✖/⚠, the checks to do by hand in KiCad a
 #: checklist box, the passed checks a tick (practical test 2026-11-14: the
@@ -229,13 +241,13 @@ VERDICT_EXPLANATIONS = {
 
 @dataclass
 class CheckItem:
-    """@brief One row of the dialog: one thing to do, with its own buttons.
+    """@brief One row of the panel: one thing to do, with its own buttons.
 
     @param rank `RANK_*`: errors first, then before production, final
         reviews, checks not run, the manual checks last.
     @param text The short sentence shown (remedy or title, with pin ranges).
     @param actions Action ids of its buttons, in order (only the ones the
-        dialog can run are shown).
+        panel can run are shown).
     @param results The checks the row stands for.
     @param pins Pin numbers of the row, in arrival order.
     @param tooltip Extra text for the row's tooltip (the folded checks, a
@@ -266,139 +278,273 @@ class CheckItem:
         return RANK_ICONS[self.rank]
 
 
-class ComponentCheckDialog(QDialog):
-    """@brief Run artifact checks in a worker and present them as a list of things to do.
+class ComponentCheckPanel(QWidget):
+    """@brief The component check of the KiCad tab: a verdict and one row per thing to do.
 
-    @note Layout (user-approved redesign, 2026-11-14): a verdict, one line
-        «Per l'uso finale mancano N cose · M controlli superati» counting
-        ROWS (not pins), then one row per thing to do -- icon, short
-        sentence, its own buttons -- errors first, then importance 2,
-        importance 3, checks not run, the manual checks last. The technical
-        details are collapsed and list each check once.
+    @note Layout (user-approved redesign, 2026-11-14, moved into the KiCad
+        tab on 2026-11-15): a verdict with its icon and one line saying what
+        it means, the line «Per l'uso finale mancano N cose · M controlli
+        superati» counting ROWS (not pins), then one row per thing to do --
+        icon, short sentence, its own buttons -- errors first, then
+        importance 2, importance 3, checks not run, the manual checks last.
+        The technical details are collapsed and list each check once.
+    @note It was a modal window until 2026-11-15 (user: «prima il controllo e
+        poi la proposta», first the check, then the proposal): it lives in
+        step 1 of the KiCad tab now, so its outcome stays on screen and
+        decides what step 3 offers. The window that hosts it reads
+        `verdict_key`, `blocking` and the signals.
     """
 
-    def __init__(self, args, parent=None, tx=lambda s: s, actions=None):
-        """@brief Build the report window and start the verification worker.
+    #: Emitted when a run starts (the first, «Controlla di nuovo», the re-run after a fix).
+    run_started = pyqtSignal()
+    #: Emitted when a run has ended and its verdict is shown (completed or stopped).
+    run_finished = pyqtSignal()
+    #: Emitted with the action id of a hand-off (`HANDOFF_ACTIONS`) the window carries out.
+    handoff_requested = pyqtSignal(str)
 
-        @param args Keyword arguments of `verify_component` (directory, name,
-            rows...), or a callable returning them: called for EVERY run (the
-            first, «Ripeti la verifica», the re-run after a fix), so each run
-            reads the window as it is then.
-        @param parent Owner window.
+    #: Tallest the rows' area grows before it scrolls, in pixels: sixty rows
+    #: must not push steps 2 and 3 off the tab. A bound on the layout, not a
+    #: measurement.
+    ITEMS_MAX_HEIGHT = 300
+
+    def __init__(self, parent=None, tx=lambda s: s):
+        """@brief Build the panel, idle until `run` is called.
+
+        @param parent Owner widget.
         @param tx Translation function (Italian source -> shown text).
-        @param actions Mapping {action id: callable} of the fixes and views
-            the creator can run (`Check.action`). A FIX (`FIX_ACTIONS`) that
-            succeeds runs the verification again by itself; a VIEW
-            (`VIEW_ACTIONS`) does not. A hand-off (`HANDOFF_ACTIONS`) needs no
-            callable: the dialog closes with `handoff` set and the creator
-            routes it.
-        @note The worker starts on the next event-loop turn, so the window is
-            laid out before the first result arrives.
         """
         super().__init__(parent)
         self.tx = tx
-        self.args = args
-        self.actions = dict(actions or {})
+        #: Keyword arguments of `verify_component`, or a callable returning
+        #: them, read again at EVERY run (`run`).
+        self.args = {}
+        self.actions = {}
+        #: Hand-offs this panel does not offer where it is shown (the KiCad
+        #: tab does not offer «Vai alla scheda KiCad»: it is that tab).
+        self.unavailable_actions = set()
+        #: Check codes whose rows are shown but do not count in the verdict
+        #: and the headline: what the window resolves itself (the KiCad tab:
+        #: whether the component is installed, which step 3 does).
+        self.verdict_excludes = frozenset()
         #: Action id -> the first button showing it, rebuilt at each finished run.
         self.action_buttons = {}
         #: The rows of the last finished run (`CheckItem`), in display order.
         self.items = []
-        #: What the closed dialog hands to its creator (`HANDOFF_ACTIONS`), or None.
+        #: The last hand-off asked (`HANDOFF_ACTIONS`), or None.
         self.handoff = None
         self.ai_review_requested = False
         self.results = []
-        self.setWindowTitle(tx('Verifica componente per KiCad'))
-        self.resize(820, 470)
+        self.worker = None
+        self._running = False
+        #: Source of the verdict of the last finished run (a key of
+        #: `VERDICT_EXPLANATIONS`, or «VERIFICA INTERROTTA»), None before one.
+        self.verdict_key = None
+        #: True when the last finished run found a check that forbids the use.
+        self.blocking = False
+        #: True when the last run was stopped before its end.
+        self.aborted = False
+        #: Callable returning why the rows' actions must wait now ('' when
+        #: they may run): the window's work-in-progress guard. The panel is
+        #: not modal any more, so a regeneration may be rewriting the files
+        #: while its rows are on screen (review 2026-11-15, M2b).
+        self.action_guard = None
+        #: Callable that runs the check again after a successful fix, through
+        #: the window's own guards; None re-runs directly.
+        self.rerun_handler = None
+        #: True while a run is being stopped to be thrown away (a project
+        #: switch): its rows are not shown and it ends without a verdict.
+        self._forgetting = False
+        #: True between «Interrompi» and the end of the run.
+        self._stop_pending = False
+        #: Re-composes the line under the rows in the current language, or None.
+        self._action_status_source = None
         layout = QVBoxLayout(self)
-        self.status = QLabel(tx('Verifica in corso: ogni comando KiCad ha un limite di 60 secondi.'))
-        self.status.setWordWrap(True)
-        layout.addWidget(self.status)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
         verdict_row = QHBoxLayout()
+        verdict_row.setSpacing(10)
         self.verdict_icon = QLabel()
-        self.verdict_icon.setFixedSize(48, 48)
-        verdict_row.addWidget(self.verdict_icon)
-        self.verdict = QLabel(tx('Sto verificando il componente…'))
-        self.verdict.setStyleSheet('font-size: 18px; font-weight: bold;')
-        verdict_row.addWidget(self.verdict)
-        verdict_row.addStretch()
-        layout.addLayout(verdict_row)
+        self.verdict_icon.setFixedSize(36, 36)
+        verdict_row.addWidget(self.verdict_icon, 0, Qt.AlignmentFlag.AlignTop)
+        verdict_text = QVBoxLayout()
+        verdict_text.setSpacing(2)
+        self.verdict = QLabel(tx('Controllo non ancora eseguito'))
+        self.verdict.setStyleSheet('font-size: 15px; font-weight: bold;')
+        self.verdict.setProperty('i18n_skip', True)
+        verdict_text.addWidget(self.verdict)
         #: One line saying what the verdict means (`VERDICT_EXPLANATIONS`).
         self.explanation = QLabel()
         self.explanation.setWordWrap(True)
-        layout.addWidget(self.explanation)
+        self.explanation.setProperty('i18n_skip', True)
+        verdict_text.addWidget(self.explanation)
+        verdict_row.addLayout(verdict_text, 1)
+        self.rerun_button = QPushButton(tx('Controlla ora'))
+        self.rerun_button.setProperty('i18n_skip', True)
+        self.rerun_button.clicked.connect(lambda: self._rerun())
+        verdict_row.addWidget(self.rerun_button, 0, Qt.AlignmentFlag.AlignTop)
+        # «Interrompi» (Stop): shown only while the checks run.
+        self.stop_button = QPushButton(tx('Interrompi'))
+        self.stop_button.setProperty('i18n_skip', True)
+        self.stop_button.clicked.connect(self._stop_requested)
+        self.stop_button.hide()
+        verdict_row.addWidget(self.stop_button, 0, Qt.AlignmentFlag.AlignTop)
+        layout.addLayout(verdict_row)
+        self.status = QLabel()
+        self.status.setWordWrap(True)
+        self.status.setProperty('i18n_skip', True)
+        self.status.hide()
+        layout.addWidget(self.status)
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 0)
+        self.progress.setTextVisible(False)
+        self.progress.setFixedHeight(6)
+        self.progress.hide()
+        layout.addWidget(self.progress)
         #: «Per l'uso finale mancano N cose · M controlli superati».
         self.headline = QLabel()
         self.headline.setWordWrap(True)
+        self.headline.setProperty('i18n_skip', True)
         layout.addWidget(self.headline)
         self.items_box = QWidget()
         self.items_layout = QVBoxLayout(self.items_box)
         self.items_layout.setContentsMargins(0, 0, 0, 0)
         self.items_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        # The rows scroll: sixty of them must not push the buttons off screen.
+        # The rows scroll past ITEMS_MAX_HEIGHT; below it the area takes the
+        # rows' own height (`_fit_items_height`), no empty band.
         self.items_scroll = QScrollArea()
         self.items_scroll.setWidgetResizable(True)
         self.items_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         self.items_scroll.setWidget(self.items_box)
-        # The free height goes to the rows' area (rows at its top), never
-        # between the verdict, the headline and the rows.
-        layout.addWidget(self.items_scroll, 1)
+        self.items_scroll.setFixedHeight(0)
+        layout.addWidget(self.items_scroll)
         self.action_status = QLabel()
         self.action_status.setWordWrap(True)
+        self.action_status.setProperty('i18n_skip', True)
         self.action_status.hide()
         layout.addWidget(self.action_status)
-        self.progress = QProgressBar()
-        self.progress.setRange(0, 0)
-        layout.addWidget(self.progress)
+        details_row = QHBoxLayout()
         self.details_toggle = QToolButton()
         self.details_toggle.setText(tx('Mostra dettagli tecnici'))
+        self.details_toggle.setProperty('i18n_skip', True)
         self.details_toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self.details_toggle.setArrowType(Qt.ArrowType.RightArrow)
         self.details_toggle.setCheckable(True)
         self.details_toggle.toggled.connect(self._toggle_details)
-        layout.addWidget(self.details_toggle)
+        details_row.addWidget(self.details_toggle)
+        details_row.addStretch()
+        self.copy_button = QPushButton(tx('Copia rapporto'))
+        self.copy_button.setProperty('i18n_skip', True)
+        self.copy_button.clicked.connect(lambda: QApplication.clipboard().setText(self._copy_text()))
+        self.copy_button.setEnabled(False)
+        details_row.addWidget(self.copy_button)
+        layout.addLayout(details_row)
         self.report = QPlainTextEdit()
         self.report.setReadOnly(True)
         self.report.setMaximumHeight(0)
         self.report.hide()
         layout.addWidget(self.report)
-        buttons = QDialogButtonBox()
-        self.rerun_button = QPushButton(tx('Ripeti la verifica'))
-        self.rerun_button.clicked.connect(self._rerun)
-        buttons.addButton(self.rerun_button, QDialogButtonBox.ButtonRole.ActionRole)
-        copy = QPushButton(tx('Copia rapporto'))
-        copy.clicked.connect(lambda: QApplication.clipboard().setText(self._copy_text()))
-        buttons.addButton(copy, QDialogButtonBox.ButtonRole.ActionRole)
-        # «Interrompi» (Stop): shown only while the checks run.
-        self.stop_button = QPushButton(tx('Interrompi'))
-        self.stop_button.clicked.connect(self._stop_requested)
-        buttons.addButton(self.stop_button, QDialogButtonBox.ButtonRole.ActionRole)
-        self.close_button = buttons.addButton(QDialogButtonBox.StandardButton.Close)
-        self.close_button.setText(tx('Chiudi'))
-        for button in (self.rerun_button, copy, self.stop_button, self.close_button):
+        for button in (self.rerun_button, self.stop_button, self.copy_button):
             button.setAutoDefault(False)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
-        self._start_worker()
+
+    # ── runs ──────────────────────────────────────────────────────────────
+
+    def is_running(self) -> bool:
+        """@brief Tell whether a verification is running now.
+
+        @return True from the start of a run until its verdict is shown.
+        """
+        return self._running
+
+    def run(self, args, actions=None, keep_status=False) -> bool:
+        """@brief Start a verification now, unless one is already running.
+
+        @param args Keyword arguments of `verify_component` (directory, name,
+            rows...), or a callable returning them: called for EVERY run (this
+            one, «Controlla di nuovo», the re-run after a fix), so each run
+            reads the window as it is then.
+        @param actions Mapping {action id: callable} of the fixes and views the
+            window can run (`Check.action`). A FIX (`FIX_ACTIONS`) that
+            succeeds runs the verification again by itself; a VIEW
+            (`VIEW_ACTIONS`) does not. A hand-off (`HANDOFF_ACTIONS`) needs no
+            callable: the panel emits `handoff_requested` and the window
+            routes it.
+        @param keep_status True keeps the line under the rows (the outcome of
+            the fix that asked for this run).
+        @return True when a run started, False when one was already running.
+        """
+        if self._running:
+            return False
+        self.args = args
+        self.actions = dict(actions or {})
+        self._rerun(keep_status=keep_status)
+        return True
+
+    def show_idle(self, message):
+        """@brief Show that no valid verdict exists, with the reason, between runs.
+
+        @param message Translated reason (no check yet, files changed, ...).
+        @note Never called while a run is in progress: the running state
+            keeps its own lines.
+        """
+        if self._running:
+            return
+        self.results, self.items = [], []
+        self.verdict_key, self.blocking, self.aborted = None, False, False
+        self._clear_items()
+        self.verdict.setText(message)
+        self.verdict.setStyleSheet('font-size: 15px; font-weight: bold;')
+        self.verdict_icon.clear()
+        self.explanation.setText('')
+        self.headline.setText('')
+        self.action_status.hide()
+        self.report.setPlainText('')
+        self.copy_button.setEnabled(False)
+        self._label_rerun()
+
+    def _label_rerun(self):
+        """«Controlla ora» before any outcome, «Controlla di nuovo» once one is on screen."""
+        self.rerun_button.setText(self.tx('Controlla di nuovo' if self.verdict_key else 'Controlla ora'))
+
+    def stop(self):
+        """@brief Stop a running verification now (its kicad-cli command is killed)."""
+        self._stop_requested()
+
+    def forget(self):
+        """@brief Stop a running verification and throw it away: no rows, no verdict (a project switch).
+
+        @note A run stopped this way ends idle, not «interrupted»: the user
+            did not stop it, and coming back to its project must start a new
+            check rather than ask for one (review 2026-11-15, L2).
+        """
+        if not self._running:
+            return
+        self._forgetting = True
+        self._clear_items()
+        self._stop_requested()
 
     def _start_worker(self):
         """Create the verification worker and start it on the next event-loop turn."""
-        # Owned by QApplication, not by this window: see _CheckWorker.
+        # Owned by QApplication, not by this panel: see _CheckWorker.
         try:
             args, error = (self.args() if callable(self.args) else dict(self.args)), None
-        except Exception as exc:  # noqa: BLE001 - shown as one ERROR row, the dialog still ends
+        except Exception as exc:  # noqa: BLE001 - shown as one ERROR row, the panel still ends
             args, error = {}, exc
         self.worker = _CheckWorker(args, error=error)
         self.worker.result.connect(self._result)
         self.worker.finished.connect(self._finished)
         self._running = True
         self.rerun_button.setEnabled(False)
-        self.close_button.setEnabled(False)
+        # Only «Interrompi» while it runs: a greyed «Controlla ora» beside it
+        # read as a second command.
+        self.rerun_button.hide()
+        self.copy_button.setEnabled(False)
         self.stop_button.setEnabled(True)
         self.stop_button.show()
+        self.run_started.emit()
         QTimer.singleShot(0, self.worker.start)
 
     def _rerun(self, *, keep_status=False):
-        """Run every check again: «Ripeti la verifica», or after a successful fix.
+        """Run every check again: a first run, «Controlla di nuovo», or after a successful fix.
 
         @param keep_status True keeps the line that says why it runs again.
         """
@@ -406,31 +552,62 @@ class ComponentCheckDialog(QDialog):
             return
         self.results = []
         self.items = []
+        self.verdict_key, self.blocking, self.aborted = None, False, False
         self.report.setPlainText('')
-        self.verdict.setText(self.tx('Sto verificando il componente…'))
+        self.verdict.setText(self.tx('Sto controllando il componente…'))
+        self.verdict.setStyleSheet('font-size: 15px; font-weight: bold;')
         self.verdict_icon.clear()
         self.headline.setText('')
         self.explanation.setText('')
         if not keep_status:
             self.action_status.hide()
+            self._action_status_source = None
         self._clear_items()
+        self._stop_pending = False
         self.status.setText(self.tx('Verifica in corso: ogni comando KiCad ha un limite di 60 secondi.'))
         self.status.show()
         self.progress.show()
         self._start_worker()
 
     def _result(self, result):
+        if self._forgetting:
+            return
         self.results.append(result)
         self.report.setPlainText(self._format_report())
 
     def _toggle_details(self, expanded):
         self.report.setVisible(expanded)
         self.report.setMaximumHeight(260 if expanded else 0)
+        self.report.setMinimumHeight(160 if expanded else 0)
         self.details_toggle.setArrowType(
             Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow)
         self.details_toggle.setText(self.tx(
             'Nascondi dettagli tecnici' if expanded else 'Mostra dettagli tecnici'))
-        self.resize(self.width(), 650 if expanded else 470)
+
+    def retranslate(self):
+        """@brief Recompose every visible text in the current language (language switch).
+
+        @note The verdict, the rows and the details are built from the checks'
+            Italian sources, so they are composed again; an idle panel keeps
+            the reason its window gives it again.
+        """
+        self._label_rerun()
+        self.stop_button.setText(self.tx('Interrompi'))
+        self.copy_button.setText(self.tx('Copia rapporto'))
+        self._toggle_details(self.details_toggle.isChecked())
+        if self._action_status_source is not None:
+            self.action_status.setText(self._action_status_source())
+        if self._running:
+            self.verdict.setText(self.tx('Sto controllando il componente…'))
+            self.status.setText(self._stop_text() if self._stop_pending else self.tx(
+                'Verifica in corso: ogni comando KiCad ha un limite di 60 secondi.'))
+            return
+        if self.verdict_key is None:
+            return
+        self._set_verdict()
+        if self.aborted:
+            self._set_aborted_verdict()
+        self.report.setPlainText(self._format_report())
 
     @staticmethod
     def _pin_ranges(values):
@@ -476,7 +653,7 @@ class ComponentCheckDialog(QDialog):
             line = (f'[{self.tx(labels.get(result.status, result.status))}] {self.tx(result.title)}\n'
                     f'{self.tx(result.detail)}\n')
             if result.remedy and result.status != 'OK':
-                line += self.tx('Rimedio: {remedy}').format(remedy=result.remedy) + '\n'
+                line += self.tx('Rimedio: {remedy}').format(remedy=self.tx(result.remedy)) + '\n'
             lines.append(line)
         groups = self._pin_groups()
         problems = sum(r.status != 'OK' for r in self.results if not (
@@ -606,7 +783,7 @@ class ComponentCheckDialog(QDialog):
 
     def _headline_text(self):
         """«Per l'uso finale mancano N cose · M controlli superati», with the singular and zero forms."""
-        missing = sum(item.rank in MISSING_RANKS for item in self.items)
+        missing = self.missing_count()
         passed = sum(result.status == 'OK' for result in self.results)
         first = (self.tx('Per l’uso finale non manca nulla') if missing == 0 else
                  self.tx('Per l’uso finale manca 1 cosa') if missing == 1 else
@@ -615,6 +792,61 @@ class ComponentCheckDialog(QDialog):
                   self.tx('1 controllo superato') if passed == 1 else
                   self.tx('{count} controlli superati').format(count=passed))
         return f'{first} · {second}'
+
+    def replace_checks(self, code, checks):
+        """@brief Put new checks of one code in place of the old ones and show the verdict again.
+
+        @param code `Check.code` of the rows to replace (e.g. «kicad_library»).
+        @param checks The new checks of that code.
+        @note For a part of the check that can be redone alone without
+            kicad-cli (the installed libraries after an installation): the
+            rest of the outcome still describes the same files.
+        """
+        if self._running or self.verdict_key is None:
+            return
+        self.results = [result for result in self.results if result.code != code] + list(checks)
+        self._set_verdict()
+        if self.aborted:
+            self._set_aborted_verdict()
+        self.report.setPlainText(self._format_report())
+
+    def missing_count(self) -> int:
+        """@brief Rows of the last finished run that are something missing for the final use.
+
+        @return The count of the headline's first half (errors, before
+            production, final reviews, checks not run); 0 before a run.
+        """
+        return sum(item.rank in MISSING_RANKS and not any(
+            result.code in self.verdict_excludes for result in item.results) for item in self.items)
+
+    @classmethod
+    def verdict_of(cls, results):
+        """@brief The verdict of a set of checks: (source title, colour, blocking).
+
+        @param results Checks (`Check`) of one run, or a part of them.
+        @return The Italian source of the verdict (a key of
+            `VERDICT_EXPLANATIONS`), its colour and whether a check forbids the use.
+        @note The rule of `_set_verdict`, usable on a SUBSET: the KiCad tab
+            decides step 3 without the rows about the KiCad library, which
+            step 3 itself resolves (review 2026-11-15, M1).
+        """
+        counts = {status: sum(result.status == status for result in results)
+                  for status in ('OK', 'ERROR', 'WARN', 'SKIP')}
+        blocking = any(cls._blocks_use(r) for r in results)
+        review = any(cls._before_production(r) for r in results)
+        manual_only_warning = all(
+            result.status != 'WARN' or result.category == 'manual' for result in results)
+        if blocking:
+            return 'NON USARE', '#f38ba8', True
+        if review:
+            return 'DA RIVEDERE PRIMA DELL’USO', '#fab387', False
+        if counts['SKIP']:
+            return 'ESITO NON CONCLUSIVO', '#f9e2af', False
+        if counts['WARN'] and not manual_only_warning:
+            return 'UTILIZZABILE CON RISERVE', '#f9e2af', False
+        if counts['WARN']:
+            return 'PRONTO PER LE PROVE', '#f9e2af', False
+        return 'PRONTO PER L’USO', '#a6e3a1', False
 
     def _set_verdict(self):
         """Verdict, headline and rows of a finished run.
@@ -626,32 +858,19 @@ class ComponentCheckDialog(QDialog):
             CONCLUSIVO»; other warnings -> «UTILIZZABILE CON RISERVE», or
             «PRONTO PER LE PROVE» when the manual checks are the only ones.
         """
-        counts = {status: sum(result.status == status for result in self.results)
+        counted = [result for result in self.results if result.code not in self.verdict_excludes]
+        counts = {status: sum(result.status == status for result in counted)
                   for status in ('OK', 'ERROR', 'WARN', 'SKIP')}
-        blocking = any(self._blocks_use(r) for r in self.results)
-        review = any(self._before_production(r) for r in self.results)
-        manual_only_warning = all(
-            result.status != 'WARN' or result.category == 'manual' for result in self.results)
-        if blocking:
-            title, color = 'NON USARE', '#f38ba8'
-        elif review:
-            title, color = 'DA RIVEDERE PRIMA DELL’USO', '#fab387'
-        elif counts['SKIP']:
-            title, color = 'ESITO NON CONCLUSIVO', '#f9e2af'
-        elif counts['WARN'] and not manual_only_warning:
-            title, color = 'UTILIZZABILE CON RISERVE', '#f9e2af'
-        elif counts['WARN']:
-            title, color = 'PRONTO PER LE PROVE', '#f9e2af'
-        else:
-            title, color = 'PRONTO PER L’USO', '#a6e3a1'
+        title, color, blocking = self.verdict_of(counted)
+        self.verdict_key, self.blocking = title, blocking
         self.verdict.setText(self.tx(title))
-        self.verdict.setStyleSheet(f'font-size: 16px; font-weight: bold; color: {color};')
+        self.verdict.setStyleSheet(f'font-size: 15px; font-weight: bold; color: {color};')
         self.explanation.setText(self.tx(VERDICT_EXPLANATIONS[title]))
         icon_name = ('check-status-red.svg' if blocking else
                      'check-status-yellow.svg' if counts['WARN'] or counts['SKIP'] else
                      'check-status-green.svg')
         self.verdict_icon.setPixmap(QIcon(str(Path(__file__).parent / 'assets' / icon_name))
-                                    .pixmap(QSize(44, 44)))
+                                    .pixmap(QSize(34, 34)))
         self.items = self._build_items()
         self.headline.setText(self._headline_text())
         self._show_items()
@@ -664,9 +883,40 @@ class ComponentCheckDialog(QDialog):
             if widget is not None:
                 widget.deleteLater()
         self.action_buttons = {}
+        self._fit_items_height()
+
+    def _fit_items_height(self):
+        """Give the rows' area the rows' own height, up to ITEMS_MAX_HEIGHT (then it scrolls).
+
+        Measured at the width the rows really get: a wrapped row's size hint
+        alone is taller than the row and left an empty band below the rows.
+        """
+        layout = self.items_layout
+        rows = [layout.itemAt(index).widget() for index in range(layout.count())]
+        rows = [row for row in rows if row is not None]
+        if not rows:
+            self.items_scroll.setFixedHeight(0)
+            return
+        width = self.items_scroll.viewport().width() or self.width()
+        # Row by row: the whole layout answers only after an event-loop turn
+        # (rows just added), while each row's own height for a width is known now.
+        height = sum(row.heightForWidth(width) if row.hasHeightForWidth() else row.sizeHint().height()
+                     for row in rows)
+        height += layout.spacing() * (len(rows) - 1)
+        self.items_scroll.setFixedHeight(max(0, min(height, self.ITEMS_MAX_HEIGHT)))
+
+    def resizeEvent(self, event):
+        """@brief Qt override: the rows wrap again at the new width, so their area is measured again.
+
+        @param event The resize event, passed on to the base class.
+        """
+        super().resizeEvent(event)
+        self._fit_items_height()
 
     def _action_available(self, action):
-        """True for an action the dialog can run: a hand-off, or one the creator provides."""
+        """True for an action the panel can run: a hand-off it offers, or one the window provides."""
+        if action in self.unavailable_actions:
+            return False
         return action in HANDOFF_ACTIONS or callable(self.actions.get(action))
 
     def _show_items(self):
@@ -677,7 +927,7 @@ class ComponentCheckDialog(QDialog):
             any error row -- an importance-2 row; a first row without a
             button highlights nothing below it. It is never the default
             button and no row button is auto-default: Enter must not
-            re-export, launch KiCad or close the dialog.
+            re-export or launch KiCad.
         """
         self._clear_items()
         target = next((item for item in self.items if item.rank == RANK_ERROR), None) or next(
@@ -698,6 +948,7 @@ class ComponentCheckDialog(QDialog):
             shown = f'{level}: {item.text}' if item.rank == RANK_MANUAL else item.text
             text = QLabel(shown)
             text.setWordWrap(True)
+            text.setProperty('i18n_skip', True)
             if item.rank == RANK_PASSED:
                 # The theme's OK green, explicitly: the application stylesheet
                 # gives every QLabel its text colour, and the tick glyph comes from
@@ -706,7 +957,8 @@ class ComponentCheckDialog(QDialog):
                 icon.setPixmap(QIcon(str(Path(__file__).parent / 'assets' / 'check-status-green.svg'))
                                .pixmap(QSize(14, 14)))
             tips = [f'{self.tx(r.title)}: {self.tx(r.detail)}'
-                    + (('\n' + self.tx('Rimedio: {remedy}').format(remedy=r.remedy)) if r.remedy else '')
+                    + (('\n' + self.tx('Rimedio: {remedy}').format(remedy=self.tx(r.remedy)))
+                       if r.remedy else '')
                     for r in item.results if not getattr(r, 'needs_cli', False)]
             if item.tooltip:
                 tips.append(item.tooltip)
@@ -717,6 +969,7 @@ class ComponentCheckDialog(QDialog):
                 if not self._action_available(action):
                     continue
                 button = QPushButton(self.tx(ACTION_LABELS.get(action, 'Correggi')))
+                button.setProperty('i18n_skip', True)
                 button.setAutoDefault(False)
                 button.setDefault(False)
                 button.clicked.connect(lambda _checked=False, a=action: self._run_action(a))
@@ -726,6 +979,7 @@ class ComponentCheckDialog(QDialog):
                 line.addWidget(button, alignment=Qt.AlignmentFlag.AlignVCenter)
                 self.action_buttons.setdefault(action, button)
             self.items_layout.addWidget(row)
+        self._fit_items_height()
 
     def highlighted_button(self):
         """@brief The highlighted button of the rows.
@@ -739,36 +993,47 @@ class ComponentCheckDialog(QDialog):
         """Run one action of a row.
 
         @param action Action id.
-        @note A hand-off closes the dialog with `handoff` set. A view runs and
-            says how it went, nothing more. A fix that succeeds runs the whole
-            verification again by itself («Verifica ripetuta
+        @note A hand-off is emitted for the window (`handoff_requested`). A
+            view runs and says how it went, nothing more. A fix that succeeds
+            runs the whole verification again by itself («Verifica ripetuta
             automaticamente»); a failing one is reported and nothing re-runs.
         """
         if self._running:
             return
+        reason = self.action_guard() if callable(self.action_guard) else ''
+        if reason:
+            self._show_action_status(lambda: reason)
+            return
         if action in HANDOFF_ACTIONS:
             self.handoff = action
             self.ai_review_requested = action == ACTION_SUGGEST_PIN_TYPES
-            self.accept()
+            self.handoff_requested.emit(action)
             return
         try:
             outcome = self.actions[action]()
-        except Exception as exc:  # noqa: BLE001 - shown to the user, the dialog stays usable
+        except Exception as exc:  # noqa: BLE001 - shown to the user, the panel stays usable
             template = ('Non riuscito: {error}' if action in VIEW_ACTIONS
                         else 'Correzione non riuscita: {error}')
-            self.action_status.setText(self.tx(template).format(error=exc))
-            self.action_status.show()
+            self._show_action_status(lambda: self.tx(template).format(error=exc))
             return
         message = outcome.strip() if isinstance(outcome, str) and outcome.strip() else ''
         if action in FIX_ACTIONS:
-            message = (message + '\n' if message else '') + self.tx('Verifica ripetuta automaticamente.')
-            self.action_status.setText(message)
-            self.action_status.show()
-            self._rerun(keep_status=True)
+            self._show_action_status(lambda: (message + '\n' if message else '')
+                                     + self.tx('Verifica ripetuta automaticamente.'))
+            started = self.rerun_handler() if callable(self.rerun_handler) else self._rerun(keep_status=True)
+            if started is False:
+                # The window refused the re-run (it said why): the line must
+                # not claim one (final verification 2026-11-15, 9).
+                self._show_action_status(lambda: message or self.tx('Correzione eseguita.'))
             return
         if message:
-            self.action_status.setText(message)
-            self.action_status.show()
+            self._show_action_status(lambda: message)
+
+    def _show_action_status(self, compose):
+        """Show the line under the rows, composed again on a language switch."""
+        self._action_status_source = compose
+        self.action_status.setText(compose())
+        self.action_status.show()
 
     def _set_aborted_verdict(self):
         """Verdict of a run stopped by «Interrompi»: never a readiness claim.
@@ -776,14 +1041,15 @@ class ComponentCheckDialog(QDialog):
         The checks emitted before the stop stay in the rows and the details;
         what was not run is said, and nothing is called ready.
         """
+        self.verdict_key = 'VERIFICA INTERROTTA'
         self.verdict.setText(self.tx('VERIFICA INTERROTTA'))
-        self.verdict.setStyleSheet('font-size: 16px; font-weight: bold; color: #f9e2af;')
+        self.verdict.setStyleSheet('font-size: 15px; font-weight: bold; color: #f9e2af;')
         self.verdict_icon.setPixmap(
             QIcon(str(Path(__file__).parent / 'assets' / 'check-status-yellow.svg'))
-            .pixmap(QSize(44, 44)))
+            .pixmap(QSize(34, 34)))
         self.explanation.setText(self.tx(
             'Verifica interrotta su richiesta: i controlli restanti non sono stati eseguiti. '
-            'Ripeti la verifica prima di usare il componente.'))
+            'Usa «Controlla di nuovo» prima di usare il componente.'))
         self.headline.setText(self.tx('Verifica interrotta: {count} controlli eseguiti.').format(
             count=len(self.results)))
         # No ✓ row: a partial run cannot say what is free of problems.
@@ -794,38 +1060,38 @@ class ComponentCheckDialog(QDialog):
         """Ask the worker to stop after the KiCad command in flight and say so."""
         if not self._running:
             return
+        self._stop_pending = True
         self.worker.stop()
         self.stop_button.setEnabled(False)
-        self.status.setText(self.tx(
-            'Interruzione richiesta: termina il comando KiCad in corso (al massimo 60 '
-            'secondi), poi la verifica si ferma.'))
+        self.status.setText(self._stop_text())
+
+    def _stop_text(self):
+        """The status line between «Interrompi» and the end of the run."""
+        return self.tx('Interruzione richiesta: il controllo si ferma.')
 
     def _finished(self):
         self._running = False
+        self._stop_pending = False
         self.stop_button.setEnabled(False)
         self.stop_button.hide()
         self.progress.hide()
+        if self._forgetting:
+            # Thrown away (a project switch): idle, never «interrupted».
+            self._forgetting = False
+            self.status.hide()
+            self.rerun_button.setEnabled(True)
+            self.rerun_button.show()
+            self.show_idle(self.tx('Controllo non ancora eseguito'))
+            self.run_finished.emit()
+            return
+        self.aborted = bool(self.worker.aborted)
         self._set_verdict()
-        if self.worker.aborted:
+        if self.aborted:
             self._set_aborted_verdict()
         self.report.setPlainText(self._format_report())
         self.status.hide()
-        if not self.details_toggle.isChecked():
-            self.resize(self.width(), 470)
-        self.close_button.setEnabled(True)
         self.rerun_button.setEnabled(True)
-
-    def reject(self):
-        """@brief Allow dismissal only after the verification worker finishes."""
-        if not self._running:
-            super().reject()
-
-    def closeEvent(self, event):
-        """@brief Keep the dialog alive while its verification thread runs.
-
-        @param event Qt close event; ignored while the worker is running.
-        """
-        if self._running:
-            event.ignore()
-        else:
-            super().closeEvent(event)
+        self.rerun_button.show()
+        self.copy_button.setEnabled(True)
+        self._label_rerun()
+        self.run_finished.emit()

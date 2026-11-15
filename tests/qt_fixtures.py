@@ -35,6 +35,26 @@ import pytest
 #: test would die with «wrapped C/C++ object ... has been deleted».
 _APP = None
 
+#: The methods of the guided KiCad tab's check that the `window` fixture
+#: replaces (see the fixture); each stand-in carries the real one as `real`.
+KICAD_CHECK_METHODS = ("_kicad_check_state", "_schedule_kicad_check")
+
+
+def use_real_kicad_check(window):
+    """@brief Give one window back the real gate and automatic start of the KiCad tab's check.
+
+    @param window A MainWindow made by the `window` fixture.
+    @note Bound on the instance, so the class patch of the fixture stays for
+        every other window and is undone with the fixture as usual. The real
+        method is read from the stand-in itself: this module is imported under
+        two names (`qt_fixtures`, `tests.qt_fixtures`), so module state would
+        not be shared.
+    """
+    import types
+    for name in KICAD_CHECK_METHODS:
+        function = type(window).__dict__[name]
+        setattr(window, name, types.MethodType(getattr(function, "real", function), window))
+
 
 def application():
     """@brief Return the process QApplication, creating and pinning it when needed.
@@ -130,6 +150,23 @@ def window(qapp, monkeypatch, tmp_path):
     # its own tests, which set `_freecad_available = False` themselves
     # (tests/test_board_pipeline.py, tests/test_generated_files_alignment.py).
     monkeypatch.setattr(gui, "find_freecadcmd", lambda: "freecadcmd")
+    # The guided KiCad tab (2026-11-15) runs the component check by itself
+    # and gates the installations on its outcome. These tests start from a
+    # CHECKED component -- their contract is elsewhere -- and never run
+    # kicad-cli behind their back. The check, its automatic start and its
+    # gate have their own tests (tests/test_kicad_guided_tab.py), which
+    # restore the real methods.
+    def checked(self):
+        # The state of a component whose check passed: the gate, the step-3
+        # sentence and the buttons agree, as after a real clean check.
+        return "ok"
+
+    def no_automatic_check(self):
+        return None
+    checked.real = gui.MainWindow.__dict__["_kicad_check_state"]
+    no_automatic_check.real = gui.MainWindow.__dict__["_schedule_kicad_check"]
+    monkeypatch.setattr(gui.MainWindow, "_kicad_check_state", checked)
+    monkeypatch.setattr(gui.MainWindow, "_schedule_kicad_check", no_automatic_check)
     w = gui.MainWindow()
     # Geometry/lifecycle tests inject their document selection independently of
     # the guided uploader; uploader integration has dedicated tests.

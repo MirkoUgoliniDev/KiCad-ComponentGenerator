@@ -12,7 +12,7 @@ from copy import deepcopy
 from dataclasses import asdict, is_dataclass, replace
 from html import escape
 import json
-from functools import partial
+from functools import partial, wraps
 import math
 import os
 import re
@@ -33,13 +33,14 @@ from PyQt6.QtWidgets import (
     QDialog, QListWidget, QMainWindow, QMenu, QMessageBox, QPushButton, QScrollArea,
     QSplitter, QListWidgetItem, QStackedWidget, QTabWidget, QTextEdit, QVBoxLayout,
     QToolButton, QWidget, QTableWidget, QTableWidgetItem, QHeaderView, QWizard, QWizardPage,
-    QGridLayout, QInputDialog, QSizePolicy,
+    QGridLayout, QInputDialog, QSizePolicy, QFrame,
 )
 
 from ..cad3d.annotations import (ANNOTATION_CONVENTION, EdgeFilletAnnotation,
                                   FaceTextAnnotation, swap_front_back)
 from ..cad3d.body_params import Body3DParams
 from ..cad3d.output_names import validate_output_name
+from ..core.output_names import fp_filter_pattern
 from ..cad3d.step_generator import (
     CAD_ABORT_MESSAGE, Cad3DError, find_freecadcmd, generate_3d_model,
     generate_castellated_3d_model, generate_single_package_3d_model,
@@ -744,17 +745,8 @@ def renamed_symbol_text(text: str, old_name: str, new_name: str) -> str:
     return text
 
 
-def fp_filter_pattern(name: str) -> str:
-    """@brief The automatic footprint filter of a component: ONE token matching its footprint.
-
-    @param name The component (footprint) name.
-    @return ``<name>*`` with every blank replaced by KiCad's single-character
-        wildcard «?»: KiCad splits ``ki_fp_filters`` at spaces, so a name with
-        spaces would otherwise become several unrelated filters; '' for an
-        empty name.
-    """
-    name = str(name or "").strip()
-    return (re.sub(r"\s", "?", name) + "*") if name else ""
+# `fp_filter_pattern` lives in `core.output_names` (one rule with the
+# installation's rename, 2026-11-15) and is imported at the top of the module.
 
 
 #: Symbol properties that belong to the METADATA gate, left out of the
@@ -1950,6 +1942,24 @@ _QT_SIMPLE_TEXT_ITEM_TYPE = 9
 STARTUP_KEY_NOTICE_DISMISSED_KEY = "startup_key_notice_dismissed"
 
 
+def _waits_for_user(method):
+    """Run a question of the program as a wait for the user on the card's clock.
+
+    The total processing time leaves out the time the program waits for an
+    answer (user decision 2026-11-14); only the program's own questions are
+    waits, never a window the user opens from the menu while work runs
+    (final review 2026-11-14, finding 1).
+    """
+    @wraps(method)
+    def asking(self, *args, **kwargs):
+        overlay = getattr(self, "analysis_overlay", None)
+        if overlay is None:
+            return method(self, *args, **kwargs)
+        with overlay.waiting_for_user():
+            return method(self, *args, **kwargs)
+    return asking
+
+
 class MainWindow(QMainWindow):
     """@brief Coordinate the six-tab component generation workflow."""
 
@@ -3102,6 +3112,11 @@ class MainWindow(QMainWindow):
                 return
             self._flush_footprint_checkpoint()
             self._window_closed = True
+            # A check still running: kicad-cli is killed now, not left for up
+            # to 60 s after the window is gone (review 2026-11-15, M3).
+            check_panel = getattr(self, "kicad_check_panel", None)
+            if check_panel is not None:
+                check_panel.forget()
             self.ai_account.detach()
             # A window really closed is only about to be destroyed, and while
             # destroying it Qt empties lists, texts and tabs: the children
@@ -4347,6 +4362,16 @@ class MainWindow(QMainWindow):
 
         self.setCentralWidget(central)
         self.analysis_overlay = AnalysisOverlay(central, i18n=self.i18n)
+        # Working seconds of the current analysis, None until one starts (user,
+        # 2026-11-14: the total processing time on the finished card).
+        self._analysis_work_seconds = None
+        #: True when the analysis time was started by a re-read with no
+        #: extraction in this session: earlier sessions' time is unknown.
+        self._analysis_time_partial = False
+        self._operation_counts = False
+        self._next_operation_counts = False
+        self.analysis_overlay.operation_started.connect(self._on_overlay_operation_started)
+        self.analysis_overlay.work_done.connect(self._on_overlay_work_done)
         self.analysis_overlay.log_requested.connect(self.ai_log_dialog.exec)
         self.analysis_overlay.abort_requested.connect(self._request_abort)
         self.analysis_overlay.closed.connect(self._on_completed_overlay_closed)
@@ -4518,6 +4543,9 @@ class MainWindow(QMainWindow):
         # generic pass (i18n_skip).
         self._refresh_pcb_thickness_row()
         self._refresh_workflow_tooltips()
+        # The check of the KiCad tab: verdict and rows are composed, not keys.
+        self.kicad_check_panel.retranslate()
+        self._show_kicad_check_idle()
         # Full-paths toggle of the KiCad tab: state-dependent text, i18n_skip.
         self.file_paths_toggle.setText(
             self._file_paths_toggle_text(self.file_paths_toggle.isChecked()))
@@ -5968,6 +5996,10 @@ class MainWindow(QMainWindow):
         # parameters (audit 2026-10-15, H1/M3). The installation commands may
         # be switched off again right after by `_refresh_install_gate`
         # (required metadata), which `_refresh_metadata_proposals` below runs.
+        if hasattr(self, "kicad_check_panel"):
+            # Before the gate: a stale outcome is shown as such first, so
+            # step 3 never words a state the panel no longer holds.
+            self._show_kicad_check_idle()
         self._apply_kicad_command_states(complete_available)
         # Verification must remain reachable when a footprint lacks its STEP.
         self._refresh_kicad_tab(footprint_available)
@@ -5984,7 +6016,8 @@ class MainWindow(QMainWindow):
             self.label_kicad_step.setText(step.name if step_available else "—")
             self.label_kicad_step.setToolTip(str(step) if step_available else "")
             self.label_kicad_symbol.setText(
-                symbol.name if symbol_available else self.i18n.text("Da esportare"))
+                symbol.name if symbol_available
+                else self.i18n.text("Manca: premi «Applica» nella scheda «Simbolo elettrico»"))
             self.label_kicad_symbol.setToolTip(
                 str(symbol) if symbol is not None else self.i18n.text(
                     "Imposta il nome del componente per preparare il simbolo."))
@@ -6032,6 +6065,12 @@ class MainWindow(QMainWindow):
                     "ATTENZIONE: il file .kicad_mod non contiene le ultime modifiche applicate "
                     "al footprint: usa «Aggiorna solo il footprint» prima di installare.")
             self.label_kicad_status.setText(status)
+            # Plain when the files are simply there; yellow when the line says
+            # something to act on (stale files, a warning appended).
+            attention = bool(alignment) or "\n" in status or not complete_available
+            self.label_kicad_status.setStyleSheet(f"color: {YELLOW if attention else SUBTEXT};")
+        if hasattr(self, "kicad_check_panel"):
+            self._schedule_kicad_check()
         return footprint_available
 
     #: Explanation shown on the KiCad commands when they are available, by
@@ -6590,6 +6629,10 @@ class MainWindow(QMainWindow):
         # analysis (audit 138, B1).
         if hasattr(self, "ai_account"):
             self.ai_account.start_analysis(self._project_dir_or_none())
+        # The analysis time starts with the analysis cost: the same arc, from
+        # here to the end of its generation, re-reads included (user, 2026-11-14).
+        self._analysis_work_seconds = 0.0
+        self._analysis_time_partial = False
         self._begin_ai_run("Analisi AI")
         # From here on the "analysis running" state is already exposed to the user:
         # any exception before worker.start() must restore it, not leave the
@@ -7336,6 +7379,16 @@ class MainWindow(QMainWindow):
         self.analysis_overlay.clear_cost()
         # A new analysis: the cost of the previous one is not this run's.
         self._last_analysis_cost = None
+        # The working time of the analysis is counted from «Estrai parametri
+        # con AI» (`_extract_with_ai_prepared`). A re-read with no extraction
+        # in this session belongs to an analysis whose earlier time is
+        # unknown: its time is counted from here and shown as plain elapsed
+        # time, never as the analysis total (reviews 2026-11-14, 4).
+        if getattr(self, "_analysis_work_seconds", None) is None:
+            self._analysis_work_seconds = 0.0
+            self._analysis_time_partial = True
+        # The card operation this run starts is part of the analysis.
+        self._next_operation_counts = True
         # The run tally starts here, on the GUI thread before the worker, for
         # every run that ends in `_show_ai_cost`: the full extraction resets it
         # itself, but a partial re-read and the inventory relaunch did not, so
@@ -8238,30 +8291,44 @@ class MainWindow(QMainWindow):
         if summary:
             self.analysis_overlay.set_cost(summary[0])
             self.analysis_overlay.set_cost_models(summary[1])
+            self.analysis_overlay.set_cost_cached(summary[2])
             self._held_card_shows_cost = True
-        self.analysis_overlay.show_completed(self.i18n.text(message), partial=partial, source=message)
+        # The whole analysis' working time: the operations already ended plus
+        # this generation, still running on the card (user, 2026-11-14).
+        spent = getattr(self, "_analysis_work_seconds", None)
+        total = spent + self.analysis_overlay.work_seconds() if analysis_cost and spent is not None else None
+        self.analysis_overlay.show_completed(
+            self.i18n.text(message), partial=partial, source=message, total_seconds=total,
+            total_is_whole=not getattr(self, "_analysis_time_partial", False))
 
     def _analysis_cost_for_card(self):
         """@brief Total and per-model lines of the current analysis, for the finished card.
 
-        @return (total line, model lines, read from the file), or None when
-            nothing is known.
+        @return (total line, model lines, cached-answer lines, read from the
+            file), or None when nothing is known.
         @note Source: the project cost file, the analysis that the status bar
             shows -- from the last «Estrai parametri con AI», paid reruns
             included (user decisions 2026-09-28 and 2026-11-14). The total
-            line is the status bar's own text, so the two never disagree;
-            paid calls still waiting for a busy file get a line of their own,
-            since the model lines cannot split them yet (review 2026-11-14, 4).
+            line carries the status bar's amount and calls, so the two never
+            disagree; paid calls still waiting for a busy file get a line of
+            their own, since the model lines cannot split them yet (review
+            2026-11-14, 4).
+        @note One model with every call costed: no model line, the model is
+            named in the total instead (user, 2026-11-15: the line repeated the
+            total). The cached-answer lines say which models answered from the
+            local cache in the same analysis, for free.
         @note Fallback, the run tally of the last AI run
-            (`_last_analysis_cost`, third item False): without a project
-            folder, with the file unreadable, or while the start of the
-            analysis is still queued (the file's current analysis is then
-            the previous one).
+            (`_last_analysis_cost`, fourth item False): without a project
+            folder, with the file unreadable, while the start of the analysis
+            is still queued (the file's current analysis is then the previous
+            one), or when the analysis made no paid call.
         """
         stored = getattr(self, "_last_analysis_cost", None)
-        fallback = (stored[0], stored[1], False) if stored else None
+        fallback = ((stored[0], stored[1], stored[2] if len(stored) > 2 else [], False)
+                    if stored else None)
         try:
-            from ..services.openrouter import format_model_lines
+            from ..services.openrouter import (calls_text, format_cached_lines, format_model_lines,
+                                               single_model)
             from ..services.project_costs import load_project_costs
             folder = self._project_dir_or_none()
             if folder is None:
@@ -8271,6 +8338,12 @@ class MainWindow(QMainWindow):
             if start_queued:
                 return fallback
             costs = load_project_costs(folder, account.shown_run(folder) if account else None)
+            cached = format_cached_lines(costs.run_cached_by_model)
+            if costs.run and not (costs.run_calls or waiting) and cached:
+                # Answered entirely from the local cache: still the whole
+                # analysis from the file, not the last run's tally (review
+                # 2026-11-15, M1), and recomposed on a language change.
+                return self.i18n.tr("status.analysis_cost_free"), [], cached, True
             if not costs.run or not (costs.run_calls or waiting):
                 return fallback
             self._refresh_status_bar(bool(self._component_name()))
@@ -8279,10 +8352,40 @@ class MainWindow(QMainWindow):
             return fallback
         if not total:
             return fallback
+        alone = single_model(costs.run_by_model) if not waiting and costs.run_complete else None
+        if alone:
+            from .ai_account import format_usd
+            return (self.i18n.tr("status.analysis_cost_model", total=format_usd(costs.run_usd),
+                                 calls=calls_text(costs.run_calls), model=alone), [], cached, True)
         lines = format_model_lines(costs.run_by_model)
         if waiting:
             lines.append(tx("+{count} in attesa, non ancora divise per modello", count=waiting))
-        return total, lines, True
+        return total, lines, cached, True
+
+    def _on_overlay_operation_started(self, _title: str) -> None:
+        """@brief Note whether the operation just started belongs to the analysis (Qt slot).
+
+        @param _title Heading of the card (unused).
+        @note It does when the program marked it just before (`_next_operation_counts`):
+            an AI run (`_begin_ai_run`: extraction, re-read, inventory relaunch)
+            or its automatic generation. A STEP regeneration, a generation
+            started by hand, a footprint rewrite or the free local YOLO pretest
+            does not (reviews 2026-11-14).
+        """
+        self._operation_counts = bool(getattr(self, "_next_operation_counts", False))
+        self._next_operation_counts = False
+
+    def _on_overlay_work_done(self, seconds: float) -> None:
+        """@brief Add one ended operation's working seconds to the current analysis (Qt slot).
+
+        @param seconds Working time of the operation (`AnalysisOverlay.work_done`).
+        @note Only while an analysis is counted (`_analysis_work_seconds` not
+            None: from the last «Estrai parametri con AI», re-reads included)
+            and only for its own operations (`_on_overlay_operation_started`).
+        """
+        if (getattr(self, "_analysis_work_seconds", None) is not None
+                and getattr(self, "_operation_counts", False)):
+            self._analysis_work_seconds += max(0.0, float(seconds))
 
     def _refresh_held_card_cost(self) -> None:
         """@brief Re-read the cost of a held finished card that shows one, from the file only.
@@ -8298,9 +8401,10 @@ class MainWindow(QMainWindow):
                 or not getattr(self, "_held_card_shows_cost", False)):
             return
         summary = self._analysis_cost_for_card()
-        if summary and summary[2]:
+        if summary and summary[3]:
             overlay.set_cost(summary[0])
             overlay.set_cost_models(summary[1])
+            overlay.set_cost_cached(summary[2])
 
     def _on_completed_overlay_closed(self) -> None:
         """@brief The user closed the finished card: a regeneration waiting for it may start."""
@@ -8417,6 +8521,7 @@ class MainWindow(QMainWindow):
                 "L'analisi viene abbandonata, la finestra torna subito utilizzabile "
                 "e il risultato, se arriverà, verrà scartato: il denaro già speso "
                 "resta speso e il lavoro andrà rifatto (e ripagato) da capo.")
+        # Not a wait for the card's clock: the worker runs on under the question.
         answer = QMessageBox.question(
             self, self.i18n.text("Interrompere l'operazione?"),
             f"{phase}\n\n{detail}",
@@ -8684,29 +8789,36 @@ class MainWindow(QMainWindow):
             follows the interface language. The running PROJECT total and the
             balance are the «Credito AI» line (`ai_account`), refreshed here.
         """
-        from ..services.openrouter import usage_totals
+        from ..services.openrouter import calls_text, single_model, usage_totals
 
         totals = usage_totals()
+        # With one model its line would only repeat the total (user,
+        # 2026-11-15): the model is named in the total and has no line.
+        alone = single_model(totals.by_model) if totals.calls else None
         if not totals.calls:
             text = self.i18n.tr("analysis.cost.cached")
         else:
             amount = (f"{totals.cost_usd:.4f}" if totals.cost_usd >= 0.01
                       else f"{totals.cost_usd:.6f}")
-            text = self.i18n.tr(
-                "analysis.cost", amount=amount, calls=totals.calls,
-                tokens=totals.prompt_tokens + totals.completion_tokens)
+            tokens = totals.prompt_tokens + totals.completion_tokens
+            if alone and totals.complete:
+                text = self.i18n.tr("analysis.cost.model", amount=amount,
+                                    calls=calls_text(totals.calls), tokens=tokens, model=alone)
+            else:
+                alone = None
+                text = self.i18n.tr("analysis.cost", amount=amount, calls=totals.calls,
+                                    tokens=tokens)
             if not totals.complete:
                 text = self.i18n.tr("analysis.cost.partial", summary=text,
                                     missing=totals.calls_without_cost)
         # The cost of each model (user, 2026-11-14), the most expensive first:
         # in the log under the total, and kept for the final card of an
         # automatic generation (`_hold_completed_overlay`).
-        models = totals.model_lines() if totals.calls else []
-        self._last_analysis_cost = (text, models)
-        if models:
-            text_for_log = text + "\n" + "\n".join("  " + line for line in models)
-        else:
-            text_for_log = text
+        models = totals.model_lines() if totals.calls and not alone else []
+        # The models that answered from the local cache, free (user, 2026-11-15).
+        cached = totals.cached_lines()
+        self._last_analysis_cost = (text, models, cached)
+        text_for_log = "\n".join([text] + ["  " + line for line in models + cached])
         # The label below the button has been removed (user, 2026-09-24): the
         # cost history stays in the AI log -- even after an interruption,
         # when it is the most useful information -- and the figure goes into the
@@ -8722,6 +8834,7 @@ class MainWindow(QMainWindow):
             return
         self.analysis_overlay.set_cost(text)
         self.analysis_overlay.set_cost_models(models)
+        self.analysis_overlay.set_cost_cached(cached)
 
     def _generation_phase_active(self) -> bool:
         """@brief Tell whether the progress modal is currently the generation modal.
@@ -9961,6 +10074,15 @@ class MainWindow(QMainWindow):
             the project being closed, opened or newly created alike.
         """
         self._flush_footprint_checkpoint()          # the closing project's deferred draft write
+        # A check of the closing project stops after its KiCad command in
+        # flight; its outcome would describe files no longer on screen.
+        check_panel = getattr(self, "kicad_check_panel", None)
+        if check_panel is not None:
+            check_panel.forget()
+            # The outcome of the closing project is not «stale» for the next
+            # one: there is simply no check of its files yet.
+            self._kicad_check_files = None
+            check_panel.show_idle(self.i18n.text("Controllo non ancora eseguito"))
         self._fp_clipboard.clear()
         symbol_tab = getattr(self, "symbol_tab", None)
         if symbol_tab is not None and hasattr(symbol_tab, "clear_clipboard"):
@@ -10097,6 +10219,9 @@ class MainWindow(QMainWindow):
             again from its fields.
         """
         self._extraction_started_stamp = None
+        # The analysis time belongs to the closed project (review 2026-11-14, 2).
+        self._analysis_work_seconds = None
+        self._analysis_time_partial = False
         self.project_kind = None
         # The «Controlli» list of the closed project must not survive a
         # redraw that fails before reaching it.
@@ -11392,6 +11517,7 @@ class MainWindow(QMainWindow):
         self._append_log(tx("Lunghezza e larghezza del corpo scambiate su scelta dell'utente: "
                             "{length} x {width} mm.", length=f"{width:g}", width=f"{length:g}"))
 
+    @_waits_for_user
     def _ask_geometry_doubt(self, doubt: dict) -> str:
         """@brief Show one structural doubt of the package geometry and ask what to do.
 
@@ -11688,8 +11814,8 @@ class MainWindow(QMainWindow):
                     # is held back, the check reports the open question.
                     self._append_log(self.i18n.text(
                         "La domanda sul contatto normalmente chiuso resta aperta: il simbolo usa "
-                        "intanto le funzioni della risposta principale; «Verifica componente per "
-                        "KiCad» la ripropone."))
+                        "intanto le funzioni della risposta principale; il controllo del "
+                        "componente (scheda KiCad, passo 1) la ripropone."))
                 else:
                     held_back = True
                 continue
@@ -11962,6 +12088,7 @@ class MainWindow(QMainWindow):
                                    Qt.TransformationMode.SmoothTransformation)
         return pixmap
 
+    @_waits_for_user
     def _ask_extraction_question(self, question: dict):
         """@brief Show one question of the extraction with its candidates and the evidence crop.
 
@@ -12177,8 +12304,8 @@ class MainWindow(QMainWindow):
                 "La domanda sull'altezza del corpo viene riproposta da «Rigenera modello STEP»."))
         if fields & set(self.SYMBOL_QUESTION_FIELDS):
             parts.append(self.i18n.text(
-                "La domanda sul contatto normalmente chiuso viene riproposta da «Verifica componente "
-                "per KiCad»."))
+                "La domanda sul contatto normalmente chiuso viene riproposta dal controllo del "
+                "componente (scheda KiCad, passo 1)."))
         if fields - {"body_height_mm", *self.FOOTPRINT_QUESTION_FIELDS, *self.SYMBOL_QUESTION_FIELDS}:
             parts.append(self.i18n.text(
                 "Le domande di altro tipo vengono riproposte ripetendo l'analisi."))
@@ -13342,6 +13469,7 @@ class MainWindow(QMainWindow):
                             "nuova analisi: torna quella automatica."))
         return strip(rows)
 
+    @_waits_for_user
     def _ask_user_pin_names(self, conflicts: dict, proposed: dict, vanished=()) -> str:
         """@brief Ask whether a new analysis may replace the pin names the user typed.
 
@@ -13903,6 +14031,7 @@ class MainWindow(QMainWindow):
                                    label=label, value=f"{value:g}", low=f"{low:g}", high=f"{high:g}"))
         return warnings
 
+    @_waits_for_user
     def _ask_contact_style(self, sides: list) -> str | None:
         """@brief Ask the user the contact style of sides whose style nobody observed.
 
@@ -14190,6 +14319,7 @@ class MainWindow(QMainWindow):
             # the same documents, settings and recorded answers.
             QTimer.singleShot(0, self._extract_with_ai)
 
+    @_waits_for_user
     def _ask_extraction_retry(self, message: str) -> bool:
         """@brief Show the extraction error with a «Riprova» button.
 
@@ -14805,20 +14935,143 @@ class MainWindow(QMainWindow):
     # ── Tab 6: KiCad ──────────────────────────────────────────────
 
     def _build_kicad_tab(self) -> QWidget:
-        """@brief Build the preflight, preview and installation workflow."""
+        """@brief Build the KiCad tab as a guided path: check, look in KiCad, install.
+
+        @note Guided path (user, 2026-11-15: «prima il controllo e poi la
+            proposta», first the check, then the proposal; «come è fatto ora
+            non si capisce un tubo»). Three numbered steps, in the order they
+            are done: 1 the component check, whose outcome stays on screen;
+            2 the optional look in KiCad; 3 the installation, offered only on
+            a check of the CURRENT files that found no error, with the files it
+            copies listed inside it. The metadata follow below, the box
+            opening by itself when it is what blocks.
+        @note Every command carries its name as text (user, same day: the
+            icon-only row could only be read by hovering), the folder and the
+            per-file remedies included; the remedies show only while their
+            block stands (`_refresh_kicad_remedies`).
+        """
         tab = QWidget()
-        outer = QVBoxLayout(tab)
+        #: The ⓘ of the step commands by topic (`_kicad_step_help_button`).
+        self._kicad_step_help_buttons: dict[str, QToolButton] = {}
+        scroll_outer = QVBoxLayout(tab)
+        scroll_outer.setContentsMargins(0, 0, 0, 0)
+        # The tab scrolls: three steps, the files and the metadata do not fit
+        # a low window, and a clipped step 3 would hide the installation.
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        content = QWidget()
+        outer = QVBoxLayout(content)
         outer.setContentsMargins(14, 14, 14, 14)
         outer.setSpacing(14)
+        scroll.setWidget(content)
+        scroll_outer.addWidget(scroll)
 
+        intro_row = QHBoxLayout()
         intro = QLabel(
-            "Controlla il risultato in KiCad prima di aggiungerlo a una libreria. "
-            "Il test usa un progetto isolato e non modifica la configurazione di KiCad.")
+            "Tre passi: controlla il componente, guardalo in KiCad se vuoi, poi installalo in "
+            "una libreria. Il controllo parte da solo e non modifica la configurazione di KiCad.")
         intro.setWordWrap(True)
-        outer.addWidget(intro)
+        intro_row.addWidget(intro, 1)
+        self.btn_kicad_guide = self._step_button(
+            "info.svg", "Guida", "Guida",
+            "Apri la procedura guidata per installare e usare footprint e simbolo")
+        self.btn_kicad_guide.clicked.connect(self._show_kicad_usage_wizard)
+        intro_row.addWidget(self.btn_kicad_guide, 0, Qt.AlignmentFlag.AlignTop)
+        outer.addLayout(intro_row)
 
-        artifacts_group = QGroupBox("File pronti per KiCad")
-        artifacts_form = QFormLayout(artifacts_group)
+        # ── 1 · the component check ──
+        check_group = QGroupBox("1 · Controllo del componente")
+        check_layout = QVBoxLayout(check_group)
+        check_layout.setSpacing(8)
+        # The state of the files (missing, stale, unapplied edits): what the
+        # check is about to read.
+        self.label_kicad_status = QLabel()
+        self.label_kicad_status.setProperty("i18n_skip", True)
+        self.label_kicad_status.setWordWrap(True)
+        self.label_kicad_status.setStyleSheet(f"color: {SUBTEXT};")
+        check_layout.addWidget(self.label_kicad_status)
+        from .component_check_dialog import ComponentCheckPanel
+        self.kicad_check_panel = ComponentCheckPanel(check_group, tx=self.i18n.text)
+        self.kicad_check_panel.run_started.connect(self._on_kicad_check_started)
+        self.kicad_check_panel.run_finished.connect(self._on_kicad_check_finished)
+        self.kicad_check_panel.handoff_requested.connect(self._route_check_handoff)
+        from ..services.component_check import ACTION_OPEN_KICAD_TAB
+        # «Vai alla scheda KiCad» would lead to this very tab: step 3 is below.
+        self.kicad_check_panel.unavailable_actions = {ACTION_OPEN_KICAD_TAB}
+        # Step 1 and step 3 read the same: «not installed yet» is step 3's.
+        self.kicad_check_panel.verdict_excludes = self.KICAD_CHECK_STEP3_CODES
+        self.kicad_check_panel.action_guard = self._kicad_check_action_guard
+        # The re-run after a fix goes through the window's own guards.
+        self.kicad_check_panel.rerun_handler = lambda: self._verify_component(keep_status=True)
+        # «Controlla di nuovo» runs through the window: same guards as the
+        # automatic start, and the arguments of the window as it is then.
+        self.kicad_check_panel.rerun_button.clicked.disconnect()
+        self.kicad_check_panel.rerun_button.clicked.connect(self._verify_component)
+        self.btn_verify_component = self.kicad_check_panel.rerun_button
+        check_layout.addWidget(self.kicad_check_panel)
+        outer.addWidget(check_group)
+
+        # ── 2 · look in KiCad (optional) ──
+        preview_group = QGroupBox("2 · Guarda in KiCad (facoltativo)")
+        preview_layout = QHBoxLayout(preview_group)
+        preview_note = QLabel(
+            "Apre un piccolo progetto temporaneo con il footprint, il simbolo e il modello STEP "
+            "nell'Editor di schemi e nel PCB Editor, e mostra un'immagine 3D del componente. "
+            "Non installa nulla. In KiCad premi Alt+3 per la vista 3D interattiva.")
+        preview_note.setWordWrap(True)
+        preview_layout.addWidget(preview_note, 1)
+        self.btn_test_kicad = self._step_button(
+            "kicad-test.svg", "Apri in KiCad", "Apri in KiCad",
+            "Apre un progetto temporaneo: non installa e non modifica librerie KiCad")
+        self.btn_test_kicad.clicked.connect(self._test_in_kicad)
+        preview_layout.addWidget(self.btn_test_kicad, 0, Qt.AlignmentFlag.AlignVCenter)
+        preview_layout.addWidget(self._kicad_step_help_button("preview"), 0, Qt.AlignmentFlag.AlignVCenter)
+        outer.addWidget(preview_group)
+
+        # ── 3 · install ──
+        install_group = QGroupBox("3 · Installa nella libreria")
+        install_layout = QVBoxLayout(install_group)
+        install_layout.setSpacing(8)
+        #: What step 3 offers now, decided by the check and the gates
+        #: (`_refresh_install_advice`).
+        self.label_install_advice = QLabel()
+        self.label_install_advice.setProperty("i18n_skip", True)
+        self.label_install_advice.setWordWrap(True)
+        install_layout.addWidget(self.label_install_advice)
+        # No explanatory sentence here (user, 2026-11-15): the ⓘ beside each
+        # installation explains it in a window, as the metadata fields do.
+        install_buttons = QHBoxLayout()
+        self.btn_export = self._step_button(
+            "install-project.svg", "Installa nel progetto KiCad (consigliato)",
+            "Installa nel progetto KiCad (consigliato)",
+            "Crea KiCadGen.pretty, KiCadGen.3dshapes e KiCadGen.kicad_sym nel progetto selezionato")
+        self.btn_export.clicked.connect(self._install_project_library)
+        self.btn_install_global = self._step_button(
+            "install-global.svg", "Installa come libreria globale",
+            "Installa come libreria globale",
+            "Installa nella cartella scelta e registra la libreria globale di KiCad")
+        self.btn_install_global.clicked.connect(self._install_global_library)
+        install_buttons.addWidget(self.btn_export)
+        install_buttons.addWidget(self._kicad_step_help_button("project"))
+        install_buttons.addSpacing(12)
+        install_buttons.addWidget(self.btn_install_global)
+        install_buttons.addWidget(self._kicad_step_help_button("global"))
+        install_buttons.addStretch()
+        install_layout.addLayout(install_buttons)
+
+        # ── what step 3 installs ──
+        # The files live inside step 3 (user, 2026-11-15: «questi 2 blocchi
+        # non diventano uno solo?», shouldn't these two boxes become one): they
+        # are exactly what the installation copies (the symbol too, user
+        # 2026-11-15, «opzione 1»), and a box of their own read as a fourth step.
+        installed_title = QLabel("Cosa viene installato:")
+        installed_title.setStyleSheet(f"color: {SUBTEXT};")
+        install_layout.addSpacing(4)
+        install_layout.addWidget(installed_title)
+        artifacts_form = QFormLayout()
+        artifacts_form.setContentsMargins(12, 0, 0, 0)
+        install_layout.addLayout(artifacts_form)
         self.label_kicad_footprint = QLabel("—")
         self.label_kicad_footprint.setProperty("i18n_skip", True)
         self.label_kicad_footprint.setTextInteractionFlags(
@@ -14829,26 +15082,30 @@ class MainWindow(QMainWindow):
         self.label_kicad_step.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse)
         self.label_kicad_step.setWordWrap(True)
-        self.label_kicad_symbol = QLabel("Da esportare")
+        self.label_kicad_symbol = QLabel("Manca: premi «Applica» nella scheda «Simbolo elettrico»")
         self.label_kicad_symbol.setProperty("i18n_skip", True)
         self.label_kicad_symbol.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse)
         self.label_kicad_symbol.setWordWrap(True)
-        artifacts_form.addRow("Footprint:", self.label_kicad_footprint)
+        footprint_row = QWidget()
+        footprint_row_layout = QHBoxLayout(footprint_row)
+        footprint_row_layout.setContentsMargins(0, 0, 0, 0)
+        footprint_row_layout.setSpacing(8)
+        footprint_row_layout.addWidget(self.label_kicad_footprint, 1)
+        artifacts_form.addRow("Footprint:", footprint_row)
         symbol_row = QWidget()
         symbol_row_layout = QHBoxLayout(symbol_row)
         symbol_row_layout.setContentsMargins(0, 0, 0, 0)
         symbol_row_layout.setSpacing(8)
         symbol_row_layout.addWidget(self.label_kicad_symbol, 1)
-        self.btn_export_symbol = self._workflow_tool_button(
-            "tab-symbol.svg", "Esporta simbolo KiCad…",
-            "Esporta il simbolo elettrico applicato in un file .kicad_sym")
-        self.btn_export_symbol.clicked.connect(self.symbol_tab.export_requested.emit)
-        symbol_row_layout.addWidget(self.btn_export_symbol)
+        # No «Esporta simbolo KiCad…» here (user, 2026-11-15, «opzione 1»):
+        # both installations now bring the symbol, so a loose export is not
+        # a step of this tab; it stays in the Symbol tab.
         # Remedy of a symbol file that does not match the applied symbol
-        # (review pass 3, M1/H1): enabled exactly while that block stands.
-        self.btn_update_symbol_file = self._workflow_tool_button(
-            "wf-regenerate.svg", "Aggiorna il file del simbolo",
+        # (review pass 3, M1/H1): shown and enabled while that block stands,
+        # with its name as text like every other command of the guided tab.
+        self.btn_update_symbol_file = self._step_button(
+            "wf-regenerate.svg", "Aggiorna il file del simbolo", "Aggiorna il file del simbolo",
             "Il file del simbolo corrisponde al simbolo applicato.")
         self.btn_update_symbol_file.clicked.connect(self._update_symbol_file)
         self.btn_update_symbol_file.setEnabled(False)
@@ -14860,8 +15117,9 @@ class MainWindow(QMainWindow):
         step_row_layout.setSpacing(8)
         step_row_layout.addWidget(self.label_kicad_step, 1)
         # Remedy of a stale STEP that cannot be rebuilt (review pass 3, H2).
-        self.btn_remove_obsolete_model = self._workflow_tool_button(
-            "cancel.svg", "Rimuovi il modello STEP obsoleto", "Nessun modello STEP obsoleto.")
+        self.btn_remove_obsolete_model = self._step_button(
+            "cancel.svg", "Rimuovi il modello STEP obsoleto", "Rimuovi il modello STEP obsoleto",
+            "Nessun modello STEP obsoleto.")
         self.btn_remove_obsolete_model.clicked.connect(self._remove_obsolete_model)
         self.btn_remove_obsolete_model.setEnabled(False)
         step_row_layout.addWidget(self.btn_remove_obsolete_model)
@@ -14873,7 +15131,18 @@ class MainWindow(QMainWindow):
         self.file_paths_toggle.setCheckable(True)
         self.file_paths_toggle.setProperty("i18n_skip", True)
         self.file_paths_toggle.toggled.connect(self._toggle_kicad_file_paths)
-        artifacts_form.addRow(self.file_paths_toggle)
+        # The folder command shares the paths' row: both are about where the
+        # files are, and it now carries its name (no icon-only command left).
+        paths_row = QHBoxLayout()
+        paths_row.setContentsMargins(0, 0, 0, 0)
+        paths_row.addWidget(self.file_paths_toggle)
+        paths_row.addStretch()
+        self.btn_open_output = self._step_button(
+            "docs-open.svg", "Apri cartella componente", "Apri cartella componente",
+            "Apre la cartella del componente con footprint, modello STEP e documenti.")
+        self.btn_open_output.clicked.connect(self._open_project_dir)
+        paths_row.addWidget(self.btn_open_output)
+        artifacts_form.addRow(paths_row)
         self.file_paths_detail = QWidget()
         paths_layout = QVBoxLayout(self.file_paths_detail)
         paths_layout.setContentsMargins(18, 2, 4, 4)
@@ -14889,73 +15158,11 @@ class MainWindow(QMainWindow):
             paths_layout.addWidget(path_label)
         self.file_paths_detail.hide()
         artifacts_form.addRow(self.file_paths_detail)
-        self.symbol_tab.export_enabled_changed.connect(self.btn_export_symbol.setEnabled)
-        self.btn_export_symbol.setEnabled(self.symbol_tab.export_button.isEnabled())
         self._align_form(artifacts_form, "kicad")
-        outer.addWidget(artifacts_group)
-        outer.addWidget(self._build_metadata_group())
-
-        review_group = QGroupBox("Verifica prima dell’installazione")
-        review_layout = QVBoxLayout(review_group)
-        review_note = QLabel(
-            "Crea un piccolo progetto temporaneo con il footprint, il simbolo e il modello STEP, "
-            "apre lo schema nell'Editor di schemi e la scheda nel PCB Editor e mostra "
-            "un'immagine 3D del componente. In KiCad premi Alt+3 per la vista 3D interattiva.")
-        review_note.setWordWrap(True)
-        # Icons instead of text buttons, name and explanation in the tooltip
-        # (user, 2026-09-24), with the same style as the other bars: the
-        # explanation of the section stays written next to the icon.
-        self.btn_test_kicad = self._workflow_tool_button(
-            "kicad-test.svg", "Prova in KiCad...",
-            "Apre un progetto temporaneo: non installa e non modifica librerie KiCad")
-        self.btn_test_kicad.clicked.connect(self._test_in_kicad)
-        self.btn_verify_component = self._workflow_tool_button(
-            'wf-review.svg', 'Verifica componente per KiCad',
-            'Controlla footprint, simbolo, corrispondenza pin-pad e importazione 3D con KiCad')
-        self.btn_verify_component.clicked.connect(self._verify_component)
-        self.btn_kicad_guide = self._workflow_tool_button(
-            'info.svg', 'Guida rapida per usare il componente in KiCad',
-            'Apri la procedura guidata per installare e usare footprint e simbolo')
-        self.btn_kicad_guide.clicked.connect(self._show_kicad_usage_wizard)
-        review_layout.addLayout(self._note_with_icons(
-            review_note, self.btn_kicad_guide, self.btn_verify_component, self.btn_test_kicad))
-        outer.addWidget(review_group)
-
-        install_group = QGroupBox("Installazione nella libreria")
-        install_layout = QVBoxLayout(install_group)
-        install_note = QLabel(
-            "La libreria di progetto è portabile ed è la scelta consigliata. "
-            "La libreria globale rende il footprint disponibile in tutti i progetti "
-            "di questo computer.")
-        install_note.setWordWrap(True)
-        self.btn_export = self._workflow_tool_button(
-            "install-project.svg", "Installa nel progetto KiCad...",
-            "Crea KiCadGen.pretty e KiCadGen.3dshapes nel progetto selezionato")
-        self.btn_export.clicked.connect(self._install_project_library)
-        self.btn_install_global = self._workflow_tool_button(
-            "install-global.svg", "Installa come libreria globale...",
-            "Installa nella cartella scelta e registra la libreria globale di KiCad")
-        self.btn_install_global.clicked.connect(self._install_global_library)
-        install_layout.addLayout(
-            self._note_with_icons(install_note, self.btn_export, self.btn_install_global))
         outer.addWidget(install_group)
 
-        # The bottom row is in a box like the others (user,
-        # 2026-09-24). The state stays TEXT: it is an outcome to read at once, not
-        # the name of a command to discover by hovering with the mouse.
-        folder_group = QGroupBox("Cartella del componente")
-        folder_layout = QVBoxLayout(folder_group)
-        self.label_kicad_status = QLabel()
-        self.label_kicad_status.setProperty("i18n_skip", True)
-        self.label_kicad_status.setWordWrap(True)
-        self.label_kicad_status.setStyleSheet(f"color: {YELLOW};")
-        self.btn_open_output = self._workflow_tool_button(
-            "docs-open.svg", "Apri cartella componente",
-            "Apre la cartella del componente con footprint, modello STEP e documenti.")
-        self.btn_open_output.clicked.connect(self._open_project_dir)
-        folder_layout.addLayout(self._note_with_icons(self.label_kicad_status,
-                                                      self.btn_open_output))
-        outer.addWidget(folder_group)
+        # ── the metadata the files carry ──
+        outer.addWidget(self._build_metadata_group())
         outer.addStretch()
         self._refresh_output_actions()
         return tab
@@ -15093,15 +15300,25 @@ class MainWindow(QMainWindow):
             attributes_layout.addWidget(box)
             self.field_attributes[flag] = box
         form.addRow("Attributi:", self._metadata_field_row(attributes, "attributes", top=True))
-        self.btn_apply_metadata = self._workflow_tool_button(
-            "confirm-use.svg", "Applica ai file",
+        # A labelled button with the state beside it (user, 2026-11-15: the
+        # icon-only ✓ «non è chiaro», was not clear): what it does and
+        # whether there is something to apply are read without hovering.
+        self.btn_apply_metadata = self._step_button(
+            "confirm-use.svg", "Applica ai file", "Applica ai file",
             "Salva il progetto, rigenera il footprint e riesporta il simbolo se esiste già")
         self.btn_apply_metadata.clicked.connect(self._apply_metadata_to_files)
+        #: Whether the fields are in the files (`_refresh_metadata_apply_state`).
+        self.label_metadata_apply_state = QLabel()
+        self.label_metadata_apply_state.setProperty("i18n_skip", True)
+        self.label_metadata_apply_state.setWordWrap(True)
+        self.label_metadata_apply_state.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # Centred, the state under it (user, 2026-11-15: «centra il pulsante»).
         apply_row = QWidget()
-        apply_layout = QHBoxLayout(apply_row)
-        apply_layout.setContentsMargins(0, 0, 0, 0)
-        apply_layout.addStretch()
-        apply_layout.addWidget(self.btn_apply_metadata)
+        apply_layout = QVBoxLayout(apply_row)
+        apply_layout.setContentsMargins(0, 4, 0, 4)
+        apply_layout.setSpacing(4)
+        apply_layout.addWidget(self.btn_apply_metadata, 0, Qt.AlignmentFlag.AlignHCenter)
+        apply_layout.addWidget(self.label_metadata_apply_state)
         form.addRow(apply_row)
         self.klc_list = QListWidget()
         # Findings are messages computed at run time, not catalogue sources.
@@ -15178,6 +15395,89 @@ class MainWindow(QMainWindow):
         "klc": "Controlli KiCad (KLC)",
     }
 
+    #: Help topics of the KiCad tab's step commands: key -> Italian source of
+    #: the command, the title of its help window (user, 2026-11-15).
+    KICAD_STEP_HELP_TITLES = {
+        "preview": "Apri in KiCad",
+        "project": "Installa nel progetto KiCad (consigliato)",
+        "global": "Installa come libreria globale",
+    }
+
+    def _kicad_step_help_button(self, key: str) -> QToolButton:
+        """@brief The ⓘ beside a step command of the KiCad tab, opening its explanation.
+
+        @param key A key of `KICAD_STEP_HELP_TITLES`.
+        @return The icon button (tooltip and accessible name follow the
+            language through `_refresh_metadata_help_tooltips`).
+        @note The same icon and the same window as the metadata fields'
+            help (reuse, one look in the tab): what the command does, when to
+            choose it, what it does not do.
+        """
+        button = self._icon_only_button("info.svg")
+        button.setProperty("kicad_step_help", key)
+        button.clicked.connect(lambda _checked=False, key=key: self._show_kicad_step_help(key))
+        self._kicad_step_help_buttons[key] = button
+        self._refresh_metadata_help_tooltips()
+        return button
+
+    def _kicad_step_help_content(self, key: str) -> list[tuple[str, str]]:
+        """@brief The explanation of a KiCad-tab step command, as (section title, text) pairs.
+
+        @param key A key of `KICAD_STEP_HELP_TITLES`.
+        @return Translated sections in reading order; empty for an unknown key.
+        @note Must agree with `services.kicad_library`: the project library
+            uses `${KIPRJMOD}` relative paths, the global one absolute paths in
+            the user's global table with a `.kicadgen-backup` copy; the preview
+            writes only inside `.kicad-preview`.
+        """
+        does = self.i18n.text("Che cosa fa")
+        when = self.i18n.text("Quando sceglierla")
+        not_does = self.i18n.text("Che cosa non fa")
+        careful = self.i18n.text("Attenzione")
+        tx = self.i18n.text
+        if key == "preview":
+            return [
+                (does, tx("Crea un piccolo progetto temporaneo nella sottocartella .kicad-preview del "
+                          "componente, con il footprint, il simbolo e il modello STEP, e lo apre "
+                          "nell'Editor di schemi e nel PCB Editor; mostra anche un'immagine 3D.")),
+                (when, tx("Prima di installare, per guardare il componente in KiCad: posizione dei "
+                          "pad, simbolo, vista 3D (in KiCad premi Alt+3).")),
+                (not_does, tx("Non installa nulla e non modifica le librerie né la configurazione di "
+                              "KiCad: è facoltativo.")),
+            ]
+        if key == "project":
+            return [
+                (does, tx("Scegli la cartella di un progetto KiCad: vi vengono creati KiCadGen.pretty "
+                          "(i footprint), KiCadGen.3dshapes (i modelli STEP) e KiCadGen.kicad_sym (i "
+                          "simboli), e le librerie vengono registrate nelle tabelle delle librerie del "
+                          "progetto con percorsi relativi (${KIPRJMOD}). In KiCad trovi subito simbolo "
+                          "e footprint, già collegati.")),
+                (when, tx("Quasi sempre: il componente viaggia con il progetto, che funziona anche se "
+                          "lo copi su un altro computer o lo mandi a qualcuno.")),
+                (not_does, tx("Non tocca le librerie degli altri progetti né le tabelle globali di "
+                              "KiCad. Gli altri simboli di KiCadGen.kicad_sym restano come sono.")),
+            ]
+        if key == "global":
+            return [
+                (does, tx("Scegli una cartella delle librerie: vi vengono installati footprint, modello "
+                          "STEP e simbolo, e le librerie vengono registrate nelle tabelle globali di "
+                          "KiCad (footprint e simboli), con percorsi assoluti. Le altre librerie delle "
+                          "tabelle restano come sono.")),
+                (when, tx("Quando usi lo stesso componente in molti progetti su questo computer.")),
+                (careful, tx("KiCad deve essere stato avviato almeno una volta (le tabelle globali "
+                             "devono esistere). Prima di cambiare una tabella il programma ne conserva "
+                             "una copia .kicadgen-backup e chiede conferma prima di sovrascrivere. Un "
+                             "progetto copiato su un altro computer non troverà il componente.")),
+            ]
+        return []
+
+    def _show_kicad_step_help(self, key: str) -> None:
+        """@brief Open the modal explanation of one KiCad-tab step command.
+
+        @param key A key of `KICAD_STEP_HELP_TITLES`.
+        """
+        self._show_help_dialog(self.KICAD_STEP_HELP_TITLES[key], self._kicad_step_help_content(key))
+
     def _metadata_field_row(self, field: QWidget, key: str, top: bool = False) -> QWidget:
         """@brief A metadata row: the field, then its help icon at the right end.
 
@@ -15210,11 +15510,16 @@ class MainWindow(QMainWindow):
             tooltip is composed), so this runs at build time and on every
             language change (review, 2026-10-12: they stayed Italian).
         """
-        for key, button in self._metadata_help_buttons.items():
+        for key, button in getattr(self, "_metadata_help_buttons", {}).items():
             title = self.i18n.text("Aiuto: {field}").format(
                 field=self.i18n.text(self.METADATA_HELP_TITLES[key]))
             self._apply_icon_tooltip(button, title, self.i18n.text(
                 "Che cosa inserire, dove finisce nei file KiCad e quali regole KLC lo riguardano."))
+        for key, button in getattr(self, "_kicad_step_help_buttons", {}).items():
+            title = self.i18n.text("Aiuto: {field}").format(
+                field=self.i18n.text(self.KICAD_STEP_HELP_TITLES[key]))
+            self._apply_icon_tooltip(button, title, self.i18n.text(
+                "Che cosa fa, quando sceglierla e che cosa non fa."))
 
     def _metadata_help_content(self, key: str) -> list[tuple[str, str]]:
         """@brief The explanation of a metadata field, as (section title, text) pairs.
@@ -15309,21 +15614,30 @@ class MainWindow(QMainWindow):
                 (examples, self.i18n.text(
                     "«ESP32-S3-DEVKIT-NXRX*» · «SOT-223*» · «*QFN*48*».")),
             ],
+            # One section per box, titled with the box's own label (user,
+            # 2026-11-15: «per ogni voce della spunta devi indicare il
+            # significato chiaro»).
             "attributes": [
-                (what, self.i18n.text(
-                    "Le caselle degli attributi del footprint di KiCad: escluso dai file di posizione, "
-                    "escluso dalla distinta (BOM), esente dal courtyard, non montare (DNP). Vuote per un "
-                    "componente normale.")),
+                (self.i18n.text("Escludi dai file di posizione"), self.i18n.text(
+                    "Il componente non entra nel file di posizione (pick and place), quello che la "
+                    "macchina di montaggio usa per sapere dove posare ogni componente: nessuno lo monterà "
+                    "in automatico. Serve per fori di fissaggio, fiduciali, loghi o parti montate a mano.")),
+                (self.i18n.text("Escludi dalla distinta (BOM)"), self.i18n.text(
+                    "Il componente non compare nella distinta dei materiali, l'elenco di ciò che va "
+                    "comprato. Serve per ciò che non si acquista: fori di fissaggio, fiduciali, loghi.")),
+                (self.i18n.text("Esente dal courtyard"), self.i18n.text(
+                    "Il controllo delle regole di KiCad (DRC) non segnala che manca il courtyard, l'area "
+                    "di ingombro che non deve sovrapporsi a quella degli altri componenti. Questo "
+                    "programma disegna sempre il courtyard: lasciala vuota.")),
+                (self.i18n.text("Non montare (DNP)"), self.i18n.text(
+                    "Il footprint resta sulla scheda, ma il componente non viene montato in questa "
+                    "versione (Do Not Populate): nella distinta resta segnato come da non montare. Serve "
+                    "per parti opzionali.")),
+                (self.i18n.text("Per un componente normale"), self.i18n.text(
+                    "Tutte vuote: il componente si compra, si monta e il DRC ne controlla l'ingombro.")),
                 (where, self.i18n.text(
                     "Campo «attr» del footprint, dopo il tipo di montaggio (smd o through_hole); in KiCad "
-                    "si ritrovano in «Proprietà del footprint» > Attributi.")),
-                (rules, self.i18n.text(
-                    "Nessuna regola KLC le impone. Un foro di fissaggio, un fiduciale o un logo va escluso "
-                    "dalla distinta e dai file di posizione; «esente dal courtyard» serve solo a chi non ne "
-                    "disegna uno, il generatore lo scrive sempre.")),
-                (examples, self.i18n.text(
-                    "Foro di fissaggio M3: escluso dalla distinta e dai file di posizione · componente "
-                    "opzionale non montato di serie: non montare (DNP).")),
+                    "si ritrovano in «Proprietà del footprint» > Attributi. Nessuna regola KLC le impone.")),
             ],
             "klc": [
                 (what, self.i18n.text(
@@ -15343,8 +15657,8 @@ class MainWindow(QMainWindow):
                     "sezione «Library Conventions».")),
                 (examples, self.i18n.text(
                     "«Nessun problema trovato» vuol dire che i controlli eseguiti qui sono passati, non che "
-                    "il componente sia verificato in KiCad: per quello c’è «Verifica prima "
-                    "dell’installazione».")),
+                    "il componente sia verificato in KiCad: per quello c’è «1 · Controllo del "
+                    "componente», in cima a questa scheda.")),
             ],
         }
         # Review pass 2 (M1, 2026-10-15): installation also waits until the
@@ -15385,15 +15699,36 @@ class MainWindow(QMainWindow):
         @note One dialog at a time, kept in `_metadata_help_dialog` so tests
             can reach it; it is modal and closes with «Chiudi» or Esc.
         """
+        self._show_help_dialog(self.METADATA_HELP_TITLES[key], self._metadata_help_content(key))
+
+    def _show_help_dialog(self, field_source: str, sections) -> None:
+        """@brief The modal help window of the KiCad tab: a title and (section, text) paragraphs.
+
+        @param field_source Italian source of what the help is about («Aiuto: …»).
+        @param sections Translated (section title, text) pairs, in reading order.
+        @note One dialog at a time, kept in `_metadata_help_dialog` so tests
+            can reach it, shared by the metadata fields and the step commands;
+            it is modal and closes with «Chiudi» or Esc.
+        """
         from html import escape
         dialog = QDialog(self)
         dialog.setProperty("i18n_skip", True)
-        dialog.setWindowTitle(self.i18n.text("Aiuto: {field}").format(
-            field=self.i18n.text(self.METADATA_HELP_TITLES[key])))
+        # Only the item's name, as a centred bold title on top (user,
+        # 2026-11-15: «rimuovi Aiuto, metti solo il titolo della voce centrato»).
+        title = self.i18n.text(field_source)
+        dialog.setWindowTitle(title)
         dialog.setModal(True)
         layout = QVBoxLayout(dialog)
-        parts = [f"<p><b>{escape(title)}</b><br>{escape(body)}</p>"
-                 for title, body in self._metadata_help_content(key)]
+        heading = QLabel(title)
+        heading.setObjectName("helpTitle")
+        heading.setProperty("i18n_skip", True)
+        heading.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        heading.setWordWrap(True)
+        # A style sheet, not setFont: the application style sheet fixes every
+        # widget's font size (theme.APP_QSS), so a font set in code is ignored.
+        heading.setStyleSheet("font-size: 15pt; font-weight: bold; padding: 4px 0 8px 0;")
+        layout.addWidget(heading)
+        parts = [f"<p><b>{escape(title)}</b><br>{escape(body)}</p>" for title, body in sections]
         note = QLabel("".join(parts))
         note.setProperty("i18n_skip", True)
         note.setTextFormat(Qt.TextFormat.RichText)
@@ -15404,7 +15739,12 @@ class MainWindow(QMainWindow):
         close.setProperty("i18n_skip", True)
         close.clicked.connect(dialog.accept)
         layout.addWidget(close, alignment=Qt.AlignmentFlag.AlignRight)
-        dialog.resize(560, 320)
+        # As tall as its text (a fixed height cut the attributes' help, one
+        # section per box): fixed width, height for that width, capped by the screen.
+        dialog.setMinimumWidth(600)
+        height = layout.totalHeightForWidth(600) if layout.hasHeightForWidth() else dialog.sizeHint().height()
+        screen = self.screen().availableGeometry().height() if self.screen() is not None else 900
+        dialog.resize(600, max(260, min(height, int(screen * 0.85))))
         self._metadata_help_dialog = dialog
         dialog.exec()
         if self._metadata_help_dialog is dialog:
@@ -15907,6 +16247,32 @@ class MainWindow(QMainWindow):
             return dict(value)
         return None
 
+    def _refresh_metadata_apply_state(self) -> None:
+        """@brief Say beside «Applica ai file» whether the fields are in the files, and highlight it when not.
+
+        @note The button stays enabled in both states: it also asks an open
+            footprint question and rewrites the footprint (gate remedy
+            «footprint_question»), which is not only about the metadata.
+        """
+        label = getattr(self, "label_metadata_apply_state", None)
+        button = getattr(self, "btn_apply_metadata", None)
+        if label is None or button is None:
+            return
+        pending = self._kicad_output_complete() and self._metadata_not_applied()
+        if not self._kicad_output_complete():
+            text, color = "", SUBTEXT
+        elif pending:
+            text, color = self.i18n.text("Metadati modificati: non sono ancora nei file."), YELLOW
+        else:
+            text, color = self.i18n.text("I metadati sono già nei file."), SUBTEXT
+        label.setText(text)
+        label.setStyleSheet(f"color: {color};")
+        if (button.objectName() == "primary") != pending:
+            button.setObjectName("primary" if pending else "")
+            # A changed object name does not restyle by itself.
+            button.style().unpolish(button)
+            button.style().polish(button)
+
     def _metadata_not_applied(self) -> bool:
         """@brief True while the fields hold metadata the footprint on disk does not.
 
@@ -15971,6 +16337,7 @@ class MainWindow(QMainWindow):
         # Only the METADATA block opens the box: work in progress or stale
         # files are not something the metadata fields can fix.
         self._auto_expand_metadata(bool(reason), complete)
+        self._refresh_metadata_apply_state()
         return missing
 
     def _metadata_project_key(self):
@@ -16020,23 +16387,37 @@ class MainWindow(QMainWindow):
         self._metadata_block_seen = (key, last_blocked)
 
     def _refuse_install_for_metadata(self) -> bool:
-        """@brief Defence in depth: refuse an installation while the metadata block it.
+        """@brief Defence in depth: refuse an installation while the metadata or the check block it.
 
         @return True when the installation must stop (the user was told why).
-        @note Covers both blocks: a required field empty, and fields not yet
-            applied to the files (`_install_block_reason`).
+        @note Covers both metadata blocks: a required field empty, and fields
+            not yet applied to the files (`_install_block_reason`); then the
+            component check of the current files (`_check_install_reason`).
         @note No «install anyway» question (user, 2026-10-15): the only way
             on is to fill the fields and apply them. The box is opened because
             the user has just asked for the installation, so showing the
             fields and «Applica ai file» is the answer, not an intrusion.
         """
         reason = self._install_block_reason()
+        if reason:
+            if hasattr(self, "group_metadata"):
+                self.group_metadata.setExpanded(True)
+            self._append_log(reason)
+            QMessageBox.warning(self, self.i18n.text("Metadati del componente"), reason)
+            return True
+        # Then the component check (guided KiCad tab, 2026-11-15): a menu
+        # entry, the usage wizard or a direct call is refused like the button.
+        reason = self._check_install_reason()
         if not reason:
             return False
-        if hasattr(self, "group_metadata"):
-            self.group_metadata.setExpanded(True)
+        if self._kicad_check_state() in ("none", "stale") and self.tabs.isTabEnabled(TAB_KICAD):
+            # Shown where the check runs: entering the tab starts it, and an
+            # already shown tab is started explicitly (no tab change signal).
+            self.tabs.setCurrentIndex(TAB_KICAD)
+            self._show_kicad_check_idle()
+            self._schedule_kicad_check()
         self._append_log(reason)
-        QMessageBox.warning(self, self.i18n.text("Metadati del componente"), reason)
+        QMessageBox.warning(self, self.i18n.text("Controllo del componente"), reason)
         return True
 
     # ── Files on disk aligned with the parameters (audit 2026-10-15, H1) ──
@@ -16860,7 +17241,7 @@ class MainWindow(QMainWindow):
         self._refresh_output_actions()
 
     def _refresh_kicad_remedies(self) -> None:
-        """@brief Enable each remedy button of the KiCad tab exactly while its block stands.
+        """@brief Show and enable each remedy button of the KiCad tab exactly while its block stands.
 
         @note «Aggiorna il file del simbolo» while a symbol block stands and
             the applied symbol can be written (no unapplied edits, rows
@@ -16879,6 +17260,11 @@ class MainWindow(QMainWindow):
         mismatch = symbol_block and not pending and bool(self._symbol_pad_mismatch())
         can_write = symbol_block and not pending and not mismatch
         update.setEnabled(can_write)
+        # Shown only while there is something to fix (user, 2026-11-15: a
+        # remedy icon on screen with «nothing to fix» could not be understood).
+        # While the block stands it stays visible even when off: its tooltip
+        # then says what to do first (unapplied edits, rows not matching).
+        update.setVisible(symbol_block)
         self._set_workflow_detail(update, (
             "Riscrive il file .kicad_sym dal simbolo applicato, che non corrisponde al file."
             if can_write else
@@ -16891,6 +17277,7 @@ class MainWindow(QMainWindow):
             "Il file del simbolo corrisponde al simbolo applicato."))
         stale_step = code.startswith("step_")
         remove.setEnabled(stale_step)
+        remove.setVisible(stale_step)
         self._set_workflow_detail(remove, (
             "Elimina STEP, WRL e anteprima del modello STEP, che non corrispondono più ai dati; "
             "chiede conferma."
@@ -16908,6 +17295,9 @@ class MainWindow(QMainWindow):
             disagree (user, 2026-09-26: same command, same state).
         """
         block = self._kicad_command_block_reason() if complete else ""
+        # The check comes after the metadata (guided KiCad tab, 2026-11-15):
+        # only the metadata open their box, and filling them is the first step.
+        check_reason = self._check_install_reason() if complete else ""
         for attr in self.KICAD_COMMAND_ATTRS:
             action = getattr(self, attr, None)
             if action is None:
@@ -16916,9 +17306,11 @@ class MainWindow(QMainWindow):
                 self._set_output_action_state(
                     action, False, "Genera prima il footprint del componente corrente")
                 continue
-            reason = block or (metadata_reason or "" if attr in self.INSTALL_ACTION_ATTRS else "")
+            reason = block or ((metadata_reason or check_reason)
+                               if attr in self.INSTALL_ACTION_ATTRS else "")
             self._set_output_action_state(
                 action, not reason, reason or self.OUTPUT_ACTION_TOOLTIPS.get(attr, ""))
+        self._refresh_install_advice(block, metadata_reason or "")
 
     def _refresh_kicad_command_gate(self) -> None:
         """@brief Recompute only the KiCad commands (the «Strumenti» menu is about to open).
@@ -17026,12 +17418,333 @@ class MainWindow(QMainWindow):
             "Metadati applicati: footprint e simbolo in rigenerazione."))
         self._refresh_klc_findings()
 
-    def _verify_component(self):
-        """@brief «Verifica componente per KiCad»: run the component checks in a modal dialog.
+    # ── Guided KiCad tab: the check decides the installation (user, 2026-11-15) ──
+    #
+    # «Prima il controllo e poi la proposta» (first the check, then the
+    # proposal): the component check runs by itself when the KiCad tab shows
+    # files it has not checked, its outcome stays in step 1, and step 3
+    # offers the installation only on a check of the CURRENT files that found
+    # no error. Warnings never block (user decision, same day): they almost
+    # always exist -- the electrical types cannot be known without the
+    # datasheet -- and a path blocked by them would be a dead end.
 
-        @note Refused while work runs; the open dialog counts as work in
-            progress for the KiCad gate, and a footprint rewrite deferred
-            while it was open is retried when it closes.
+    #: Wait (ms) before the automatic check starts after the tab is shown or
+    #: the files changed: several refreshes in a row (an «Applica», a
+    #: regeneration ending) start ONE run. A bound on the burst, not a tuned value.
+    KICAD_CHECK_DELAY_MS = 400
+
+    #: Check codes that step 3 resolves itself and that therefore do not
+    #: decide it: whether and where the component is installed.
+    KICAD_CHECK_STEP3_CODES = frozenset({"kicad_library"})
+
+    #: Italian sources of why step 3 waits for the check, by check state.
+    KICAD_CHECK_WAIT_REASONS = {
+        "running": "Controllo del componente in corso: l'installazione si sblocca al termine.",
+        "none": "Prima controlla il componente (passo 1).",
+        "stale": "I file sono cambiati dopo l'ultimo controllo: va ripetuto (passo 1).",
+        "aborted": "Controllo interrotto: ripetilo (passo 1) per installare.",
+        "failed": "Il controllo non è riuscito a partire: usa «Controlla di nuovo» (passo 1).",
+        "blocking": "Il controllo ha trovato errori: correggili nel passo 1, poi il componente "
+                    "si potrà installare.",
+    }
+
+    def _kicad_files_fingerprint(self):
+        """@brief Identity of the files an installation would copy, as they are on disk now.
+
+        @return (project folder, name, ((size, mtime_ns) or None per file))
+            for the .kicad_mod, the .kicad_sym, the .step and the .wrl; None
+            without a component name.
+        @note The recorded installations are NOT part of it (review
+            2026-11-15, M2): an installation changes no file, and a new
+            fingerprint would switch the other installation off with a false
+            «files changed» until a full kicad-cli run ended. The library rows
+            are redone alone after an installation (`_refresh_library_rows`).
+        @note What the check certifies is what the installation copies: the
+            files. Any write of one of them (a regeneration, «Applica ai
+            file», a symbol re-export) changes its size or modification time
+            and makes the last check stale. Other state that matters -- an
+            applied symbol the file does not hold yet, an applied footprint
+            not yet written -- is already refused by the KiCad gate
+            (`_kicad_block_now`) before the check is even read.
+        """
+        name = self._component_name()
+        if not name:
+            return None
+        project = self._project_dir()
+        files = (project / f"{name}.pretty" / f"{name}.kicad_mod", project / f"{name}.kicad_sym",
+                 project / f"{name}.3dshapes" / f"{name}.step",
+                 project / f"{name}.3dshapes" / f"{name}.wrl")
+        stats = []
+        for path in files:
+            try:
+                status = path.stat()
+                stats.append((status.st_size, status.st_mtime_ns))
+            except OSError:
+                stats.append(None)
+        return (os.path.normcase(os.path.normpath(str(project))), name, tuple(stats))
+
+    def _kicad_check_state(self) -> str:
+        """@brief Where the component check stands for the files on disk now.
+
+        @return «running», «none» (no finished check of these files), «stale»
+            (the files changed after the check started), «aborted» (stopped by
+            the user), «failed» (the check itself could not run),
+            «blocking» (an error forbids the use), «inconclusive»
+            (some checks could not run), «warnings» (usable, with points to
+            review) or «ok» (every automatic check passed; the checks to do by
+            hand in KiCad may remain).
+        """
+        panel = getattr(self, "kicad_check_panel", None)
+        if panel is None:
+            return "none"
+        if panel.is_running():
+            return "running"
+        recorded = getattr(self, "_kicad_check_files", None)
+        if recorded is None or panel.verdict_key is None:
+            return "none"
+        if recorded != self._kicad_files_fingerprint():
+            return "stale"
+        if panel.aborted:
+            return "aborted"
+        if any(result.code == "check_failed" for result in panel.results):
+            # The check itself did not run (an internal failure, arguments that
+            # could not be built): nothing was verified, not even pin-pad, so
+            # nothing is offered on it (final verification 2026-11-15, 1).
+            return "failed"
+        # Without the rows about the KiCad library: «not installed yet» is
+        # what step 3 resolves, so it must not keep a sound component from
+        # «ok» (review 2026-11-15, M1). The manual checks (always listed: they
+        # are done in KiCad, after the installation) do not either.
+        verdict, _color, blocking = panel.verdict_of(
+            [result for result in panel.results if result.code not in self.KICAD_CHECK_STEP3_CODES])
+        if blocking:
+            return "blocking"
+        if verdict in ("PRONTO PER L’USO", "PRONTO PER LE PROVE"):
+            return "ok"
+        return "inconclusive" if verdict == "ESITO NON CONCLUSIVO" else "warnings"
+
+    def _check_install_reason(self) -> str:
+        """@brief Why the component check does not allow an installation now, or ''.
+
+        @return The translated reason while no check of the current files has
+            ended without errors; '' once one has (warnings included).
+        @note Applied to the installations only (`INSTALL_ACTION_ATTRS`), after
+            the metadata: the preview in KiCad and the check itself stay free.
+        """
+        source = self.KICAD_CHECK_WAIT_REASONS.get(self._kicad_check_state())
+        return self.i18n.text(source) if source else ""
+
+    def _refresh_install_advice(self, block: str, metadata_reason: str) -> None:
+        """@brief Write what step 3 offers now and highlight the recommended installation.
+
+        @param block The KiCad gate's reason ('' when open): work in progress,
+            pads kept blocked, an open footprint question, stale files.
+        @param metadata_reason The metadata block ('' when none).
+        @note One sentence, in the order things must be done: the gate, the
+            metadata, the check, then the advice of the check's verdict. The
+            recommended installation is the blue «primary» button only when
+            every automatic check passed.
+        """
+        label = getattr(self, "label_install_advice", None)
+        if label is None:
+            return
+        state = self._kicad_check_state()
+        panel = getattr(self, "kicad_check_panel", None)
+        if not self._kicad_output_complete():
+            text, color = self.i18n.text("Genera prima il footprint del componente corrente"), SUBTEXT
+        elif state == "running":
+            text, color = self._check_install_reason(), SUBTEXT
+        elif block:
+            # Short: the full reason and its remedy are in step 1, right
+            # above (the files' line), not repeated here.
+            text = self.i18n.text(
+                "Attendi la fine del lavoro in corso." if self._kicad_block_code() == "busy" else
+                "Non ancora: prima sistema i file del componente (il motivo è nel passo 1).")
+            color = YELLOW
+        elif metadata_reason:
+            text, color = metadata_reason, YELLOW
+        elif state in self.KICAD_CHECK_WAIT_REASONS:
+            text = self._check_install_reason()
+            color = RED if state == "blocking" else YELLOW
+        elif state == "ok":
+            library = [r for r in (panel.results if panel is not None else ())
+                       if r.code in self.KICAD_CHECK_STEP3_CODES]
+            if any(r.status == "WARN" and r.importance == 2 for r in library):
+                text = self.i18n.text("Pronto: la copia installata non corrisponde più al componente, "
+                                      "reinstallalo.")
+            elif library and all(r.status == "OK" for r in library):
+                text = self.i18n.text("Installato e aggiornato. Reinstalla solo dopo una modifica.")
+            elif any(r.status == "SKIP" for r in library):
+                text = self.i18n.text("Pronto: la copia già installata non si può confrontare con il "
+                                      "componente; reinstallalo se l'hai modificato.")
+            else:
+                text = self.i18n.text("Pronto: installa il componente nella libreria.")
+            color = GREEN
+        elif state == "inconclusive":
+            text = self.i18n.text("Alcuni controlli non sono stati eseguiti: puoi installare, ma il "
+                                  "risultato non è completo. Usa «Controlla di nuovo» nel passo 1.")
+            color = YELLOW
+        else:
+            missing = panel.missing_count() if panel is not None else 0
+            text = (self.i18n.text("Puoi installare: va bene per prove e prototipi. Prima della "
+                                   "produzione rivedi i punti del passo 1.") if missing else
+                    self.i18n.text("Puoi installare. Restano le verifiche da fare in KiCad "
+                                   "elencate nel passo 1."))
+            color = YELLOW
+        label.setText(text)
+        label.setStyleSheet(f"color: {color}; font-weight: bold;")
+        button = getattr(self, "btn_export", None)
+        if isinstance(button, QPushButton):
+            installed = state == "ok" and panel is not None and any(
+                r.code in self.KICAD_CHECK_STEP3_CODES for r in panel.results) and all(
+                r.status == "OK" for r in panel.results if r.code in self.KICAD_CHECK_STEP3_CODES)
+            # The recommended installation stands out only while it is the
+            # next thing to do: not once the library already holds this copy.
+            primary = state == "ok" and button.isEnabled() and not installed
+            if (button.objectName() == "primary") != primary:
+                button.setObjectName("primary" if primary else "")
+                # A changed object name does not restyle by itself.
+                button.style().unpolish(button)
+                button.style().polish(button)
+
+    def _show_kicad_check_idle(self) -> None:
+        """@brief Put the reason in step 1 when no valid outcome is on screen (none or stale)."""
+        panel = getattr(self, "kicad_check_panel", None)
+        if panel is None or panel.is_running():
+            return
+        state = self._kicad_check_state()
+        if state not in ("none", "stale"):
+            return
+        if not self._kicad_output_complete():
+            message = self.i18n.text("Il controllo partirà quando il componente avrà un footprint.")
+        elif (self._background_work_running() or self._automatic_generation_active
+              or self._kicad_block() is not None):
+            # Said in step 1 itself: why it does not start (the files' line
+            # above gives the reason and the remedy).
+            message = self.i18n.text("Controllo in attesa: parte da solo appena i file sono pronti.")
+        elif state == "stale":
+            message = self.i18n.text("I file sono cambiati: il controllo riparte…")
+        else:
+            message = self.i18n.text("Il controllo sta per partire…")
+        if panel.verdict_key is not None or panel.verdict.text() != message:
+            panel.show_idle(message)
+
+    def _schedule_kicad_check(self) -> None:
+        """@brief Start the automatic check soon if the KiCad tab shows files it has not checked."""
+        tabs = getattr(self, "tabs", None)
+        if tabs is None or tabs.currentIndex() != TAB_KICAD or getattr(self, "_window_closed", False):
+            return
+        if self._kicad_check_state() not in ("none", "stale"):
+            return
+        timer = getattr(self, "_kicad_check_timer", None)
+        if timer is None:
+            timer = self._kicad_check_timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._maybe_start_kicad_check)
+        timer.start(self.KICAD_CHECK_DELAY_MS)
+
+    def _maybe_start_kicad_check(self) -> None:
+        """@brief The automatic start: run the check when the files on screen are unchecked.
+
+        @note Quiet by design: nothing is asked and no message box opens. It
+            waits for any work in progress (its end refreshes the tab and
+            calls it again) and for the files to match the applied footprint;
+            in that case the reason stays in step 1 and step 3.
+        """
+        panel = getattr(self, "kicad_check_panel", None)
+        if panel is None or panel.is_running() or getattr(self, "_window_closed", False):
+            return
+        if self.tabs.currentIndex() != TAB_KICAD:
+            return
+        if self._kicad_check_state() not in ("none", "stale"):
+            return
+        if not self._kicad_output_complete():
+            return
+        if self._background_work_running() or self._automatic_generation_active:
+            return
+        # The KiCad gate covers the pending and stale footprint too
+        # (`_kicad_files_alignment_block`).
+        if self._kicad_block_now() is not None:
+            return
+        self._start_kicad_check()
+
+    def _kicad_check_actions(self) -> dict:
+        """@brief The fixes and views the check's rows can run, by action id."""
+        from ..services.component_check import (ACTION_ANSWER_CONTACT_NC, ACTION_EDIT_PINOUT,
+                                                ACTION_REEXPORT_SYMBOL, ACTION_SHOW_IN_KICAD)
+        return {ACTION_REEXPORT_SYMBOL: self._reexport_symbol_action,
+                ACTION_ANSWER_CONTACT_NC: self._answer_contact_nc_action,
+                ACTION_EDIT_PINOUT: self._edit_pinout_action,
+                ACTION_SHOW_IN_KICAD: self._show_check_in_kicad}
+
+    def _start_kicad_check(self, keep_status: bool = False) -> None:
+        """@brief Run the component check in step 1 with the window's arguments and actions.
+
+        @note A callable, not a dict: every run (this one, the re-run after a
+            fix) reads the window as it is THEN -- e.g. «Solo nome principale»
+            toggled in the Pinout table changes the applied symbol without
+            changing the pinout (review 2026-11-14).
+        """
+        self.kicad_check_panel.run(self._component_check_args, actions=self._kicad_check_actions(),
+                                   keep_status=keep_status)
+
+    def _on_kicad_check_started(self) -> None:
+        """@brief A run started (Qt slot): remember which files it reads and lock step 3."""
+        self._kicad_check_files = self._kicad_files_fingerprint()
+        self._refresh_kicad_command_gate()
+
+    def _on_kicad_check_finished(self) -> None:
+        """@brief A run ended (Qt slot): step 3 follows its verdict, a stale run starts again."""
+        self._show_kicad_check_idle()
+        self._refresh_kicad_command_gate()
+        self._schedule_kicad_check()
+
+    def _kicad_check_action_guard(self) -> str:
+        """@brief Why the check's rows must not act now ('' when they may).
+
+        @return The translated wait while work rewrites the component's files
+            (a generation, a STEP rebuild, an analysis): the panel is not modal,
+            so its «Riesporta il simbolo» or «Mostra in KiCad» could otherwise
+            write or copy half-written files (review 2026-11-15, M2).
+        """
+        return self.i18n.text("Attendi la fine del lavoro in corso.") if self._kicad_work_busy() else ""
+
+    def _refresh_library_rows(self) -> None:
+        """@brief Redo the check's rows about the KiCad libraries alone, after an installation.
+
+        @note No kicad-cli: `component_check.library_checks` compares the
+            installed copies with what an installation writes now. The rest of
+            the outcome still describes the same files, so no full run starts
+            and the other installation stays available (review 2026-11-15, M2).
+        """
+        panel = getattr(self, "kicad_check_panel", None)
+        name = self._component_name()
+        if panel is None or panel.is_running() or panel.verdict_key is None or not name:
+            return
+        from ..services.component_check import library_checks
+        project = self._project_dir()
+        try:
+            text = (project / f"{name}.pretty" / f"{name}.kicad_mod").read_text(encoding="utf-8-sig")
+            step = project / f"{name}.3dshapes" / f"{name}.step"
+            rows = library_checks(name, text, self._resolved_kicad_installs(), step,
+                                  self._kicad_model_offset(),
+                                  symbol_path=project / f"{name}.kicad_sym")
+        except (OSError, ValueError, RuntimeError):
+            # Informational only, after an installation that succeeded: the
+            # next full check says it (final verification 2026-11-15, 6).
+            return
+        panel.replace_checks("kicad_library", rows)
+        self._refresh_kicad_command_gate()
+
+    def _verify_component(self, keep_status: bool = False):
+        """@brief «Controlla di nuovo» (and any explicit request): run the component check in step 1.
+
+        @param keep_status True keeps the panel's line under the rows (the
+            re-run after a fix says why it runs).
+        @return True when the check started, False when it was refused.
+
+        @note Refused while work runs, with a message (an explicit request is
+            answered, unlike the quiet automatic start).
         @note CONTRACT CHANGED (review 2026-11-09, L3): refused, with the
             gate's own reason and remedy, while the .kicad_mod on disk does
             not match the applied footprint (`_footprint_pending_block`,
@@ -17039,42 +17752,25 @@ class MainWindow(QMainWindow):
             model with the APPLIED anchor's offset, which only fits a file
             written with that anchor. A stale symbol or STEP does not refuse
             the check (the check itself reports them).
+        @note CONTRACT CHANGED 2026-11-15 (guided KiCad tab): the check runs
+            in step 1 of the KiCad tab, no longer in a modal window; the tab
+            is shown so the outcome is seen where it decides the installation.
         """
-        from .component_check_dialog import ComponentCheckDialog
         if self._background_work_running() or self._automatic_generation_active:
-            QMessageBox.information(self, self.i18n.text('Verifica componente per KiCad'),
+            QMessageBox.information(self, self.i18n.text('Controllo del componente'),
                                     self.i18n.text('Attendi la fine del lavoro in corso.'))
-            return
+            return False
         stale = self._footprint_pending_block() or self._footprint_alignment_block()
         if stale is not None:
             self._append_log(stale[1])
-            QMessageBox.warning(self, self.i18n.text('Verifica componente per KiCad'), stale[1])
-            return
-        from ..services.component_check import (ACTION_ANSWER_CONTACT_NC, ACTION_EDIT_PINOUT,
-                                                ACTION_REEXPORT_SYMBOL, ACTION_SHOW_IN_KICAD)
-        # A callable, not a dict: every run (the first, «Ripeti la verifica»,
-        # the re-run after a fix) reads the window as it is THEN -- e.g. «Solo
-        # nome principale» toggled in the Pinout table changes the applied
-        # symbol without changing the pinout (review 2026-11-14).
-        dialog = ComponentCheckDialog(
-            self._component_check_args, self, tx=self.i18n.text,
-            actions={ACTION_REEXPORT_SYMBOL: self._reexport_symbol_action,
-                     ACTION_ANSWER_CONTACT_NC: self._answer_contact_nc_action,
-                     ACTION_EDIT_PINOUT: self._edit_pinout_action,
-                     ACTION_SHOW_IN_KICAD: self._show_check_in_kicad})
-        self._component_review_dialog = dialog
-        # The open dialog counts as work in progress (`_background_work_running`):
-        # the KiCad commands follow it on opening and on closing (review pass 2, L6).
-        self._refresh_kicad_command_gate()
-        try:
-            self._run_modal(dialog)
-        finally:
-            self._component_review_dialog = None
-            self._refresh_kicad_command_gate()
-            self._retry_footprint_rewrite()
-        self._route_check_handoff(getattr(dialog, "handoff", None)
-                                  or ("suggest_pin_types"
-                                      if getattr(dialog, "ai_review_requested", False) else None))
+            QMessageBox.warning(self, self.i18n.text('Controllo del componente'), stale[1])
+            return False
+        if self.kicad_check_panel.is_running():
+            return False
+        if self.tabs.currentIndex() != TAB_KICAD and self.tabs.isTabEnabled(TAB_KICAD):
+            self.tabs.setCurrentIndex(TAB_KICAD)
+        self._start_kicad_check(keep_status=keep_status)
+        return True
 
     def _record_kicad_install(self, scope: str, footprint_path) -> None:
         """@brief Remember the library a successful installation wrote, for the component check.
@@ -17107,11 +17803,13 @@ class MainWindow(QMainWindow):
                                 if entry.get("scope") != scope]
         self._kicad_installs.append({"scope": scope, "pretty_dir": text})
         self._save_project_config()
+        # The check's «installed?» rows follow, alone (no full run).
+        self._refresh_library_rows()
 
     def _route_check_handoff(self, handoff) -> None:
-        """@brief Carry out what the closed check dialog handed to the window.
+        """@brief Carry out what the check panel handed to the window (`handoff_requested`).
 
-        @param handoff The dialog's `handoff`: «suggest_pin_types» (Symbol tab,
+        @param handoff The panel's hand-off: «suggest_pin_types» (Symbol tab,
             then the AI suggestion of the electrical types), «open_symbol_tab»
             (review the types by hand), «open_kicad_tab» (reinstall a library);
             None or anything else does nothing.
@@ -17142,10 +17840,11 @@ class MainWindow(QMainWindow):
         """
         if not self._kicad_output_complete():
             raise RuntimeError(self.i18n.text("Nessun footprint da mostrare: genera prima il componente."))
-        block = self._kicad_block_now(ignore_busy=True)
+        block = self._kicad_block_now()
         if block is not None:
-            # The same gate as «Prova in KiCad», minus «busy» (the dialog
-            # itself): its text names the reason and the remedy.
+            # The same gate as «Prova in KiCad», «busy» included: the check
+            # is a panel now, not a modal window counted as work (review
+            # 2026-11-15, L1). Its text names the reason and the remedy.
             raise RuntimeError(block[1])
         artifacts = self._current_kicad_artifacts()
         if artifacts is None:
@@ -17545,68 +18244,35 @@ class MainWindow(QMainWindow):
             layout.addStretch()
             wizard.addPage(page)
 
+        # Three pages since the installation brings the symbol too (user,
+        # 2026-11-15, «opzione 1»): the old pages «register the symbol» and
+        # «link symbol and footprint» were manual steps that no longer exist.
         add_page(
-            "1. Installa la libreria del componente",
-            "La libreria di progetto è consigliata se il componente serve solo in questo progetto. "
-            "La libreria globale è disponibile in tutti i progetti di questo computer. "
-            "L’installazione registra in KiCad il footprint e, se c’è, il modello STEP.",
+            "1. Installa il componente",
+            "Nel progetto KiCad (consigliato) il componente viaggia con il progetto; come "
+            "libreria globale è disponibile in tutti i progetti di questo computer. "
+            "L’installazione mette in KiCad il simbolo, il footprint e, se c’è, il modello "
+            "STEP, già collegati fra loro.",
             (("Installa nel progetto KiCad…", self._install_project_library),
              ("Installa come libreria globale…", self._install_global_library)),
         )
         add_page(
-            "2. Posiziona il footprint sul PCB",
+            "2. Aggiungi il simbolo allo schema",
             self.i18n.text(
-                "Apri il PCB Editor del progetto. Scegli Posiziona > Aggiungi footprint, "
-                "cerca KiCadGen:{name} e posiziona il componente. Se non compare, verifica "
-                "di aver installato la libreria nel progetto giusto.").format(
-                    name=self._component_name()),
-        )
-        # Review 2026-10-27, B7: the symbol is written automatically beside
-        # the footprint, so the page names that file; the button calls the
-        # export itself (clicking a disabled toolbar button did nothing) and
-        # says why when the export cannot run.
-        add_page(
-            "3. Registra il simbolo elettrico",
-            self.i18n.text(
-                "Il simbolo elettrico è già scritto nella cartella del componente, nel file "
-                "{name}.kicad_sym. In KiCad apri Gestisci librerie di simboli e aggiungi quel "
-                "file alla tabella del progetto o a quella globale. Per salvarne una copia "
-                "altrove usa «Esporta simbolo KiCad…».").format(name=self._component_name()),
-            (("Esporta simbolo KiCad…", self._export_symbol_from_wizard),),
+                "Apri l’Editor di schemi del progetto. Scegli Posiziona > Aggiungi simbolo "
+                "(tasto A), cerca KiCadGen:{name} e posizionalo. Il simbolo ha già il footprint "
+                "KiCadGen:{name}: non serve collegarli a mano. Se non compare, chiudi e riapri "
+                "il progetto in KiCad.").format(name=self._component_name()),
         )
         add_page(
-            "4. Collega simbolo e footprint",
-            self.i18n.text(
-                "Nello Schematic Editor aggiungi il simbolo dalla libreria registrata. "
-                "Apri le proprietà del simbolo e imposta Footprint su KiCadGen:{name}. "
-                "Salva lo schema.").format(name=self._component_name()),
-        )
-        add_page(
-            "5. Aggiorna e verifica il PCB",
-            "Nel PCB Editor aggiorna la scheda dallo schema con F8, controlla le "
-            "connessioni e apri la vista 3D con Alt+3 per verificare il modello. "
-            "La scheda KiCadGen conserva lo storico delle esportazioni effettuate da questo tool.",
+            "3. Aggiorna e verifica il PCB",
+            "Nel PCB Editor aggiorna la scheda dallo schema con F8: il footprint arriva già "
+            "collegato. Controlla le connessioni e apri la vista 3D con Alt+3 per verificare "
+            "il modello. La scheda Esportazioni conserva lo storico delle installazioni fatte "
+            "da questo computer.",
         )
         self.i18n.retranslate_widgets(wizard)
         self._run_modal(wizard)
-
-    def _export_symbol_from_wizard(self) -> None:
-        """@brief «Esporta simbolo KiCad…» of the usage wizard: export, or say why not.
-
-        @note `_export_electrical_symbol` reports a refusal (unapplied edits,
-            rows not matching the pads) in the status line of the Symbol tab,
-            which the modal wizard hides: here the same reason is shown in a
-            message box, so the click is never silent (review 2026-10-27, B7).
-        """
-        if self.symbol_tab.has_pending_edits():
-            reason = self.i18n.text(
-                "Il simbolo ha modifiche non applicate: applicale o annullale nella scheda Simbolo.")
-        else:
-            reason = self._symbol_pad_mismatch()
-        if reason:
-            QMessageBox.information(self, self.i18n.text("Esporta simbolo KiCad"), reason)
-            return
-        self._export_electrical_symbol()
 
     @staticmethod
     def _note_with_icons(note, *buttons) -> QHBoxLayout:
@@ -17649,11 +18315,40 @@ class MainWindow(QMainWindow):
             return None
 
     def _kicad_error_text(self, error: Exception) -> str:
-        """@brief Translate expected KiCad workflow failures for display."""
+        """@brief Translate expected KiCad workflow failures for display.
+
+        @note A table error of the symbol table (context ``kind`` «symbol»,
+            since the installation brings the symbol too, user 2026-11-15)
+            uses the ``…_symbol`` wording of its code: the plain text names
+            the footprint table and footprints.
+        """
         if isinstance(error, KiCadLibraryError):
             return self.i18n.tr(
-                f"kicad.error.{error.code}", **error.context)
+                self._kicad_table_key(f"kicad.error.{error.code}", error.context), **error.context)
         return self.i18n.tr("kicad.error.unexpected", error=error)
+
+    #: Message keys that have a «…_symbol» twin for the symbol table.
+    KICAD_SYMBOL_TABLE_KEYS = frozenset({
+        "kicad.error.global_table_missing", "kicad.error.invalid_table",
+        "kicad.error.duplicate_library_entry", "kicad.error.library_entry_conflict",
+        "kicad.error.library_entry_disabled", "kicad.confirm_replace_library_entry",
+        "kicad.confirm_replace_library_entry_type", "kicad.confirm_enable_library_entry",
+        "kicad.confirm_enable_library_entry_type", "kicad.plan_shadowing_global",
+        "kicad.plan_shadowing_project",
+    })
+
+    def _kicad_table_key(self, key: str, context) -> str:
+        """@brief The symbol-table twin of a table message key when the context says «symbol».
+
+        @param key Message key worded for the footprint table.
+        @param context Error context (or {}) with an optional ``kind``.
+        @return ``key + "_symbol"`` for a symbol-table error of a key in
+            `KICAD_SYMBOL_TABLE_KEYS`; `key` otherwise.
+        """
+        kind = (context or {}).get("kind") if isinstance(context, dict) else None
+        if kind == "symbol" and key in self.KICAD_SYMBOL_TABLE_KEYS:
+            return key + "_symbol"
+        return key
 
     def _kicad_outputs_went_missing(self) -> None:
         """@brief Say what is missing and realign the KiCad tab (audit 2026-09-25).
@@ -17764,6 +18459,23 @@ class MainWindow(QMainWindow):
                              "ripeti «Prova in KiCad» per aggiornarlo. La scheda è aggiornata."),
         "eeschema_missing": "Editor di schemi non trovato: aperta solo la scheda.",
         "eeschema_launch_failed": "Impossibile avviare l'Editor di schemi: aperta solo la scheda.",
+    }
+    #: Italian source of the report line of each reason an installation shipped
+    #: no symbol (`kicad_library.INSTALL_SYMBOL_SKIP_REASONS`).
+    INSTALL_SYMBOL_SKIP_TEXTS = {
+        # «Applica» of the Symbol tab rewrites <name>.kicad_sym: the remedy
+        # of the first three reasons.
+        "symbol_missing": ("Simbolo non installato: il componente non ha ancora il file del "
+                           "simbolo. Premi «Applica» nella scheda «Simbolo elettrico» e installa "
+                           "di nuovo."),
+        "symbol_unreadable": ("Simbolo non installato: il file del simbolo del componente non si "
+                              "legge. Premi «Applica» nella scheda «Simbolo elettrico» e installa "
+                              "di nuovo."),
+        "symbol_not_found": ("Simbolo non installato: il file del simbolo non contiene il simbolo "
+                             "del componente. Premi «Applica» nella scheda «Simbolo elettrico» e "
+                             "installa di nuovo."),
+        "symbol_derived": ("Simbolo non installato: il simbolo deriva da un altro simbolo, che "
+                           "non viene installato con lui."),
     }
     #: Italian source of the log line of each reason the 3D image was not made
     #: (`kicad_library.PreviewRender.reason`).
@@ -18026,11 +18738,15 @@ class MainWindow(QMainWindow):
             # The other scope's table could not be read: not a blocker, said in the log (D6).
             self._append_log(self.i18n.tr("kicad.plan_shadowing_unreadable", error=plan.shadowing_error))
         questions = []
-        shadowing = getattr(plan, "shadowing", None)
-        if shadowing is not None:
-            key = "kicad.plan_shadowing_global" if project_library else "kicad.plan_shadowing_project"
-            questions.append(("Libreria KiCadGen già registrata", self.i18n.tr(
-                key, table=str(shadowing.table_path), library=shadowing.library, uri=shadowing.uri)))
+        key = "kicad.plan_shadowing_global" if project_library else "kicad.plan_shadowing_project"
+        # The footprint row, then the symbol row (installed too since
+        # 2026-11-15): each clash is its own question, worded for its table.
+        for shadowing, context in ((getattr(plan, "shadowing", None), {}),
+                                   (getattr(plan, "symbol_shadowing", None), {"kind": "symbol"})):
+            if shadowing is not None:
+                questions.append(("Libreria KiCadGen già registrata", self.i18n.tr(
+                    self._kicad_table_key(key, context), table=str(shadowing.table_path),
+                    library=shadowing.library, uri=shadowing.uri)))
         if getattr(plan, "detected_kicad_too_old", False):
             questions.append(("Versione KiCad", self.i18n.tr(
                 "kicad.plan_detected_kicad_old", version=plan.detected_kicad_version,
@@ -18099,9 +18815,22 @@ class MainWindow(QMainWindow):
                 self, self.i18n.text("Installazione KiCad non riuscita"),
                 self._kicad_error_text(exc))
             return
+        if (not project_library and getattr(plan, "with_symbol", False)
+                and not getattr(plan, "symbol_table_exists", True)):
+            # KiCad never created its global sym-lib-table: refused BEFORE the
+            # global question, not after a «yes» (review 2026-11-15, M2).
+            QMessageBox.warning(
+                self, self.i18n.text("Installazione KiCad non riuscita"),
+                self.i18n.tr("kicad.error.global_table_missing_symbol",
+                             path=str(plan.symbol_table_path)))
+            return
         if not self._confirm_install_plan_warnings(plan, project_library):
             return
-        overwrite = bool(plan.replaced or plan.removed)
+        # A symbol of the same name in the shared library is replaced: asked
+        # like an overwritten file (installation with symbol, 2026-11-15).
+        symbol_replaced = bool(getattr(plan, "with_symbol", False)
+                               and getattr(plan, "symbol_replaced", False))
+        overwrite = bool(plan.replaced or plan.removed or symbol_replaced)
         if overwrite or not project_library:
             answer = QMessageBox.question(
                 self, self.i18n.text(
@@ -18113,11 +18842,20 @@ class MainWindow(QMainWindow):
             if answer != QMessageBox.StandardButton.Yes:
                 return
         replace_entry = False
+        #: The symbol table's own confirmation (never implied by the footprint's).
+        replace_symbol_entry = False
         while True:
             # INVARIANT (B3): nothing is copied unless the gate holds NOW,
             # after the questions above (and the entry-conflict one below)
             # gave the event loop a chance to rewrite the files.
             if self._refuse_kicad_command():
+                return
+            # The component check too (review 2026-11-15, M1): a file rewritten
+            # during the questions makes the outcome stale.
+            check_reason = self._check_install_reason()
+            if check_reason:
+                self._append_log(check_reason)
+                QMessageBox.warning(self, self.i18n.text("Controllo del componente"), check_reason)
                 return
             # Defence in depth (review 2026-11-09, L1): the model offset is
             # read again together with the gate, after the modal questions,
@@ -18136,6 +18874,7 @@ class MainWindow(QMainWindow):
                     project_library=project_library, table_path=table_path,
                     overwrite=overwrite, replace_library_entry=replace_entry,
                     kicad_version=table_version,
+                    replace_symbol_library_entry=replace_symbol_entry,
                 )
                 break
             except KiCadLibraryError as exc:
@@ -18148,23 +18887,31 @@ class MainWindow(QMainWindow):
                 # that confirming re-enables it, and the retry with
                 # `replace_library_entry=True` does so.
                 code = getattr(exc, "code", None)
-                if code in ("library_entry_conflict", "library_entry_disabled") and not replace_entry:
+                context = dict(getattr(exc, "context", {}) or {})
+                # Which table the row belongs to (the symbol table since
+                # 2026-11-15): each has its own confirmation, asked once.
+                symbol_row = context.get("kind") == "symbol"
+                already = replace_symbol_entry if symbol_row else replace_entry
+                if code in ("library_entry_conflict", "library_entry_disabled") and not already:
                     question = ("kicad.confirm_enable_library_entry"
                                 if code == "library_entry_disabled"
                                 else "kicad.confirm_replace_library_entry")
-                    if (getattr(exc, "context", None) or {}).get("type_changes"):
+                    if context.get("type_changes"):
                         # The row's type becomes «KiCad» and its options are
                         # cleared: the question says so (review 2026-11-03).
                         question += "_type"
                     answer = QMessageBox.question(
                         self, self.i18n.text("Libreria KiCadGen già registrata"),
-                        self.i18n.tr(question, **dict(getattr(exc, "context", {}) or {})),
+                        self.i18n.tr(self._kicad_table_key(question, context), **context),
                         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                         QMessageBox.StandardButton.No,
                     )
                     if answer != QMessageBox.StandardButton.Yes:
                         return
-                    replace_entry = True
+                    if symbol_row:
+                        replace_symbol_entry = True
+                    else:
+                        replace_entry = True
                     continue
                 QMessageBox.warning(
                     self, self.i18n.text("Installazione KiCad non riuscita"),
@@ -18178,6 +18925,24 @@ class MainWindow(QMainWindow):
         message = self.i18n.tr(
             "kicad.install_complete", identifier=result.identifier,
             footprint=result.footprint_path, table=result.table_path)
+        symbol_library = getattr(result, "symbol_library_path", None)
+        if symbol_library is not None:
+            # The symbol installed with the footprint (user, 2026-11-15): its
+            # lines go right under the footprint's, before the advice paragraph
+            # that every language of «kicad.install_complete» opens with a
+            # blank line.
+            head, blank, advice = message.partition("\n\n")
+            message = head + "\n" + self.i18n.tr(
+                "kicad.result_symbol", library=symbol_library,
+                table=getattr(result, "symbol_table_path", "") or "") + blank + advice
+        elif getattr(result, "symbol_skipped", None):
+            message += "\n\n" + self.i18n.text(self.INSTALL_SYMBOL_SKIP_TEXTS.get(
+                result.symbol_skipped, self.INSTALL_SYMBOL_SKIP_TEXTS["symbol_unreadable"]))
+            if getattr(result, "symbol_left_stale", False):
+                # An earlier install's symbol stays: it may not match the new pads.
+                message += " " + self.i18n.text(
+                    "Nella libreria resta il simbolo installato prima, che potrebbe non "
+                    "corrispondere più al footprint.")
         if getattr(result, "step_path", True) is None:
             # Delivery without STEP (user decision A, 2026-11-12): the report says so.
             message += "\n\n" + self.i18n.text(
@@ -18228,9 +18993,20 @@ class MainWindow(QMainWindow):
             sections.append(self.i18n.tr(
                 "kicad.plan_global_table", table=plan.table_path,
                 version=table_version or "?"))
+            if getattr(plan, "with_symbol", False):
+                # The global SYMBOL table is changed too: named before the
+                # write, like the footprint table (review 2026-11-15, M2).
+                sections.append(self.i18n.tr(
+                    "kicad.plan_global_symbol_table", table=plan.symbol_table_path,
+                    version=table_version or "?"))
         if plan.replaced:
             sections.append(self.i18n.tr(
                 "kicad.plan_replaced", files="\n".join(map(str, plan.replaced))))
+        if getattr(plan, "with_symbol", False) and getattr(plan, "symbol_replaced", False):
+            # Only the symbol of this name is replaced; the library's others stay.
+            sections.append(self.i18n.tr(
+                "kicad.plan_symbol_replaced", library=plan.symbol_library_path,
+                symbol=self._component_name()))
         if plan.removed:
             sections.append(self.i18n.tr(
                 "kicad.plan_removed", files="\n".join(map(str, plan.removed))))
@@ -19955,6 +20731,8 @@ class MainWindow(QMainWindow):
             self.menuBar().setEnabled(False)
             self.btn_extract_ai.setEnabled(False)
             self._clear_cost_for_generation()
+            # The automatic generation closes the analysis: its time counts.
+            self._next_operation_counts = True
             self.analysis_overlay.start('Generazione footprint e modello STEP',
                                         'Preparazione della generazione…', abortable=True)
             self._show_generation_steps(params, body, self._is_single_component_project())
@@ -27563,6 +28341,9 @@ class MainWindow(QMainWindow):
         if not self._ensure_api_key("pin_types"):
             return
         snapshot = self.symbol_tab.draft_rows()
+        # Edits made by hand and not applied yet: the ✓ must not apply them
+        # behind the user's back (user decision «A», 2026-11-15).
+        had_pending = self.symbol_tab.has_pending_edits()
         # The profile's pin-type prompt (step P2); None when the profile
         # cannot be read, which sends the default.
         pin_prompt = (self._profile_prompt_texts() or {}).get('pin_type_prompt')
@@ -27591,10 +28372,36 @@ class MainWindow(QMainWindow):
         try:
             if self._run_modal(dialog) == QDialog.DialogCode.Accepted and snapshot == self.symbol_tab.draft_rows():
                 self.symbol_tab.use_pin_type_suggestions(dialog.selected())
+                self._save_pin_type_choice(had_pending)
         finally:
             self._component_review_dialog = None
             self._refresh_kicad_command_gate()
             self._retry_footprint_rewrite()
+
+    def _save_pin_type_choice(self, had_pending: bool) -> None:
+        """@brief Save the electrical types just chosen in the AI window, or say how to.
+
+        @param had_pending True when the symbol draft already held edits not
+            applied before the window opened.
+        @note User decision «A» (2026-11-15): the window's ✓ is the user's
+            confirmation, so the types are applied at once, exactly as
+            «Applica» of the Symbol tab would (the choice used to stay in the
+            draft and looked lost: «sembra che non lo salvi»). When other edits
+            made by hand were waiting, applying would publish them too, behind
+            the user's back: the Symbol tab is shown instead, with a line that
+            says what «Applica» will save.
+        """
+        if not had_pending and self.symbol_tab.has_pending_edits():
+            self.symbol_tab.apply()
+            if not self.symbol_tab.has_pending_edits():
+                self.symbol_tab.set_status(self.i18n.text(
+                    "Tipi elettrici salvati nel simbolo."))
+                return
+        if self.symbol_tab.has_pending_edits():
+            self.tabs.setCurrentIndex(TAB_SYMBOL)
+            self.symbol_tab.set_status(self.i18n.text(
+                "Tipi elettrici messi nella bozza insieme alle altre modifiche non applicate: "
+                "premi «Applica» per salvarli nel simbolo."))
 
     def _symbol_pad_ids(self):
         """Electrical identities come from the actual footprint, never row indices.
@@ -28369,6 +29176,36 @@ class MainWindow(QMainWindow):
         self._apply_icon_tooltip(button, self.i18n.text(title), self.i18n.text(detail))
         return button
 
+    def _step_button(self, asset: str, label: str, title: str, detail: str) -> QPushButton:
+        """@brief A command of the KiCad tab's guided steps: its icon AND its name as text.
+
+        @param asset SVG file in `gui/assets`.
+        @param label Italian source of the text on the button.
+        @param title Italian source of the command name (tooltip first line,
+            accessible name), as for `_workflow_tool_button`; the KiCad tab
+            passes the visible text, so a voice command saying what it reads
+            finds the button (label in name).
+        @param detail Italian source of the explanation, or of the reason
+            while it is disabled (`_set_workflow_detail`).
+        @return The QPushButton, refreshed like the icon-only commands
+            (`_refresh_workflow_tooltips`), its text included.
+        @note Text, not an icon alone (user, 2026-11-15: the icon-only row of
+            the KiCad tab «non si capisce un tubo», could not be understood):
+            the steps' commands are the ones a newcomer must find at once.
+        """
+        button = QPushButton(self._asset_icon(asset), self.i18n.text(label))
+        button.setIconSize(QSize(20, 20))
+        button.setAutoDefault(False)
+        button.setProperty("i18n_skip", True)
+        button.setProperty("workflow_icon", asset)
+        button.setProperty("workflow_label_source", label)
+        button.setProperty("workflow_idle_title_source", title)
+        button.setProperty("workflow_title_source", title)
+        button.setProperty("workflow_detail_source", detail)
+        self._workflow_buttons.append(button)
+        self._apply_icon_tooltip(button, self.i18n.text(title), self.i18n.text(detail))
+        return button
+
     @staticmethod
     def _apply_icon_tooltip(button, title: str, detail: str) -> None:
         """@brief Put a command's name and explanation on an icon-only button.
@@ -28397,6 +29234,10 @@ class MainWindow(QMainWindow):
                 button,
                 self.i18n.text(button.property("workflow_title_source") or ""),
                 self.i18n.text(button.property("workflow_detail_source") or ""))
+            label = button.property("workflow_label_source")
+            if label:
+                # A step command of the KiCad tab shows its name as text.
+                button.setText(self.i18n.text(label))
         for mirror, source in self._project_action_mirrors:
             self._apply_icon_tooltip(mirror, source.text(), source.toolTip())
 
@@ -32003,6 +32844,10 @@ class MainWindow(QMainWindow):
             self._refresh_symbol_tab()
         elif index == TAB_MODEL_3D:
             self._enter_3d_tab()
+        elif index == TAB_KICAD:
+            # Guided KiCad tab (2026-11-15): unchecked files start the check.
+            self._show_kicad_check_idle()
+            self._schedule_kicad_check()
 
     # ── Entering the 3D tab: loading with an indicator ─────────────
 

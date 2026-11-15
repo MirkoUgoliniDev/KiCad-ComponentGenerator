@@ -894,28 +894,56 @@ def test_the_2d_pinout_command_is_the_same_icon_as_the_3d_one(window):  # noqa: 
 
 
 def test_the_kicad_tab_commands_are_icons_and_the_status_sits_in_a_group(window):  # noqa: F811
-    """@brief Utente, 2026-09-24: icone con testo nel tooltip, e la riga in fondo in un riquadro.
+    """@brief The KiCad tab is a guided path: three numbered steps whose commands say their name.
 
-    Positivo: i quattro comandi sono icone senza testo; il nome e' la prima
-    riga del tooltip e il nome accessibile; da spenti il tooltip dice perche'.
-    Lo stato resta TESTO leggibile, dentro un QGroupBox. Negativo: nessun
-    QPushButton rimasto nella scheda.
+    CONTRACT CHANGED 2026-11-15 (user: «non si capisce un tubo», «prima il
+    controllo e poi la proposta»): the step commands are buttons with their
+    icon AND their name as text -- the icon-only row of 2026-09-24 could only
+    be read by hovering. The name is still the first tooltip line and the
+    accessible name; disabled, the tooltip says why. The steps come in the
+    order they are done: check, look in KiCad, install.
+    CONTRACT CHANGED again 2026-11-15 (user: «questi 2 blocchi non diventano
+    uno solo?», «opzione 1»): the files the installation copies are listed
+    INSIDE step 3, and every command of the tab says its name -- the folder
+    and the per-file remedies too, which stayed icons before. Negative: no
+    «Esporta simbolo KiCad…» in the tab (the installation brings the symbol).
     """
-    from PyQt6.QtWidgets import QGroupBox, QPushButton
-    tab = window.tabs.widget(gui.TAB_KICAD)
-    commands = {window.btn_test_kicad: "Prova in KiCad...",
-                window.btn_export: "Installa nel progetto KiCad...",
-                window.btn_install_global: "Installa come libreria globale...",
-                window.btn_open_output: "Apri cartella componente"}
+    from PyQt6.QtWidgets import QAbstractButton, QGroupBox
+    # The accessible name is the visible text (label in name, review 2026-11-15 L6).
+    commands = {window.btn_test_kicad: ("Apri in KiCad", "Apri in KiCad"),
+                window.btn_export: ("Installa nel progetto KiCad (consigliato)",
+                                    "Installa nel progetto KiCad (consigliato)"),
+                window.btn_install_global: ("Installa come libreria globale",
+                                            "Installa come libreria globale")}
     window._refresh_output_actions()
-    for button, name in commands.items():
-        assert button.text() == "" and not button.icon().isNull()
+    for button, (text, name) in commands.items():
+        assert button.text() == text and not button.icon().isNull()
         assert button.toolTip().splitlines()[0] == name
         assert button.accessibleName() == name
         assert not button.isEnabled() and "Genera prima" in button.toolTip()
-    assert not tab.findChildren(QPushButton)
-    group = window.label_kicad_status.parentWidget()
-    assert isinstance(group, QGroupBox) and group.isAncestorOf(window.btn_open_output)
+    for button, text in ((window.btn_open_output, "Apri cartella componente"),
+                         (window.btn_update_symbol_file, "Aggiorna il file del simbolo"),
+                         (window.btn_remove_obsolete_model, "Rimuovi il modello STEP obsoleto")):
+        assert button.text() == text and not button.icon().isNull()
+    page = window.tabs.widget(window.KICAD_TAB_INDEX)
+    assert not hasattr(window, "btn_export_symbol")
+    assert not any("Esporta simbolo" in button.text()
+                   for button in page.findChildren(QAbstractButton))
+    groups = [window.label_kicad_status, window.btn_test_kicad, window.btn_export]
+    boxes = []
+    for widget in groups:
+        box = widget.parentWidget()
+        while not isinstance(box, QGroupBox):
+            box = box.parentWidget()
+        boxes.append(box)
+    assert [box.title() for box in boxes] == ["1 · Controllo del componente",
+                                              "2 · Guarda in KiCad (facoltativo)",
+                                              "3 · Installa nella libreria"]
+    assert boxes[0].isAncestorOf(window.kicad_check_panel)
+    assert [box.y() for box in boxes] == sorted(box.y() for box in boxes)
+    # The files and the folder live in step 3, not in a box of their own.
+    assert boxes[2].isAncestorOf(window.label_kicad_footprint)
+    assert boxes[2].isAncestorOf(window.btn_open_output)
     assert window.label_kicad_status.text()
 
 

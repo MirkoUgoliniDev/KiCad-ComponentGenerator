@@ -400,8 +400,8 @@ Datei <code>.kicad_mod</code>, <span class="ui">Abbrechen</span> verwirft die ni
 übernommenen Änderungen, <span class="ui">Entwurf wiederherstellen</span> stellt einen nicht
 übernommenen Entwurf nach einem unerwarteten Schließen wieder her. Die Befehle der Registerkarte
 <span class="ui">KiCad</span> verwenden die übernommene Datei: Ein nicht übernommener Entwurf wird nicht
-installiert, und <span class="ui">Bauteil für KiCad prüfen</span> meldet
-ihn.</p>
+installiert, und die Bauteilprüfung (Registerkarte <span class="ui">KiCad</span>,
+Schritt 1) meldet ihn.</p>
 <p>Im Footprint eines Gehäuses sind die beiden Körperseiten <strong>bearbeitbare
 Maße</strong>: Ein Doppelklick auf das Maß, oder ein Rechtsklick und
 <span class="ui">Maß bearbeiten…</span>, fragt den neuen Wert ab; der Körper bleibt
@@ -492,12 +492,10 @@ Verhalten der Schaltung. Prüfen Sie im Datenblatt, ob input, output,
 bidirectional, power_in oder andere Typen nötig sind, bevor Sie die elektrischen Prüfungen von
 KiCad verwenden. Gleiche Namen wie GND können zu verschiedenen Nummern gehören; doppelte
 oder im Footprint fehlende Nummern verhindern den Export.</p>
-<p><strong>KiCad-Symbol exportieren</strong> speichert eine Bibliothek <code>.kicad_sym</code>.
-Fügen Sie sie in KiCad den Symbolbibliotheken hinzu. Der Verweis auf den Footprint ist
-<code>KiCadGen:nome_componente</code>: Verwenden Sie denselben Bibliotheksnamen, wenn Sie
-den Footprint installieren, oder ändern Sie die Zuordnung in KiCad. Die Installation
-in der Registerkarte „KiCad“ verwaltet weiterhin Footprint und STEP-Modell; die
-Symbolbibliothek wird separat exportiert.</p>
+<p>Die Installationen der Registerkarte „KiCad“ bringen auch das Symbol nach KiCad,
+bereits mit dem Footprint <code>KiCadGen:nome_componente</code> verknüpft: Ein Export
+ist nicht nötig. <strong>KiCad-Symbol exportieren</strong> speichert trotzdem eine Kopie
+des Symbols in einer <code>.kicad_sym</code>-Datei Ihrer Wahl, um sie anderswo zu verwenden.</p>
 <p>Tastenkürzel: Strg+3 öffnet das Symbol, Strg+4 das STEP-Modell, Strg+5 KiCad.</p>
 <h3>Von der KI vorgeschlagene elektrische Typen</h3>
 <p>In der Registerkarte <span class="ui">Schaltplansymbol</span> verwendet <span class="ui">Pin-Typen mit KI vorschlagen</span>
@@ -580,7 +578,7 @@ vollständige Erzeugung mit dieser Version vorbereitet; ändern sich auch Maße,
 Annotationen oder Modelldateien, wird der vollständige Ablauf erneut ausgeführt.</p>
 
 <h2 id="kicad">13. Die Registerkarte „KiCad“: Test und Installation</h2>
-<p>Der Bereich <span class="ui">Für KiCad bereite Dateien</span> listet Footprint,
+<p>Schritt 3 listet unter <span class="ui">Was installiert wird:</span> Footprint,
 Schaltplansymbol und STEP-Modell mit ihrem Status auf. Der isolierte Test und die beiden
 Installationen sind <strong>gesperrt, solange die Dateien auf der Festplatte nicht den
 Parametern</strong> des Projekts entsprechen, und jede Sperre nennt ihre Abhilfe, die direkt
@@ -596,7 +594,7 @@ mit einer früheren Version gespeichertes Projekt kann ein
 <span class="ui">Auf Dateien anwenden</span> erfordern. Die Befehle sind auch gesperrt, während
 eine Hintergrundarbeit läuft. Sie verwenden die <strong>übernommenen</strong> Dateien: Ein nicht übernommener Entwurf des
 Footprints oder des Symbols sperrt die Befehle nicht, wird nicht installiert, und
-<span class="ui">Bauteil für KiCad prüfen</span> meldet ihn.</p>
+die Bauteilprüfung (Schritt 1) meldet ihn.</p>
 <p>Der einklappbare Bereich <span class="ui">Bauteil-Metadaten</span> enthält
 Referenzbezeichner (nur Buchstaben: die Nummer fügt KiCad hinzu; der Vorschlag
 in Grau gilt als ausgefüllt), Beschreibung, Schlüsselwörter, Datenblatt (URL oder
@@ -606,19 +604,22 @@ Tooltip der Befehle nennt die fehlenden Felder. Die Liste
 <span class="ui">KiCad-Prüfungen (KLC)</span> aktualisiert sich während der Eingabe (⛔ Fehler,
 ⚠ Warnung), und <span class="ui">Auf Dateien anwenden</span> schreibt die Werte in den Footprint und
 in das Symbol; ein Fehler ⛔ führt zur Ablehnung des Anwendens.</p>
-<p>Unter <span class="ui">Prüfung vor der Installation</span> gibt es drei Symbole:
-<span class="ui">Kurzanleitung zur Verwendung des Bauteils in KiCad</span> (eine Anleitung
-auf fünf Seiten: installieren, Footprint platzieren, Symbol exportieren und registrieren,
-beide verknüpfen, PCB aktualisieren), <span class="ui">Bauteil für
-KiCad prüfen</span> (siehe unten) und <span class="ui">In KiCad testen …</span>. Unter
-<span class="ui">Bibliotheksinstallation</span> die beiden Installationen.</p>
+<p>Die Registerkarte ist ein Weg in <strong>drei Schritten</strong>, in der
+Reihenfolge, in der sie ausgeführt werden: <span class="ui">1 · Bauteilprüfung</span>
+(startet von selbst, siehe <a href="#controllo">unten</a>), <span class="ui">2 · In KiCad
+ansehen (optional)</span> mit <span class="ui">In KiCad öffnen</span> und
+<span class="ui">3 · In die Bibliothek installieren</span> mit einem Satz, der sagt, was
+Sie jetzt tun können, den beiden Installationen und den Dateien, die sie installieren.
+Unter den Schritten stehen die Metadaten. <span class="ui">Anleitung</span> oben rechts
+öffnet eine Anleitung auf drei Seiten: installieren, Symbol in den Schaltplan einfügen,
+PCB aktualisieren.</p>
 <p>Ohne STEP-Modell (zum Beispiel auf einem Computer ohne FreeCAD) funktionieren die drei Befehle
 trotzdem: Nach einer Bestätigung kommt der Footprint ohne 3D-Ansicht in KiCad an, und
 <code>KiCadGen.3dshapes</code> wird nicht angelegt. Um das Modell hinzuzufügen, FreeCAD
 installieren, das STEP-Modell neu erzeugen und den Befehl wiederholen.</p>
 <table>
   <tr><th>Befehl</th><th>Was er macht</th></tr>
-  <tr><td class="ui">In KiCad testen …</td>
+  <tr><td class="ui">In KiCad öffnen</td>
       <td>Erstellt ein kleines temporäres Projekt mit Footprint, Symbol und STEP-Modell im
       Unterordner <code>.kicad-preview</code> des Bauteils, öffnet den Schaltplan im
       Schaltplaneditor und die Platine im Leiterplatteneditor und zeigt ein von KiCad
@@ -626,28 +627,35 @@ installieren, das STEP-Modell neu erzeugen und den Befehl wiederholen.</p>
       <kbd>Alt</kbd>+<kbd>3</kbd> für die interaktive 3D-Ansicht. Ohne Symbol öffnet sich
       nur die Platine und das Protokoll nennt den Grund; ohne STEP-Modell wird kein 3D-Bild
       erstellt. Installiert nichts und ändert keine KiCad-Bibliothek.</td></tr>
-  <tr><td class="ui">Im KiCad-Projekt installieren …</td>
+  <tr><td class="ui">Im KiCad-Projekt installieren (empfohlen)</td>
       <td>Die empfohlene Wahl. Wählen Sie den Ordner eines KiCad-Projekts: Es werden
-      <code>KiCadGen.pretty</code> und <code>KiCadGen.3dshapes</code> angelegt, und die
-      Bibliothek wird in der Tabelle des Projekts mit relativen Pfaden registriert
-      (<code>${KIPRJMOD}</code>), sodass das Projekt portabel bleibt.</td></tr>
-  <tr><td class="ui">Als globale Bibliothek installieren …</td>
-      <td>Macht den Footprint in allen Projekten dieses Computers verfügbar.
-      Erfordert, dass KiCad installiert ist (die globale Tabelle des Benutzers wird
+      <code>KiCadGen.pretty</code> (die Footprints), <code>KiCadGen.3dshapes</code>
+      (die STEP-Modelle) und <code>KiCadGen.kicad_sym</code> (die Symbole) angelegt, und
+      die Bibliotheken werden in den Tabellen des Projekts (<code>fp-lib-table</code> und
+      <code>sym-lib-table</code>) mit relativen Pfaden (<code>${KIPRJMOD}</code>)
+      registriert, sodass das Projekt portabel bleibt. In KiCad finden Sie sofort das
+      Symbol <code>KiCadGen:Name</code>, bereits mit seinem Footprint verknüpft.</td></tr>
+  <tr><td class="ui">Als globale Bibliothek installieren</td>
+      <td>Macht Symbol und Footprint in allen Projekten dieses Computers verfügbar.
+      Erfordert, dass KiCad installiert ist (die globalen Tabellen des Benutzers werden
       mit <code>kicad-cli</code> gefunden); wählen Sie den Bibliotheksordner, und die
-      Bibliothek wird in der globalen <code>fp-lib-table</code> von KiCad
-      mit absoluten Pfaden registriert. Die übrigen Bibliotheken der Tabelle bleiben unverändert.
-      Wurde KiCad noch nie gestartet, existiert diese Tabelle noch nicht, und
-      die Installation wird abgelehnt: Starten Sie KiCad einmal, schließen Sie die
-      Ersteinrichtung der Bibliotheken ab und versuchen Sie es erneut.</td></tr>
+      Bibliotheken werden in der globalen <code>fp-lib-table</code> und
+      <code>sym-lib-table</code> von KiCad mit absoluten Pfaden registriert. Die übrigen
+      Bibliotheken der Tabellen bleiben unverändert. Wurde KiCad noch nie gestartet,
+      existieren diese Tabellen noch nicht, und die Installation wird abgelehnt: Starten
+      Sie KiCad einmal, schließen Sie die Ersteinrichtung der Bibliotheken ab und
+      versuchen Sie es erneut.</td></tr>
 </table>
+<p>Das Symbol wird <strong>hinzugefügt</strong>, und zwar der Bibliothek
+<code>KiCadGen.kicad_sym</code>, die die Symbole aller dort installierten Bauteile
+sammelt: Die übrigen Symbole bleiben unverändert, und ein Symbol mit demselben Namen
+wird nach einer Bestätigung ersetzt. Hat das Bauteil noch keine Symboldatei, bringt
+die Installation nur Footprint und STEP-Modell, und der Bericht nennt die Abhilfe
+(<span class="ui">Übernehmen</span> in der Registerkarte „Schaltplansymbol“).</p>
 <p>Bevor ein bereits installiertes Bauteil überschrieben oder eine bereits an anderer Stelle registrierte
 Bibliothek <code>KiCadGen</code> verschoben wird, fragt das Programm nach einer Bestätigung. Bevor
 es eine Tabelle ändert, legt es eine Kopie <code>.kicadgen-backup</code> an, und wenn ein
-Schritt fehlschlägt, stellt es alles wieder her, was es verändert hatte. Das Symbol wird
-in keiner Tabelle registriert: Es wird mit <span class="ui">KiCad-Symbol
-exportieren…</span> exportiert (auch aus der Symbolzeile dieser Registerkarte) und in
-KiCad mit <em>Symbolbibliotheken verwalten</em> hinzugefügt.
+Schritt fehlschlägt, stellt es alles wieder her, was es verändert hatte.
 <span class="ui">Komponentenordner öffnen</span> öffnet den Ordner mit Footprint,
 STEP-Modell und Dokumenten. Die Registerkarte <span class="ui">Exporte</span>
 (<kbd>Strg</kbd>+<kbd>6</kbd>) bewahrt den Verlauf der Installationen und der
@@ -656,10 +664,10 @@ Symbolexporte auf, die von diesem Computer aus vorgenommen wurden.</p>
 zutreffen; bis zu Ihrer Antwort wird nichts geschrieben:</p>
 <ul>
   <li><span class="ui">KiCadGen-Bibliothek bereits registriert</span>: Bei einer
-  Projektinstallation hat die globale Tabelle bereits eine Bibliothek
-  <code>KiCadGen</code> an einem anderen Ort. In diesem Projekt verwendet KiCad die
-  Projektbibliothek und findet die Footprints der gleichnamigen globalen Bibliothek
-  nicht mehr.</li>
+  Projektinstallation hat die globale Tabelle (der Footprints oder der Symbole)
+  bereits eine Bibliothek <code>KiCadGen</code> an einem anderen Ort. In diesem
+  Projekt verwendet KiCad die Projektbibliothek und findet die Footprints oder Symbole
+  der gleichnamigen globalen Bibliothek nicht mehr.</li>
   <li><span class="ui">Projekt in KiCad geöffnet</span>: Die Sperrdateien von KiCad
   (<code>~&lt;Name&gt;.kicad_pro.lck</code> und ähnliche) zeigen, dass das Projekt
   geöffnet ist. KiCad sieht die neue Bibliothek erst, nachdem das Projekt erneut
@@ -676,15 +684,42 @@ Installation entfernt ihn nach einem Tag, oder Sie löschen ihn selbst. Ein nich
 mehr lesbarer Exportverlauf (<code>kicad_exports.json</code>) wird als
 <code>kicad_exports.json.corrupt-&lt;Datum-Uhrzeit&gt;</code> beiseitegelegt und ein
 neuer begonnen: Kein Eintrag geht stillschweigend verloren.</p>
-<h3>Prüfung des Bauteils</h3>
-<p>In der Registerkarte <span class="ui">KiCad</span> prüft das Symbol <span class="ui">Bauteil für KiCad prüfen</span>
-die erzeugten Dateien und die Übereinstimmung der Pin-Pad-Nummern und testet, falls <code>kicad-cli</code>
-verfügbar ist, das Lesen von Footprint, Symbol und STEP mit KiCad CLI in einem temporären
-Ordner (ohne es gilt dieser Test als nicht ausgeführt). Der kopierbare Bericht unterscheidet
-bestandene Prüfungen, Fehler, Warnungen und nicht ausgeführte Prüfungen. Das übernommene Symbol wird
-auch getestet, wenn es noch nicht exportiert ist; nicht übernommene Entwürfe sind ausgeschlossen und werden gemeldet.
-Diese Prüfung bestätigt weder Pinbelegung, Maße, visuelle 3D-Ausrichtung noch installierte Bibliotheken;
-ERC und DRC sind am endgültigen Schaltplan und an der endgültigen Platine auszuführen.</p>
+<h3 id="controllo">Bauteilprüfung (Schritt 1)</h3>
+<p>Wenn Sie die Registerkarte <span class="ui">KiCad</span> mit Dateien öffnen, die noch
+keine Prüfung gelesen hat, <strong>startet die Prüfung von selbst</strong>: Sie fragt
+nichts und ändert die Konfiguration von KiCad nicht. Sie wartet nur, wenn gerade eine
+Arbeit die Dateien schreibt oder wenn die Dateien nicht zu den Parametern passen (die
+Zeile oben im Schritt nennt den Grund). Sie prüft die erzeugten Dateien und die
+Übereinstimmung der Pin-Pad-Nummern und testet, falls <code>kicad-cli</code> verfügbar
+ist, das Lesen von Footprint, Symbol und STEP mit KiCad CLI (einschließlich DRC und ERC).
+Das Ergebnis bleibt im Schritt stehen: ein Urteil, eine Zeile für jede zu erledigende
+Sache mit ihrer Schaltfläche (zum Beispiel <span class="ui">Pinout-Tabelle öffnen</span>
+oder <span class="ui">Mit KI vorschlagen</span>) und die bestandenen Prüfungen.
+<span class="ui">Erneut prüfen</span> wiederholt sie, <span class="ui">Abbrechen</span>
+hält sie sofort an, <span class="ui">Bericht kopieren</span> kopiert Urteil, Zeilen und
+technische Details.</p>
+<p>Das Ergebnis bestimmt Schritt 3:</p>
+<ul>
+  <li><strong>Fehler</strong> (Urteil <span class="ui">NICHT VERWENDEN</span>): Die
+  Installation bleibt gesperrt, bis Sie die Fehler beheben;</li>
+  <li><strong>Warnungen</strong> oder nicht ausgeführte Prüfungen: Sie können
+  installieren, und der Satz in Schritt 3 sagt, was vor der Produktion zu überprüfen
+  ist;</li>
+  <li><strong>alles in Ordnung</strong> (es bleiben nur die von Hand in KiCad
+  auszuführenden Prüfungen): <span class="ui">Im KiCad-Projekt installieren
+  (empfohlen)</span> ist hervorgehoben.</li>
+</ul>
+<p>Jede Änderung an den Dateien, die die Installation kopiert (eine Neuerzeugung,
+<span class="ui">Auf Dateien anwenden</span>, ein neuer Export des Symbols), macht das
+Ergebnis veraltet: Die Installationsschaltflächen werden deaktiviert, und die Prüfung
+startet erneut. Ein Problem des Prüfwerkzeugs (KiCad CLI antwortet nicht innerhalb von
+60 Sekunden oder startet nicht) ist kein Fehler des Bauteils: Es gilt als „nicht
+ausgeführt“ und sperrt die Installation nicht. Nach einer Installation wird nur die
+Zeile der KiCad-Bibliothek aktualisiert. Das übernommene Symbol wird auch getestet, wenn
+es noch nicht exportiert ist; nicht übernommene Entwürfe sind ausgeschlossen und werden
+gemeldet. Diese Prüfung bestätigt weder Pinbelegung, Maße noch visuelle
+3D-Ausrichtung; ERC und DRC sind am endgültigen Schaltplan und an der endgültigen
+Platine auszuführen.</p>
 <p>Die Prüfung bleibt verfügbar, wenn der Footprint vorhanden ist, das STEP aber fehlt;
 die Installation bleibt deaktiviert, bis die erforderlichen Dateien vorhanden sind.
 Die ursprünglichen 3D-Verweise und -Transformationen werden getrennt von der

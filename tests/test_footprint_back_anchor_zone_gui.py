@@ -636,6 +636,10 @@ def test_the_install_reads_the_model_offset_after_the_questions(window, monkeypa
         return QMessageBox.StandardButton.Yes
     monkeypatch.setattr(QMessageBox, "question", question)
     # A global install always asks: the question runs between discovery and copy.
+    # CONTRACT CHANGED 2026-11-15: the global install brings the symbol and
+    # refuses BEFORE its question when KiCad's global sym-lib-table is missing;
+    # a started KiCad has both tables next to each other, so the fake has both.
+    (tmp_path / "sym-lib-table").write_text("(sym_lib_table\n  (version 7)\n)\n", encoding="utf-8")
     window._install_kicad_library(tmp_path / "dest", project_library=False,
                                   table_path=tmp_path / "fp-lib-table", table_version="10.0", artifacts=artifacts)
     assert installed == [(-1.0, 2.0, 0.0)]
@@ -653,23 +657,15 @@ def test_the_component_check_is_refused_while_the_footprint_file_is_stale(window
     dialog. Negative twin: an aligned file opens the dialog with the applied offset.
     """
     from PyQt6.QtWidgets import QMessageBox
-    from kicadgen.gui import component_check_dialog
     opened, warned = [], []
 
-    class Dialog:
-        # CONTRACT CHANGED 2026-11-14: the window now passes the fix actions
-        # («Riesporta il simbolo») to the check dialog, so the stub accepts them.
-        def __init__(self, args, parent, tx, actions=None):
-            # CONTRACT CHANGED 2026-11-14 (review P2): the window gives an args BUILDER,
-            # called by the dialog for every run; the stub calls it once.
-            opened.append(args() if callable(args) else args)
-
-        def exec(self):
-            return 0
-
-        def deleteLater(self):
-            pass
-    monkeypatch.setattr(component_check_dialog, "ComponentCheckDialog", Dialog)
+    def run(args, actions=None, keep_status=False):
+        # CONTRACT CHANGED 2026-11-14 (review P2): the window gives an args BUILDER,
+        # called for every run; the stub calls it once. CONTRACT CHANGED
+        # 2026-11-15: the check runs in the KiCad tab's panel.
+        opened.append(args() if callable(args) else args)
+        return True
+    monkeypatch.setattr(window.kicad_check_panel, "run", run)
     monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warned.append(a[2]))
     monkeypatch.setattr(window, "_footprint_alignment_block", lambda: None)
     window._fp_rewrite_dirty = True

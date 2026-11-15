@@ -1,5 +1,6 @@
 """@brief Document-backed suggestions only; never change pin identity or geometry."""
 import json
+import re
 from pathlib import Path
 from .messages import tx
 from ..generators.symbol import ELECTRICAL_TYPES
@@ -29,13 +30,42 @@ PIN_TYPE_PROMPT = (
     'Existing types may be manually chosen: suggestions are for review, not authoritative corrections.')
 
 
+def _cited_document(source, sources):
+    """@brief The attached document a free-text `source` names, and what it adds after the name.
+
+    @param source The model's `source` text.
+    @param sources File names of the documents sent.
+    @return (file name, rest) for the first attached file named in `source`
+        -- the text exactly, or the name followed by a location («pinout.jpeg,
+        FUNCTION table») -- else (None, '').
+    @note Models put the page or table next to the file name although the
+        prompt asks for it in `reason` (real run 2026-11-15, HLK-5M05B: every
+        proposal was demoted and nothing could be applied). The file name must
+        still be one that was SENT, as a whole name (not a substring of a
+        longer word), compared without letter case: an invented or unsent
+        document is never evidence.
+    """
+    text = source.strip()
+    for name in sources:
+        if text.casefold() == name.casefold():
+            return name, ''
+    for name in sorted(sources, key=len, reverse=True):
+        match = re.search(r'(?<![\w.])' + re.escape(name) + r'(?!\w|\.\w)', text, re.IGNORECASE)
+        if match:
+            rest = (text[:match.start()] + ' ' + text[match.end():]).strip(' ,;:-()')
+            return name, rest
+    return None, ''
+
+
 def validate_suggestions(data, rows, sources):
     """@brief Validate proposal identities and evidence, leaving unresolved pins unknown.
 
     @param data Decoded tool answer; must hold a `pins` list.
     @param rows Project pin rows (dicts with `pin`), the only admissible ids.
     @param sources File names of the documents sent: a proposal citing
-        another source, or none, is demoted to 'unknown'.
+        another source, or none, is demoted to 'unknown'. A source that names
+        a sent file and adds a location is accepted (`_cited_document`): the
+        file name becomes the source, the location goes into the reason.
     @return One dict per project pin (pin, electrical_type, source, reason),
         in the rows' order, 'unknown' for pins without a usable proposal.
     @throws ValueError When the answer has no pin list, an entry is not an
@@ -61,8 +91,13 @@ def validate_suggestions(data, rows, sources):
         if not isinstance(source, str) or not isinstance(reason, str):
             raise ValueError(tx('Fonte e motivazione AI devono essere testo.'))
         reason = reason.strip()
+        cited, location = _cited_document(source, sources)
+        if cited is not None:
+            source = cited
+            if location:
+                reason = f'{location}: {reason}' if reason else location
         # A model confidence score cannot replace documentary evidence.
-        if kind != 'unknown' and (source not in sources or not reason):
+        if kind != 'unknown' and (cited is None or not reason):
             kind = 'unknown'
         result.append(dict(pin=number, electrical_type=kind, source=source, reason=reason))
     for number in ordered:

@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..cad3d.measurement_uncertainty import EDGE_UNCERTAINTY_PX
-from .openrouter import OpenRouterError, DEFAULT_MODEL
+from .openrouter import OpenRouterError, DEFAULT_MODEL, record_cached_answer
 from .photo_inventory import (axes_contradict, copy_mechanical_metadata,
                               mechanical_metadata_properties)
 from .photo_heights import estimate_body_height
@@ -627,6 +627,8 @@ def cached_call(call, kwargs, cache_dir, stage, log, expected_ids=None):
                     log(tx("{stage}: risposta recuperata dalla cache locale (nessuna chiamata "
                            "API).",
                            stage=stage))
+                # Counted as a free cached answer of this model, never as a call.
+                record_cached_answer(kwargs.get("model"))
                 return record["response"]
         except (OSError, ValueError, AttributeError):
             pass

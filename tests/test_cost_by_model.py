@@ -219,14 +219,19 @@ def test_calls_waiting_for_the_file_get_a_line_of_their_own(window, tmp_path, mo
 
 
 def test_no_waiting_line_when_every_call_is_written(window, tmp_path):  # noqa: F811
-    """@brief Negative twin: nothing queued, only the model lines."""
+    """@brief Negative twin: nothing queued, no «in attesa» line.
+
+    @note One model only (user, 2026-11-15): its line would repeat the total,
+        so the model is named in the total and the model row stays hidden.
+    """
     from kicadgen.services.project_costs import add_call, start_run
     folder = _named_project(window, tmp_path)
     start_run(folder)
     add_call(folder, {"cost_usd": 0.10, "model": "openai/gpt-5.6-sol"})
     overlay = _hold_generation_card(window)
     try:
-        assert overlay.cost_models.text().splitlines() == ["openai/gpt-5.6-sol: 0.1000 USD (1 chiamata)"]
+        assert overlay.cost.text() == "Costo AI dell'analisi: 0.1000 USD (1 chiamata · openai/gpt-5.6-sol)"
+        assert overlay.cost_models.isHidden() and "attesa" not in overlay.cost_models.text()
     finally:
         overlay.close_button.click()
 
@@ -292,8 +297,9 @@ def test_a_new_full_analysis_starts_the_card_count_again(window, tmp_path):  # n
     overlay = _hold_generation_card(window)
     try:
         assert "0.0500" in overlay.cost.text() and "0.30" not in overlay.cost.text()
-        assert overlay.cost_models.text().split(":")[0] == "deepseek/deepseek-flash"
-        assert "gpt" not in overlay.cost_models.text()
+        # Only the new analysis' model is left: named in the total, no line.
+        assert overlay.cost.text().endswith("· deepseek/deepseek-flash)")
+        assert "gpt" not in overlay.cost.text() and overlay.cost_models.isHidden()
     finally:
         overlay.close_button.click()
 

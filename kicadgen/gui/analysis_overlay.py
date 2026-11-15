@@ -628,6 +628,15 @@ class ElidedLabel(QLabel):
         painter.drawText(rect, int(self.alignment()), text)
 
 
+def _clock(seconds):
+    """Elapsed time as mm:ss, or h:mm:ss from one hour on."""
+    seconds = max(0, int(seconds))
+    hours, rest = divmod(seconds, 3600)
+    if hours:
+        return f"{hours}:{rest // 60:02d}:{rest % 60:02d}"
+    return f"{rest // 60:02d}:{rest % 60:02d}"
+
+
 class AnalysisSpinner(QWidget):
     """@brief Animated ring that also names the tool at work by its shape."""
 
@@ -643,6 +652,17 @@ class AnalysisSpinner(QWidget):
         self.angle = 0
         self.glyph = ""
         self.color = "#89b4fa"
+        #: True on a finished job: a checkered finish flag instead of the ring.
+        self.finished = False
+
+    def set_finished(self, finished):
+        """@brief Show the checkered finish flag (True) or the working ring (False).
+
+        @param finished True once the job is over (user, 2026-11-14: «un'icona a
+            scacchi tipo traguardo», a checkered finish-line icon).
+        """
+        self.finished = bool(finished)
+        self.update()
 
     def set_tool(self, glyph, color):
         """@brief Draw this tool's mark inside the ring.
@@ -660,6 +680,9 @@ class AnalysisSpinner(QWidget):
         """
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        if self.finished:
+            self._paint_flag(painter)
+            return
         rect = QRectF(7, 7, 42, 42)
         painter.setPen(QPen(QColor("#45475a"), 3))
         painter.drawEllipse(rect)
@@ -669,6 +692,26 @@ class AnalysisSpinner(QWidget):
         painter.drawArc(rect, -self.angle * 16, 100 * 16)
         if self.glyph:
             self._paint_glyph(painter)
+
+    def _paint_flag(self, painter):
+        """@brief Draw a checkered finish flag on its pole, inside the 56 px box."""
+        columns, rows, cell = 5, 4, 6.0
+        left, top = 17.0, 9.0
+        # Pole first, the flag hangs from it.
+        pole = QPen(QColor("#cdd6f4"), 2.4)
+        pole.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pole)
+        painter.drawLine(QPointF(left - 1.5, top - 2), QPointF(left - 1.5, 50))
+        painter.setPen(Qt.PenStyle.NoPen)
+        for row in range(rows):
+            for column in range(columns):
+                light = (row + column) % 2 == 0
+                painter.setBrush(QColor("#f5f5f5" if light else "#11111b"))
+                painter.drawRect(QRectF(left + column * cell, top + row * cell, cell, cell))
+        # A light frame keeps the dark squares visible on the dark card.
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(QColor("#9399b2"), 1.0))
+        painter.drawRect(QRectF(left, top, columns * cell, rows * cell))
 
     def _paint_glyph(self, painter):
         """@brief Draw the tool mark centred in the ring.
@@ -939,6 +982,9 @@ class AnalysisOverlay(QWidget):
     #: in progress.
     operation_started = pyqtSignal(str)
     operation_finished = pyqtSignal()
+    #: Working seconds of one operation, emitted once when it ends (finished
+    #: card or stop): the time hidden behind a review window is not in it.
+    work_done = pyqtSignal(float)
 
     def __init__(self, parent, *, i18n=None):
         """@brief Build the card over `parent`, hidden until an operation starts.
@@ -1107,7 +1153,20 @@ class AnalysisOverlay(QWidget):
         self.cost_models.setStyleSheet("color: #a6e3a1;")
         self.cost_models.setProperty('i18n_skip', True)
         self.cost_models.hide()
-        content.insertWidget(content.indexOf(self.elapsed), self.cost_models)
+        # Above the total (user, 2026-11-14: every model, then the total, then the time).
+        content.insertWidget(content.indexOf(self.cost), self.cost_models)
+        # The models that answered from the local cache, free (user, 2026-11-15):
+        # grey like the elapsed time because nothing was paid, under the total
+        # and above the time. Hidden, with no space, when nothing came from the cache.
+        self.cost_cached = QLabel()
+        self.cost_cached.setObjectName("analysisCostCached")
+        self.cost_cached.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.cost_cached.setTextFormat(Qt.TextFormat.PlainText)
+        self.cost_cached.setWordWrap(True)
+        self.cost_cached.setStyleSheet("color: #a6adc8;")
+        self.cost_cached.setProperty('i18n_skip', True)
+        self.cost_cached.hide()
+        content.insertWidget(content.indexOf(self.cost) + 1, self.cost_cached)
         # The two commands are on the same row, in the order the user asked
         # for them: the log on the left, the stop right to its right. The
         # row stays centred as the log button alone was.
@@ -1483,10 +1542,17 @@ class AnalysisOverlay(QWidget):
         @param abortable True when the caller knows how to stop this operation.
         """
         self.set_abortable(abortable)
+        # An operation that gives way to this one without a stop (the analysis
+        # flowing into its automatic generation) still reports its work.
+        self._report_work()
         self.title.setText(self.i18n.text(title) if self.i18n is not None else title)
         self.started_at = monotonic()
         self._hidden_at = None
+        # A wait for the user already open goes on timing the new operation.
+        self._wait_started = monotonic() if getattr(self, "_wait_depth", 0) else None
+        self._work_reported = False
         self.spinner.angle = 0
+        self.spinner.set_finished(False)
         self.clear_phases()
         self._phases_reserved = True
         self.set_tool(None)
@@ -1599,7 +1665,8 @@ class AnalysisOverlay(QWidget):
         self._step_current = int(index)
         self._render_steps()
 
-    def show_completed(self, message, partial=False, source=None):
+    def show_completed(self, message, partial=False, source=None, total_seconds=None,
+                       total_is_whole=True):
         """@brief Keep the card open on a finished job: every step ticked, «Chiudi» to leave.
 
         @param message Final outcome, already translated, shown as the status.
@@ -1609,6 +1676,11 @@ class AnalysisOverlay(QWidget):
         @param source Italian catalogue source of `message`, when it has one:
             the outcome is composed again from it on a language change
             (`refresh_command_texts`), since the marked text is not a key.
+        @param total_seconds Working time of the analysis this job closes, or
+            None to keep this job's own elapsed time.
+        @param total_is_whole False when `total_seconds` covers only this
+            session (a re-read of an analysis begun earlier): it is then
+            labelled as plain elapsed time, not as the analysis total.
         @note The clock and the animation stop (nothing is running any more)
             and the abort command goes away; the card closes only through
             «Chiudi», which emits `closed`.
@@ -1626,7 +1698,12 @@ class AnalysisOverlay(QWidget):
             self._render_steps()
         self.set_progress(None, None)
         self.set_abortable(False)
+        self._report_work()
+        self.spinner.set_finished(True)
         self._outcome = (message, source, partial)
+        self._outcome_total = total_seconds
+        self._outcome_total_whole = bool(total_is_whole)
+        self._outcome_elapsed = self.work_seconds()
         self._render_outcome()
         self.close_button.show()
         self.close_button.setFocus()
@@ -1643,6 +1720,77 @@ class AnalysisOverlay(QWidget):
         self._set_outcome_look("partial" if partial else "done", larger=False)
         self.set_status(f"{'⚠' if partial else '✓'} {message}")
         self._fit_outcome()
+        total = getattr(self, "_outcome_total", None)
+        if total is not None and getattr(self, "_outcome_total_whole", True):
+            time = _clock(total)
+            self.elapsed.setText(self.i18n.tr("analysis.elapsed_total", time=time) if self.i18n is not None
+                                 else f"Tempo totale di elaborazione  {time}")
+        elif total is not None:
+            time = _clock(total)
+            self.elapsed.setText(self.i18n.tr("analysis.elapsed", time=time) if self.i18n is not None
+                                 else f"Tempo trascorso  {time}")
+        else:
+            # This job's own final time, composed again in the current language.
+            time = _clock(getattr(self, "_outcome_elapsed", 0.0))
+            self.elapsed.setText(self.i18n.tr("analysis.elapsed", time=time) if self.i18n is not None
+                                 else f"Tempo trascorso  {time}")
+
+    def work_seconds(self):
+        """@brief Working seconds of the current operation, the waits for the user excluded.
+
+        @return Seconds since `start`, less the time the card spent hidden by
+            the program and the time the program waited for an answer
+            (`waiting_for_user`); 0 before the first operation.
+        """
+        if not self.started_at:
+            return 0.0
+        if self._hidden_at is not None:
+            end = self._hidden_at
+        elif getattr(self, "_wait_started", None) is not None:
+            end = self._wait_started
+        else:
+            end = monotonic()
+        return max(0.0, end - self.started_at)
+
+    def waiting_for_user(self):
+        """@brief Context manager: the clock stops while the program waits for the user's answer.
+
+        @return A context manager to wrap a question or review the program
+            asks while an operation runs on the card.
+        @note Opt-in on purpose (final review 2026-11-14): a window the user
+            opens from the menu while the AI or FreeCAD works is NOT a wait,
+            and the time is cut exactly from the question's opening to its
+            answer, not from the last clock tick. Nested waits count once; a
+            program hide inside a wait hands the time over to the hide.
+        """
+        overlay = self
+
+        class _Wait:
+            def __enter__(self):
+                overlay._wait_depth = getattr(overlay, "_wait_depth", 0) + 1
+                if overlay._wait_depth == 1 and overlay._hidden_at is None and overlay.started_at:
+                    overlay._wait_started = monotonic()
+
+            def __exit__(self, *exc_info):
+                overlay._wait_depth -= 1
+                if overlay._wait_depth == 0:
+                    overlay._end_wait()
+                return False
+
+        return _Wait()
+
+    def _end_wait(self):
+        """Take the time of the wait now ending off the clock."""
+        started = getattr(self, "_wait_started", None)
+        if started is not None:
+            self.started_at += max(0.0, monotonic() - started)
+            self._wait_started = None
+
+    def _report_work(self):
+        """Emit `work_done` once per operation, with its working seconds."""
+        if self.started_at and not getattr(self, "_work_reported", True):
+            self._work_reported = True
+            self.work_done.emit(self.work_seconds())
 
     def _fit_outcome(self):
         """Larger outcome only while it fits the rows reserved for the status.
@@ -1866,45 +2014,61 @@ class AnalysisOverlay(QWidget):
     def clear_steps(self):
         """@brief Hide the step row (single-phase operations have none)."""
         self._step_labels, self._step_unavailable, self._step_current = [], {}, -1
+        self._steps_plain = []
         self.steps.clear()
         self.steps.hide()
 
     def steps_plain_text(self):
         """@brief The step row as plain text, marks included (for logs and tests).
 
-        @return The text of the rich document the label draws, one line per
-            step; "" when no steps are shown.
+        @return One line per step, «mark number · label» as drawn, and a
+            step's result on the line below it, indented; "" when no steps
+            are shown.
+        @note Composed from the rows `_render_steps` draws, not read back
+            from the label: the marks sit in a column of their own, and Qt's
+            plain text of a table puts every cell on a line of its own, which
+            would part each mark from its step.
         """
-        document = QTextDocument()
-        document.setHtml(self.steps.text())
-        return document.toPlainText()
+        return "\n".join(getattr(self, '_steps_plain', []))
 
     def _render_steps(self):
-        parts = []
+        rows, plain = [], []
         for index, label in enumerate(self._step_labels):
             text = html.escape(f"{index + 1} · {label}")
             result = getattr(self, '_step_results', {}).get(index)
-            if result:
-                text += '<br/>' + html.escape(result)
             if index in self._step_unavailable:
-                reason = html.escape(self._step_unavailable[index])
-                parts.append(f'<span style="color:#6c7086"><s>{text}</s> ({reason})</span>')
+                reason = self._step_unavailable[index]
+                style, mark = "color:#6c7086", ""
+                text = f"<s>{text}</s> ({html.escape(reason)})"
+                plain.append(f"{index + 1} · {label} ({reason})")
             elif index < self._step_current:
-                parts.append(f'<span style="color:#a6e3a1">&#10003; {text}</span>')
+                style, mark = "color:#a6e3a1", "&#10003;"
+                plain.append(f"✓ {index + 1} · {label}")
             elif index == self._step_current:
                 # The running step's mark pulses like the running phase's «●»
                 # (user, 2026-09-30): only the colour of the mark moves.
-                parts.append(f'<span style="color:#f5e0dc; font-weight:600">'
-                             f'<span style="color:{self._pulse_color()}">&#9679;</span> {text}</span>')
+                style = "color:#f5e0dc; font-weight:600"
+                mark = f'<span style="color:{self._pulse_color()}">&#9679;</span>'
+                plain.append(f"● {index + 1} · {label}")
             else:
-                parts.append(f'<span style="color:#a6adc8">&#9675; {text}</span>')
+                style, mark = "color:#a6adc8", "&#9675;"
+                plain.append(f"○ {index + 1} · {label}")
+            if result:
+                # Under the step's own text, never under its mark (user,
+                # 2026-11-15: «qui va a capo male?», the result line started
+                # below the ✓ and stuck out of the column).
+                text += '<br/>' + html.escape(result)
+                plain.append(f"    {result}")
+            rows.append(f"<tr><td valign='top' style='padding:1px 4px 1px 0; {style}'>{mark}</td>"
+                        f"<td style='padding:1px 0; {style}'>{text}</td></tr>")
         # One below the other (user, 2026-09-26): in a row they wrapped in
         # the middle of a step. A column centred as a block, lines aligned
-        # left, so the marks ✓ ● ○ stand in a column.
-        rows = "".join(f"<tr><td style='padding:1px 0'>{part}</td></tr>" for part in parts)
-        self.steps.setText(f"<table align='center' cellspacing='0'>{rows}</table>"
-                           if parts else "")
-        self.steps.setVisible(bool(parts))
+        # left; the marks ✓ ● ○ in a column of their own, so every line of a
+        # step -- its result included -- starts where its text starts.
+        self._steps_plain = plain
+        self.steps.setText(f"<table align='center' cellspacing='0'>{''.join(rows)}</table>"
+                           if rows else "")
+        self.steps.setVisible(bool(rows))
 
     def set_progress(self, done=None, total=None, unit=""):
         """@brief Show a percentage only when a real count backs it.
@@ -1967,6 +2131,7 @@ class AnalysisOverlay(QWidget):
         self.cost.clear()
         self.cost.hide()
         self.set_cost_models(())
+        self.set_cost_cached(())
 
     def set_cost(self, text):
         """@brief Show the AI analysis cost summary inside the overlay; an empty text hides it.
@@ -1992,6 +2157,16 @@ class AnalysisOverlay(QWidget):
         lines = [str(line) for line in (lines or ()) if line]
         self.cost_models.setText("\n".join(lines))
         self.cost_models.setVisible(bool(lines))
+
+    def set_cost_cached(self, lines):
+        """@brief Show the models that answered from the local cache, one per line; no line hides the row.
+
+        @param lines Already translated «model: N readings from the cache
+            (free)» lines (`openrouter.format_cached_lines`).
+        """
+        lines = [str(line) for line in (lines or ()) if line]
+        self.cost_cached.setText("\n".join(lines))
+        self.cost_cached.setVisible(bool(lines))
 
     def set_status(self, message):
         """@brief Show one status written for a person, never a service line.
@@ -2145,10 +2320,13 @@ class AnalysisOverlay(QWidget):
             self._size_the_card()
 
     def _tick(self):
-        seconds = max(0, int(monotonic() - self.started_at))
+        # The working time: it stands still while the program waits for the
+        # user (`waiting_for_user`) or keeps the card hidden (user decision
+        # 2026-11-14: the total processing time leaves out those waits).
+        seconds = int(self.work_seconds())
         elapsed = (
-            self.i18n.tr("analysis.elapsed", time=f"{seconds // 60:02d}:{seconds % 60:02d}")
-            if self.i18n is not None else f"Tempo trascorso  {seconds // 60:02d}:{seconds % 60:02d}"
+            self.i18n.tr("analysis.elapsed", time=_clock(seconds))
+            if self.i18n is not None else f"Tempo trascorso  {_clock(seconds)}"
         )
         self.elapsed.setText(elapsed)
         self.spinner.angle = (self.spinner.angle + 9) % 360
@@ -2173,6 +2351,7 @@ class AnalysisOverlay(QWidget):
             there the command must stay valid.
         """
         self.timer.stop()
+        self._report_work()
         self.set_progress(None, None)
         self.set_abortable(False)
         self.hide()
@@ -2191,6 +2370,8 @@ class AnalysisOverlay(QWidget):
         """
         self.timer.stop()
         if not event.spontaneous():
+            # A wait in progress ends here: from now on the hide accounts.
+            self._end_wait()
             self._hidden_at = monotonic()
         super().hideEvent(event)
 
@@ -2208,6 +2389,12 @@ class AnalysisOverlay(QWidget):
         if self._hidden_at is not None:
             self.started_at += max(0.0, monotonic() - self._hidden_at)
             self._hidden_at = None
+            # Still inside a wait (a question shown after the card came back).
+            if getattr(self, "_wait_depth", 0):
+                self._wait_started = monotonic()
+        # A held finished card keeps its final time: the clock does not restart.
+        if getattr(self, "_outcome", None) is not None:
+            return
         if not self.timer.isActive():
             self._tick()
             self.timer.start()

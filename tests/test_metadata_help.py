@@ -56,9 +56,18 @@ def test_every_topic_has_the_four_sections_and_matches_the_klc_severity(window):
     """Negative guard: a topic without content would open an empty modal."""
     for key in ROWS:
         sections = window._metadata_help_content(key)
+        assert all(body.strip() for _title, body in sections), key
+        if key == "attributes":
+            # CONTRACT CHANGED 2026-11-15 (user: «per ogni voce della spunta
+            # devi indicare il significato chiaro»): one section per box, then
+            # the normal case and where it ends up
+            # (test_the_attributes_help_explains_each_box).
+            boxes = [label for _flag, label, _tip in gui.MainWindow.FOOTPRINT_ATTRIBUTE_CHECKS]
+            assert [title for title, _body in sections] == boxes + [
+                "Per un componente normale", "Dove finisce"], key
+            continue
         assert [title for title, _body in sections] == [
             "Che cosa inserire", "Dove finisce", "Regole KLC", "Esempi"], key
-        assert all(body.strip() for _title, body in sections), key
     assert window._metadata_help_content("unknown") == []
     # CONTRACT CHANGED 2026-10-15: designator, description, keywords and
     # datasheet are REQUIRED fields (klc_checks.REQUIRED_FIELD_CODES): an
@@ -114,12 +123,27 @@ def test_each_icon_opens_the_help_of_its_own_field(window):
     titles = []
 
     def grab():
-        titles.append(window._metadata_help_dialog.windowTitle())
+        heading = window._metadata_help_dialog.findChild(gui.QLabel, "helpTitle")
+        titles.append((window._metadata_help_dialog.windowTitle(), heading.text(), heading.alignment()))
         window._metadata_help_dialog.accept()
     for key in ("reference", "fp_filters"):
         QTimer.singleShot(0, grab)
         window._metadata_help_buttons[key].click()
-    assert titles == ["Aiuto: Designatore di riferimento", "Aiuto: Filtri footprint"]
+    # CONTRACT CHANGED 2026-11-15 (user: «rimuovi Aiuto, metti solo il titolo
+    # della voce centrato»): the window and its centred bold heading name the item only.
+    centred = gui.Qt.AlignmentFlag.AlignCenter
+    assert titles == [("Designatore di riferimento", "Designatore di riferimento", centred),
+                      ("Filtri footprint", "Filtri footprint", centred)]
+
+
+def test_the_attributes_help_explains_each_box(window):
+    """User 2026-11-15: «per ogni voce della spunta devi indicare il significato chiaro»."""
+    sections = dict(window._metadata_help_content("attributes"))
+    for flag, label, _tip in gui.MainWindow.FOOTPRINT_ATTRIBUTE_CHECKS:
+        assert label in sections and len(sections[label]) > 60
+    # Negative twin: no box is explained by another box's text.
+    assert "pick and place" in sections["Escludi dai file di posizione"]
+    assert "pick and place" not in sections["Escludi dalla distinta (BOM)"]
 
 
 def test_the_help_icons_follow_the_language(window):
