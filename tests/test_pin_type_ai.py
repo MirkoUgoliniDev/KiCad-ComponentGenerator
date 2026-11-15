@@ -21,6 +21,32 @@ def test_unknown_sources_and_missing_pins_are_unresolved():
     assert {p['pin'] for p in result} == {'1', '2'}
 
 
+@pytest.mark.parametrize('source', [
+    'pinout.jpeg, FUNZIONE PIN table and mechanical drawing (pins 1/2)',   # the real HLK answer
+    'PINOUT.JPEG',                                                         # letter case
+    'Table on page 1 of pinout.jpeg.',                                     # name inside a sentence
+])
+def test_a_source_that_names_a_sent_document_is_evidence(source):
+    """Real run 2026-11-15 (HLK-5M05B): the model wrote the table next to the file name and every
+    proposal was demoted, so nothing could be applied. The file stays the source, the rest goes to the reason."""
+    result = ai.validate_suggestions({'pins': [proposal(source=source)]}, ROWS, ['pinout.jpeg'])
+    first = result[0]
+    assert first['electrical_type'] == 'power_in' and first['source'] == 'pinout.jpeg'
+    assert 'module supply return' in first['reason']
+
+
+@pytest.mark.parametrize('source', [
+    'datasheet.pdf, page 3',            # a document that was not sent
+    'my_pinout.jpeg',                   # a longer name containing the sent one
+    'pinout.jpeg.bak',                  # another file whose name starts with it
+    '',                                 # no source at all
+])
+def test_a_source_that_names_no_sent_document_stays_unresolved(source):
+    """Negative twin: only a document that was SENT, as a whole name, is evidence."""
+    result = ai.validate_suggestions({'pins': [proposal(source=source)]}, ROWS, ['pinout.jpeg'])
+    assert result[0]['electrical_type'] == 'unknown'
+
+
 def test_call_uses_documents_and_only_pin_metadata(tmp_path, monkeypatch):
     source = tmp_path / 'sheet.pdf'
     source.write_bytes(b'PDF')

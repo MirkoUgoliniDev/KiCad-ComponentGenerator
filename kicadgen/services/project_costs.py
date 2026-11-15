@@ -6,7 +6,10 @@ paid call, with the cost the provider reports (OpenRouter ``usage.cost``,
 USD) or, for DeepSeek, which reports none, tokens x official price
 (deepseek_pricing): the aborted runs and the unusable answers count too,
 because they were paid. Answers served from the local cache never reach a
-provider and never reach this file.
+provider and are not calls: they are listed apart (``cached_answers``, one
+item per analysis and model with its ``count``), so the finished card can say
+which models answered from the cache, for free (user, 2026-11-15). They never
+change the total, the call count or the entries.
 
 @note A file that cannot be read or does not validate is never overwritten:
     the caller gets ProjectCostsError and the file stays as it is, for a
@@ -101,6 +104,9 @@ class ProjectCosts:
     #: what each model cost from the last «Estrai parametri con AI» (extract
     #: parameters with AI), reruns included (user, 2026-11-14).
     run_by_model: dict = None
+    #: model -> answers of the current analysis served from a local cache
+    #: (free, not calls): what each model answered without being asked again.
+    run_cached_by_model: dict = None
 
     @property
     def run_complete(self) -> bool:
@@ -180,7 +186,8 @@ def _loaded_totals(path: Path, run: Optional[int]) -> Optional[ProjectCosts]:
             cached[1][run] = totals
     return replace(totals, by_provider=dict(totals.by_provider),
                    run_by_provider=dict(totals.run_by_provider),
-                   run_by_model=dict(totals.run_by_model))
+                   run_by_model=dict(totals.run_by_model),
+                   run_cached_by_model=dict(totals.run_cached_by_model))
 
 
 def _parse(path: Path, raw) -> dict:
@@ -207,6 +214,8 @@ def _parse(path: Path, raw) -> dict:
     run = data.get("run", 0)
     if _count(run) is None or not isinstance(data.get("runs", []), list):
         raise ProjectCostsError(f"{path.name}: invalid analyses")
+    if not isinstance(data.get("cached_answers", []), list):
+        raise ProjectCostsError(f"{path.name}: invalid cached answers")
     if (total is None or total < 0 or calls is None or missing is None
             or missing > calls or not isinstance(entries, list)
             or not isinstance(data.get("since", ""), str)):
@@ -292,7 +301,8 @@ def _totals(data: dict, run: Optional[int] = None) -> ProjectCosts:
                         run_calls=sum(calls for _total, calls, _missing in current.values()),
                         run_calls_without_cost=sum(
                             missing for _total, _calls, missing in current.values()),
-                        run_by_provider=current, run_by_model=models)
+                        run_by_provider=current, run_by_model=models,
+                        run_cached_by_model=_cached_counts(data, run) if run else {})
 
 
 def load_project_costs(project_dir: Path, run: Optional[int] = None) -> ProjectCosts:
@@ -312,7 +322,8 @@ def load_project_costs(project_dir: Path, run: Optional[int] = None) -> ProjectC
         alone), so a refresh does not re-parse and re-price the history.
     """
     totals = _loaded_totals(Path(project_dir) / COSTS_FILE, run)
-    return ProjectCosts(by_provider={}, run_by_provider={}, run_by_model={}) if totals is None else totals
+    return (ProjectCosts(by_provider={}, run_by_provider={}, run_by_model={}, run_cached_by_model={})
+            if totals is None else totals)
 
 
 def _by_provider(data: dict, run: Optional[int] = None) -> dict:
@@ -345,6 +356,74 @@ def _grouped(data: dict, key_of, run: Optional[int] = None) -> dict:
         cost = _entry_cost(entry)
         totals[key] = (total + (cost or 0.0), calls + 1, missing + (cost is None))
     return totals
+
+
+def _cached_count(item: dict) -> Optional[int]:
+    """Answers an item of ``cached_answers`` stands for: its ``count`` (1 when absent), None when damaged."""
+    count = item.get("count", 1)
+    return count if _count(count) else None
+
+
+def _cached_counts(data: dict, run: int) -> dict:
+    """Answers served from a local cache during analysis `run`, per model; damaged items skipped."""
+    counts = {}
+    for item in data.get("cached_answers") or ():
+        if isinstance(item, dict) and item.get("run") == run and _cached_count(item):
+            model = _model_of(item)
+            counts[model] = counts.get(model, 0) + _cached_count(item)
+    return counts
+
+
+def add_cached_answer(project_dir: Path, record: dict,
+                      now: Optional[datetime] = None) -> ProjectCosts:
+    """@brief Note one AI answer replayed from a local cache in the project's current analysis.
+
+    @param project_dir Project folder; created if missing.
+    @param record As reported by `openrouter.set_cached_answer_listener`:
+        ``model``, optional ``run`` (the analysis it belonged to WHEN IT WAS
+        READ, as for `add_call`; absent or unknown -> the current analysis),
+        optional ``count`` (answers grouped by the caller, 1 by default).
+    @param now Time of the replay (UTC now by default).
+    @return The new totals.
+    @throws ProjectCostsError, OSError As `add_call`, with the same guarantees.
+    @note Never a call: the total, the call counts and the entries are left
+        as they are. Nothing is noted while the file records no analysis
+        (run 0): there is no analysis to show it with.
+    @note One item per analysis and model, its ``count`` raised by each
+        write: a replayed analysis serves a hundred answers or more, and one
+        item each would grow the file without bound (review 2026-11-15, M2).
+    """
+    folder = Path(project_dir)
+    if not (folder / COSTS_FILE).exists():
+        # No file, no analysis to attach to: return before the lock, which
+        # would create the folder of a project moved or deleted meanwhile
+        # (second review 2026-11-15).
+        return load_project_costs(folder)
+    return _locked_update(folder, lambda target: _add_cached_once(target, record, now))
+
+
+def _add_cached_once(folder: Path, record: dict, now: Optional[datetime]) -> ProjectCosts:
+    """One read-modify-write that notes a cached answer (see `add_cached_answer`)."""
+    path = folder / COSTS_FILE
+    stamp = (now or datetime.now(timezone.utc)).isoformat(timespec="seconds")
+    data = _read(path) or _empty(stamp)
+    current = data.get("run", 0)
+    run = _count(record.get("run"))
+    run = run if run and run <= current else current
+    count = _count(record.get("count", 1))
+    if not run or not count:
+        return _totals(data)
+    model = str(record.get("model") or "")
+    items = data.setdefault("cached_answers", [])
+    for item in items:
+        if (isinstance(item, dict) and item.get("run") == run and str(item.get("model") or "") == model
+                and _cached_count(item)):
+            item["count"] = _cached_count(item) + count
+            item["time"] = stamp
+            break
+    else:
+        items.append({"time": stamp, "model": model, "run": run, "count": count})
+    return _save(folder, path, data)
 
 
 def add_call(project_dir: Path, record: dict, now: Optional[datetime] = None) -> ProjectCosts:

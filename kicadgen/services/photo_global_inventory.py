@@ -14,7 +14,7 @@ import re
 from pathlib import Path
 
 from ..core.validation import covered_fraction, finite_number, iou
-from .openrouter import OpenRouterError, ToolArgumentsError
+from .openrouter import OpenRouterError, ToolArgumentsError, record_cached_answer
 from .photo_audit import valid_fraction_box as _valid_box, write_stage_audit as _write_audit
 from .photo_inventory import draw_inventory, image_block
 from .photo_markings import MARKING_RULES
@@ -1776,6 +1776,8 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
                 data = record['response']; log(marked(CACHE_HIT, "Inventario globale: risposta valida ripresa dalla "
                                                   "cache, nessuna nuova chiamata a pagamento "
                                                   "(validated cache hit)."))
+                # Counted as a free cached answer of this model, never as a call.
+                record_cached_answer(model)
         except (OSError, ValueError, AttributeError):
             pass
     if data is None:

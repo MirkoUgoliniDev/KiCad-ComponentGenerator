@@ -400,8 +400,8 @@ file <code>.kicad_mod</code>, <span class="ui">Annulla</span> scarta le modifich
 non applicate, <span class="ui">Recupera bozza</span> ripristina una bozza non
 applicata dopo una chiusura imprevista. I comandi della scheda
 <span class="ui">KiCad</span> usano il file applicato: una bozza non applicata non
-viene installata e la segnala <span class="ui">Verifica componente per
-KiCad</span>.</p>
+viene installata e la segnala il controllo del componente (scheda
+<span class="ui">KiCad</span>, passo 1).</p>
 <p>Nei footprint di un package i due lati del corpo sono <strong>quote
 modificabili</strong>: un doppio clic sulla quota, oppure il clic destro e
 <span class="ui">Modifica quota…</span>, chiede il nuovo valore; il corpo resta
@@ -492,12 +492,10 @@ elettrico del circuito. Verifica sul datasheet se servono input, output,
 bidirectional, power_in o altri tipi prima di usare i controlli elettrici di
 KiCad. Nomi uguali come GND possono appartenere a numeri diversi; numeri
 duplicati o assenti dal footprint impediscono l'esportazione.</p>
-<p><strong>Esporta simbolo KiCad</strong> salva una libreria <code>.kicad_sym</code>.
-Aggiungila in KiCad alle librerie di simboli. Il riferimento al footprint è
-<code>KiCadGen:nome_componente</code>: usa lo stesso nome di libreria quando
-installi il footprint, oppure modifica l'associazione in KiCad. L'installazione
-della scheda «KiCad» continua a gestire footprint e modello STEP; la libreria di
-simboli si esporta separatamente.</p>
+<p>Le installazioni della scheda «KiCad» portano in KiCad anche il simbolo, già
+collegato al footprint <code>KiCadGen:nome_componente</code>: non serve
+esportarlo. <strong>Esporta simbolo KiCad</strong> salva comunque una copia del
+simbolo in un file <code>.kicad_sym</code> scelto da te, per usarla altrove.</p>
 <p>Scorciatoie: Ctrl+3 apre il simbolo, Ctrl+4 il modello STEP, Ctrl+5 KiCad.</p>
 <h3>Tipi elettrici suggeriti dall'AI</h3>
 <p>Nel tab <span class="ui">Simbolo elettrico</span>, <span class="ui">Suggerisci tipi pin con AI</span>
@@ -580,7 +578,7 @@ generazione completa con questa versione; se cambiano anche quote, componenti,
 annotazioni o file dei modelli, viene eseguita nuovamente la procedura completa.</p>
 
 <h2 id="kicad">13. La scheda «KiCad»: prova e installazione</h2>
-<p>Il riquadro <span class="ui">File pronti per KiCad</span> elenca footprint,
+<p>Il passo 3 elenca, sotto <span class="ui">Cosa viene installato:</span>, footprint,
 simbolo elettrico e modello STEP con il loro stato. La prova isolata e le due
 installazioni sono <strong>bloccate finché i file su disco non corrispondono ai
 parametri</strong> del progetto, e ogni blocco nomina il suo rimedio, abilitato lì
@@ -596,7 +594,7 @@ progetto salvato da una versione precedente può richiedere un
 <span class="ui">Applica ai file</span>. I comandi sono bloccati anche mentre gira
 un lavoro in background. Usano i file <strong>applicati</strong>: una bozza del
 footprint o del simbolo non applicata non blocca i comandi, non viene installata e
-la segnala <span class="ui">Verifica componente per KiCad</span>.</p>
+la segnala il controllo del componente (passo 1).</p>
 <p>Il riquadro richiudibile <span class="ui">Metadati del componente</span> contiene
 designatore di riferimento (solo lettere: il numero lo aggiunge KiCad; la proposta
 in grigio conta come compilata), descrizione, parole chiave, datasheet (URL o
@@ -606,19 +604,21 @@ suggerimento dei comandi dice quali campi mancano. L'elenco
 <span class="ui">Controlli KiCad (KLC)</span> si aggiorna mentre scrivi (⛔ errore,
 ⚠ avviso) e <span class="ui">Applica ai file</span> scrive i valori nel footprint e
 nel simbolo; un errore ⛔ fa rifiutare l'applicazione.</p>
-<p>In <span class="ui">Verifica prima dell'installazione</span> ci sono tre icone:
-<span class="ui">Guida rapida per usare il componente in KiCad</span> (una procedura
-in cinque pagine: installare, posizionare il footprint, esportare e registrare il
-simbolo, collegarli, aggiornare il PCB), <span class="ui">Verifica componente per
-KiCad</span> (vedi sotto) e <span class="ui">Prova in KiCad...</span>. In
-<span class="ui">Installazione nella libreria</span> le due installazioni.</p>
+<p>La scheda è un percorso in <strong>tre passi</strong>, nell'ordine in cui si
+fanno: <span class="ui">1 · Controllo del componente</span> (parte da solo, vedi
+<a href="#controllo">sotto</a>), <span class="ui">2 · Guarda in KiCad
+(facoltativo)</span> con <span class="ui">Apri in KiCad</span>, e
+<span class="ui">3 · Installa nella libreria</span>, con una frase che dice che cosa
+puoi fare adesso, le due installazioni e i file che installano. Sotto i passi ci
+sono i metadati. <span class="ui">Guida</span>, in alto a destra, apre una procedura
+in tre pagine: installare, aggiungere il simbolo allo schema, aggiornare il PCB.</p>
 <p>Senza modello STEP (per esempio su un computer senza FreeCAD) i tre comandi funzionano
 lo stesso: dopo una conferma il footprint arriva in KiCad senza vista 3D e
 <code>KiCadGen.3dshapes</code> non viene creato. Per aggiungere il modello installa
 FreeCAD, rigenera il modello STEP e ripeti il comando.</p>
 <table>
   <tr><th>Comando</th><th>Che cosa fa</th></tr>
-  <tr><td class="ui">Prova in KiCad...</td>
+  <tr><td class="ui">Apri in KiCad</td>
       <td>Crea un piccolo progetto temporaneo con il footprint, il simbolo e il modello
       STEP, nella sottocartella <code>.kicad-preview</code> del componente, apre lo schema
       nell'Editor di schemi e la scheda nel PCB Editor e mostra un'immagine 3D del
@@ -626,28 +626,35 @@ FreeCAD, rigenera il modello STEP e ripeti il comando.</p>
       <kbd>Alt</kbd>+<kbd>3</kbd> per la vista 3D interattiva. Senza simbolo si apre solo
       la scheda e il registro dice perché; senza modello STEP l'immagine 3D non viene
       creata. Non installa e non modifica nessuna libreria di KiCad.</td></tr>
-  <tr><td class="ui">Installa nel progetto KiCad...</td>
+  <tr><td class="ui">Installa nel progetto KiCad (consigliato)</td>
       <td>La scelta consigliata. Scegli la cartella di un progetto KiCad: vengono
-      creati <code>KiCadGen.pretty</code> e <code>KiCadGen.3dshapes</code> e la
-      libreria viene registrata nella tabella del progetto con percorsi relativi
-      (<code>${KIPRJMOD}</code>), quindi il progetto resta portabile.</td></tr>
-  <tr><td class="ui">Installa come libreria globale...</td>
-      <td>Rende il footprint disponibile in tutti i progetti di questo computer.
-      Richiede che KiCad sia installato (la tabella globale dell'utente viene
-      trovata con <code>kicad-cli</code>); scegli la cartella delle librerie e la
-      libreria viene registrata nella <code>fp-lib-table</code> globale di KiCad
-      con percorsi assoluti. Le altre librerie della tabella restano come sono.
-      Se KiCad non è mai stato avviato quella tabella non esiste ancora e
-      l'installazione viene rifiutata: avvia KiCad una volta, completa la
-      configurazione iniziale delle librerie e riprova.</td></tr>
+      creati <code>KiCadGen.pretty</code> (i footprint), <code>KiCadGen.3dshapes</code>
+      (i modelli STEP) e <code>KiCadGen.kicad_sym</code> (i simboli), e le librerie
+      vengono registrate nelle tabelle del progetto (<code>fp-lib-table</code> e
+      <code>sym-lib-table</code>) con percorsi relativi (<code>${KIPRJMOD}</code>),
+      quindi il progetto resta portabile. In KiCad trovi subito il simbolo
+      <code>KiCadGen:nome</code>, già collegato al suo footprint.</td></tr>
+  <tr><td class="ui">Installa come libreria globale</td>
+      <td>Rende simbolo e footprint disponibili in tutti i progetti di questo computer.
+      Richiede che KiCad sia installato (le tabelle globali dell'utente vengono
+      trovate con <code>kicad-cli</code>); scegli la cartella delle librerie e le
+      librerie vengono registrate nella <code>fp-lib-table</code> e nella
+      <code>sym-lib-table</code> globali di KiCad con percorsi assoluti. Le altre
+      librerie delle tabelle restano come sono. Se KiCad non è mai stato avviato
+      quelle tabelle non esistono ancora e l'installazione viene rifiutata: avvia
+      KiCad una volta, completa la configurazione iniziale delle librerie e
+      riprova.</td></tr>
 </table>
+<p>Il simbolo viene <strong>aggiunto</strong> alla libreria
+<code>KiCadGen.kicad_sym</code>, che raccoglie i simboli di tutti i componenti
+installati lì: gli altri simboli restano come sono, e un simbolo con lo stesso nome
+viene sostituito dopo una conferma. Se il componente non ha ancora il file del
+simbolo, l'installazione porta solo footprint e modello STEP e il rapporto dice
+come rimediare (<span class="ui">Applica</span> nella scheda «Simbolo elettrico»).</p>
 <p>Prima di sovrascrivere un componente già installato, o di spostare una libreria
 <code>KiCadGen</code> già registrata altrove, il programma chiede conferma. Prima
 di cambiare una tabella ne conserva una copia <code>.kicadgen-backup</code> e, se un
-passo fallisce, rimette a posto tutto ciò che aveva toccato. Il simbolo non viene
-registrato in nessuna tabella: si esporta con <span class="ui">Esporta simbolo
-KiCad…</span> (anche dalla riga del simbolo di questa scheda) e si aggiunge in
-KiCad con <em>Gestisci librerie di simboli</em>.
+passo fallisce, rimette a posto tutto ciò che aveva toccato.
 <span class="ui">Apri cartella componente</span> apre la cartella con footprint,
 modello STEP e documenti. La scheda <span class="ui">Esportazioni</span>
 (<kbd>Ctrl</kbd>+<kbd>6</kbd>) conserva lo storico delle installazioni e delle
@@ -656,9 +663,10 @@ esportazioni del simbolo fatte da questo computer.</p>
 finché non rispondi non scrive nulla:</p>
 <ul>
   <li><span class="ui">Libreria KiCadGen già registrata</span>: installando nel
-  progetto, la tabella globale ha già una libreria <code>KiCadGen</code> in
-  un'altra posizione. In quel progetto KiCad userà la libreria del progetto e non
-  troverà più i footprint della libreria globale con lo stesso nome.</li>
+  progetto, la tabella globale (dei footprint o dei simboli) ha già una libreria
+  <code>KiCadGen</code> in un'altra posizione. In quel progetto KiCad userà la
+  libreria del progetto e non troverà più i footprint o i simboli della libreria
+  globale con lo stesso nome.</li>
   <li><span class="ui">Progetto aperto in KiCad</span>: i file di blocco di KiCad
   (<code>~&lt;nome&gt;.kicad_pro.lck</code> e simili) dicono che il progetto è
   aperto. KiCad vedrà la nuova libreria solo dopo averlo riaperto: meglio chiuderlo
@@ -673,16 +681,38 @@ prossima installazione la elimina dopo un giorno, oppure puoi cancellarla tu. Un
 storico delle esportazioni illeggibile (<code>kicad_exports.json</code>) viene
 spostato da parte come <code>kicad_exports.json.corrupt-&lt;data-ora&gt;</code> e
 ne viene iniziato uno nuovo: nessuna registrazione si perde in silenzio.</p>
-<h3>Verifica del componente</h3>
-<p>Nel tab <span class="ui">KiCad</span>, l'icona <span class="ui">Verifica componente per KiCad</span>
-controlla i file generati, la corrispondenza dei numeri pin-pad e, se <code>kicad-cli</code> è
-disponibile, prova la lettura di footprint, simbolo e STEP con KiCad CLI, usando una cartella
-temporanea (senza, quella prova risulta non eseguita). Il rapporto copiabile distingue
-controlli superati, errori, avvisi e controlli non eseguiti. Il simbolo applicato viene provato
-anche se non ancora esportato; le bozze non applicate sono escluse e segnalate.
-Questa verifica non certifica pinout, misure, allineamento visivo 3D o librerie installate;
-ERC e DRC vanno eseguiti sullo schema e sulla scheda finali.</p>
-<p>La verifica resta disponibile quando esiste il footprint ma manca lo STEP;
+<h3 id="controllo">Controllo del componente (passo 1)</h3>
+<p>Quando apri la scheda <span class="ui">KiCad</span> con file che nessun controllo ha
+ancora letto, il controllo <strong>parte da solo</strong>: non chiede nulla e non
+modifica la configurazione di KiCad. Aspetta solo se un lavoro sta scrivendo i file o
+se i file non corrispondono ai parametri (la riga in cima al passo dice perché).
+Controlla i file generati, la corrispondenza dei numeri pin-pad e, se
+<code>kicad-cli</code> è disponibile, prova la lettura di footprint, simbolo e STEP con
+KiCad CLI (DRC ed ERC compresi). L'esito resta scritto nel passo: un verdetto, una riga
+per ogni cosa da fare con il suo pulsante (per esempio <span class="ui">Apri la tabella
+Pinout</span> o <span class="ui">Suggerisci con AI</span>) e i controlli superati.
+<span class="ui">Controlla di nuovo</span> lo ripete, <span class="ui">Interrompi</span>
+lo ferma subito, <span class="ui">Copia rapporto</span> copia verdetto, righe e dettagli
+tecnici.</p>
+<p>L'esito decide il passo 3:</p>
+<ul>
+  <li><strong>errori</strong> (verdetto <span class="ui">NON USARE</span>): l'installazione
+  resta bloccata finché non li correggi;</li>
+  <li><strong>avvisi</strong> o controlli non eseguiti: puoi installare, e la frase del
+  passo 3 dice che cosa rivedere prima della produzione;</li>
+  <li><strong>tutto a posto</strong> (restano solo le verifiche da fare a mano in KiCad):
+  <span class="ui">Installa nel progetto KiCad (consigliato)</span> è in evidenza.</li>
+</ul>
+<p>Ogni modifica ai file che l'installazione copia (una rigenerazione,
+<span class="ui">Applica ai file</span>, una nuova esportazione del simbolo) rende
+l'esito vecchio: i pulsanti di installazione si spengono e il controllo riparte. Un
+problema dello strumento di controllo (KiCad CLI che non risponde entro 60 secondi o
+non si avvia) non è un errore del componente: risulta «non eseguito» e non blocca
+l'installazione. Dopo un'installazione si aggiorna solo la riga della libreria KiCad.
+Il simbolo applicato viene provato anche se non ancora esportato; le bozze non
+applicate sono escluse e segnalate. Questo controllo non certifica pinout, misure o
+allineamento visivo 3D; ERC e DRC vanno eseguiti sullo schema e sulla scheda finali.</p>
+<p>Il controllo resta disponibile quando esiste il footprint ma manca lo STEP;
 l'installazione resta disabilitata finché i file richiesti non sono presenti.
 I riferimenti e le trasformazioni 3D originali sono controllati separatamente dalla
 copia temporanea normalizzata. Percorsi relativi o variabili KiCad non risolti

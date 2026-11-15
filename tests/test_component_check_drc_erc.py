@@ -173,7 +173,7 @@ def _fake_cli(monkeypatch, drc=None, erc=None, fail=(), seen=None):
             output.mkdir(parents=True, exist_ok=True)
             (output / 'out.svg').write_text('<svg/>', encoding='utf-8')
         return subprocess.CompletedProcess(command, 0, '', '')
-    monkeypatch.setattr(check.subprocess, 'run', run)
+    monkeypatch.setattr(check, '_run_cli', run)
 
 
 def test_drc_and_erc_run_on_the_preview_of_the_applied_symbol(tmp_path, monkeypatch):

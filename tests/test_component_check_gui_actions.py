@@ -26,24 +26,27 @@ MAIN_ANSWER = {
 
 
 class _DialogStub:
-    """Stand-in of ComponentCheckDialog recording what the window gives it."""
+    """Records what the window gives the check (formerly a stand-in of the modal dialog)."""
     seen = {}
 
-    def __init__(self, args, parent=None, tx=None, actions=None):
-        # CONTRACT CHANGED 2026-11-14 (review P2): the window gives an args
-        # BUILDER, called for every run; the stub calls it once.
+    @staticmethod
+    def run(args, actions=None, keep_status=False):
+        """Stand-in of `ComponentCheckPanel.run`: records the builder, the arguments, the actions.
+
+        CONTRACT CHANGED 2026-11-14 (review P2): the window gives an args
+        BUILDER, called for every run; the stub calls it once.
+        CONTRACT CHANGED 2026-11-15 (guided KiCad tab): the check runs in the
+        panel of the KiCad tab, no longer in a modal dialog.
+        """
         _DialogStub.seen = {"args": args() if callable(args) else args, "builder": args,
                             "actions": dict(actions or {})}
-
-    def exec(self):
-        return 0
+        return True
 
 
 @pytest.fixture
 def check_window(window, monkeypatch):
     """The window with the check dialog stubbed, the file gates open, a castellated module."""
-    from kicadgen.gui import component_check_dialog
-    monkeypatch.setattr(component_check_dialog, "ComponentCheckDialog", _DialogStub)
+    monkeypatch.setattr(window.kicad_check_panel, "run", _DialogStub.run)
     monkeypatch.setattr(window, "_footprint_pending_block", lambda: None)
     monkeypatch.setattr(window, "_footprint_alignment_block", lambda: None)
     monkeypatch.setattr(window, "_kicad_model_offset", lambda: (0.0, 0.0, 0.0))

@@ -114,8 +114,10 @@ def test_guide_follows_light_and_dark_theme(guide_text):
     "Torna ai progetti", "Strumenti AI", "Footprint sulla scheda ospitante",
     "Aggiorna solo il footprint", "Pad Ø:", "Foro Ø:",
     "Saldatura diretta / piazzole del modulo", "Strip header / pad circolari con foro",
-    "Prova in KiCad...", "Installa nel progetto KiCad...",
-    "Installa come libreria globale...", "analisi-ai.log", "freecad.log",
+    # CONTRACT CHANGED 2026-11-15 (guided KiCad tab): the step commands say
+    # their name as text, «Apri in KiCad» and the two installations.
+    "Apri in KiCad", "Installa nel progetto KiCad (consigliato)",
+    "Installa come libreria globale", "Controlla di nuovo", "analisi-ai.log", "freecad.log",
     # 2026-10-30: the guide still said «modello 3D» for these two commands.
     "Rigenera modello STEP con queste annotazioni", "Elimina dal modello STEP (falso positivo)",
 ])
@@ -190,8 +192,9 @@ def test_the_structure_check_sees_a_missing_chapter(guide_text):
 
 @pytest.mark.parametrize("language", sorted(TRANSLATIONS))
 @pytest.mark.parametrize("label", [
-    "Nuovo progetto...", "Estrai parametri con AI", "Prova in KiCad...",
-    "Installa nel progetto KiCad...", "Installa come libreria globale...",
+    "Nuovo progetto...", "Estrai parametri con AI", "Apri in KiCad",
+    "Installa nel progetto KiCad (consigliato)", "Installa come libreria globale",
+    "Controlla di nuovo",
     "Aggiorna solo il footprint", "Scelta del modello STEP",
     "Rigenera modello STEP con queste annotazioni", "Elimina dal modello STEP (falso positivo)",
 ])

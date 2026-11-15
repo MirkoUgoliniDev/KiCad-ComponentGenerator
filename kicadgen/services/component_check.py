@@ -8,6 +8,7 @@ import os
 import re
 import subprocess
 import tempfile
+import threading
 from types import SimpleNamespace
 
 from .system_dependencies import check_kicad_version, find_kicad_cli
@@ -1191,7 +1192,119 @@ def _file_digest(path):
     return len(data), hashlib.sha256(data).hexdigest()
 
 
-def library_checks(name, footprint_text, installs, step_path=None, model_offset=(0.0, 0.0, 0.0)):
+class CliStopped(BaseException):
+    """@brief Raised inside a check when its kicad-cli command was killed by `stop_cli_commands`.
+
+    @note A BaseException on purpose: the check catches `Exception` (and
+        OSError) around single commands to report them, and a stop asked by
+        the user or by a quit must end the run, not become one more row.
+    """
+
+
+#: kicad-cli processes of the running check, killed by `stop_cli_commands`.
+_CLI_PROCESSES = set()
+#: Processes `stop_cli_commands` killed, so their runner raises CliStopped.
+_CLI_STOPPED = set()
+_CLI_LOCK = threading.Lock()
+
+
+def _run_cli(command, *, timeout=60, cwd=None):
+    """@brief Run one kicad-cli command like `subprocess.run(capture_output=True, text=True)`, killably.
+
+    @param command The command line (list).
+    @param timeout Seconds before the command is killed and TimeoutExpired raised.
+    @param cwd Working folder of the command.
+    @return subprocess.CompletedProcess with stdout and stderr as text.
+    @throws subprocess.TimeoutExpired, OSError As subprocess.run.
+    @throws CliStopped When `stop_cli_commands` killed it meanwhile.
+    @note The process tree is killed on a timeout or a stop
+        (`process_log.kill_process_tree`): a check left running when the
+        window closes or the project changes must not leave kicad-cli behind
+        (review 2026-11-15, M3).
+    """
+    from ..cad3d.process_log import contain_process, kill_process_tree, reap_killed_child
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                               errors='replace', cwd=cwd,
+                               creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+    # In a Job Object that dies with it: a descendant the process snapshot
+    # cannot prove would otherwise keep the pipes open and the check running.
+    contain_process(process)
+    with _CLI_LOCK:
+        _CLI_PROCESSES.add(process)
+    try:
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            kill_process_tree(process)
+            reap_killed_child(process)
+            raise
+    finally:
+        with _CLI_LOCK:
+            _CLI_PROCESSES.discard(process)
+            stopped = process in _CLI_STOPPED
+            _CLI_STOPPED.discard(process)
+    if stopped:
+        raise CliStopped()
+    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+
+
+def stop_cli_commands() -> int:
+    """@brief Kill the kicad-cli commands of the running check (a stop, a quit, a project switch).
+
+    @return The number of commands killed.
+    @note Their runners raise CliStopped, which ends the check: what a
+        killed command would have reported is not a result.
+    """
+    from ..cad3d.process_log import kill_process_tree
+    with _CLI_LOCK:
+        running = [process for process in _CLI_PROCESSES if process.poll() is None]
+        _CLI_STOPPED.update(running)
+    for process in running:
+        try:
+            kill_process_tree(process)
+        except OSError:
+            pass  # already gone between the poll and the kill
+    return len(running)
+
+
+def _installed_symbol_differs(name, symbol_path, library):
+    """@brief What differs between the component's symbol and its copy in an installed library.
+
+    @param name Component name, the symbol's name in the library.
+    @param symbol_path The component's ``<name>.kicad_sym`` (None: not compared).
+    @param library The installed ``<library>.kicad_sym`` next to the ``.pretty``.
+    @return None when nothing differs or nothing can be compared (no usable
+        symbol of the component: an installation would not ship one either);
+        otherwise the translated word for the difference («simbolo mancante»
+        or «simbolo»).
+    @note The comparison is on S-expression tokens of the one symbol block,
+        named as an installation names it (`_named_symbol_block`): the other
+        symbols of the shared library are not this component's business.
+    """
+    from .kicad_library import _component_symbol_path, _library_symbol, _named_symbol_block
+    from .kicad_library import _SymbolUnusable, _SYMBOL_HEAD, _atom_value, _direct_child_ranges
+    if symbol_path is None:
+        return None
+    try:
+        source = Path(symbol_path).read_text(encoding='utf-8-sig')
+        # Named for the library it sits in (the .kicad_sym's stem), as installed.
+        expected = _named_symbol_block(_library_symbol(source, name), name, Path(library).stem)
+    except (OSError, ValueError, RuntimeError, _SymbolUnusable):
+        return None
+    try:
+        text = Path(library).read_text(encoding='utf-8-sig')
+        blocks = [text[start:end] for start, end in _direct_child_ranges(text, 'symbol')
+                  if (head := _SYMBOL_HEAD.match(text[start:end]))
+                  and _atom_value(head.group(2)) == name]
+    except (OSError, ValueError, RuntimeError):
+        blocks = []
+    if not blocks:
+        return tx('simbolo mancante')
+    return None if sexpr_tokens(blocks[0]) == sexpr_tokens(expected) else tx('simbolo')
+
+
+def library_checks(name, footprint_text, installs, step_path=None, model_offset=(0.0, 0.0, 0.0),
+                   symbol_path=None):
     """@brief Whether the KiCad libraries the component was installed in hold what an install writes NOW.
 
     @param name Component name (the installed file is `<name>.kicad_mod`).
@@ -1201,6 +1314,9 @@ def library_checks(name, footprint_text, installs, step_path=None, model_offset=
     @param step_path The component's STEP (None or missing: delivered without model).
     @param model_offset The model offset the install would write
         (`kicad_library.model_offset_for_anchor`).
+    @param symbol_path The component's ``<name>.kicad_sym``, whose symbol an
+        installation adds to ``<library>.kicad_sym`` next to the ``.pretty``
+        (user decision 2026-11-15, «opzione 1»); None compares no symbol.
     @return [] for None; one WARN (importance 3) when the list is empty (never
         installed); a SKIP «non confrontabile» for an installation that
         cannot be compared (and when none can); otherwise one row per installation: OK when everything an
@@ -1210,7 +1326,9 @@ def library_checks(name, footprint_text, installs, step_path=None, model_offset=
         action that opens the KiCad tab.
     @note The comparison is on S-expression tokens (`sexpr_tokens`): layout
         whitespace is ignored, quoted strings are compared exactly. The
-        installation writes no symbol library, so no symbol is compared.
+        installed symbol is compared too (CONTRACT CHANGED 2026-11-15: the
+        installation writes the symbol library now); a library installed
+        before that holds no symbol and reads «simbolo mancante».
     """
     if installs is None:
         return []
@@ -1266,6 +1384,10 @@ def library_checks(name, footprint_text, installs, step_path=None, model_offset=
                 differs.append(tx('footprint'))
         if with_model and _file_digest(installed_step) != _file_digest(step_path):
             differs.append(tx('modello STEP'))
+        symbol_differs = _installed_symbol_differs(
+            name, symbol_path, pretty.parent / f'{pretty.stem}.kicad_sym')
+        if symbol_differs:
+            differs.append(symbol_differs)
         if not differs:
             results.append(Check('OK', title, tx('Libreria {scope} aggiornata: {path}',
                                                  scope=scope, path=installed), code='kicad_library'))
@@ -1429,7 +1551,13 @@ def verify_component(directory, name, rows, *, pending=False, issues=(), emit=la
                 'non legge i file generati. Installare KiCad {minimum} o successivo.',
                 version=verdict.version, path=cli, minimum=verdict.minimum))
     if pending:
-        add('WARN', tx('Modifiche non applicate'), tx('Verificato il simbolo applicato; la bozza non è inclusa.'))
+        # Said in plain words, with the way to fix it (user, 2026-11-15: the
+        # former «Verificato il simbolo applicato; la bozza non è inclusa»
+        # could not be understood).
+        add('WARN', tx('Modifiche non applicate'),
+            tx('Il simbolo ha modifiche non ancora salvate: il controllo usa il simbolo salvato.'),
+            remedy=tx('Premi «Applica» nella scheda Simbolo elettrico per salvarle, poi ricontrolla.'),
+            code='symbol_draft_pending')
     if footprint_pending:
         add('WARN', tx('Modifiche non applicate'),
             tx('Verificato il footprint applicato; la bozza del footprint non è inclusa.'))
@@ -1484,9 +1612,7 @@ def verify_component(directory, name, rows, *, pending=False, issues=(), emit=la
             try:
                 if pattern:
                     output.mkdir(parents=True, exist_ok=True)
-                proc = subprocess.run([cli, *map(str, args)], capture_output=True,
-                    text=True, errors='replace', timeout=60, cwd=str(neutral_working_dir(cli)),
-                    creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+                proc = _run_cli([cli, *map(str, args)], timeout=60, cwd=str(neutral_working_dir(cli)))
                 log = (proc.stdout + '\n' + proc.stderr).strip()
                 files = list(output.rglob(pattern)) if pattern else [output]
                 valid = any(p.is_file() and p.stat().st_size for p in files)
@@ -1507,8 +1633,20 @@ def verify_component(directory, name, rows, *, pending=False, issues=(), emit=la
                     log.replace(str(scratch), '…') if warning and log else tx('File letto da KiCad.'),
                     code=code)
                 return True
-            except (OSError, subprocess.TimeoutExpired) as exc:
-                add('ERROR', title, exc, code=code)
+            except subprocess.TimeoutExpired:
+                # A failure of the CHECKING TOOL, not of the component: «not
+                # run», never an ERROR -- an ERROR forbids the installation in
+                # the guided KiCad tab, and a slow PC or an antivirus holding
+                # kicad-cli would then block a sound component for good
+                # (review 2026-11-15, H1). KiCad saying it cannot read the
+                # file (exit code, error lines above) stays an ERROR.
+                add('SKIP', title, tx('kicad-cli non ha risposto entro 60 secondi.'), code=code,
+                    remedy=tx('Ripeti il controllo; se si ripete, chiudi gli altri programmi KiCad.'))
+                return False
+            except OSError as exc:
+                add('SKIP', title, tx('kicad-cli non avviato: {error}', error=exc), code=code,
+                    remedy=tx('Ripeti il controllo; se si ripete, verifica che KiCad sia installato '
+                              "e non bloccato dall'antivirus."))
                 return False
 
         pad_ids = None
@@ -1639,7 +1777,10 @@ def verify_component(directory, name, rows, *, pending=False, issues=(), emit=la
             # production (user decision 2026-11-13): importance 2, «DA RIVEDERE
             # PRIMA DELL’USO» until fixed. Other technical warnings, the
             # missing model link included, stay final reviews (importance 3).
-            export_remedy = tx('Esporta il simbolo .kicad_sym nella cartella del componente dal tab KiCad.')
+            # The KiCad tab has no export command since 2026-11-15 (the
+            # installation brings the symbol): the row's own action rewrites it.
+            export_remedy = tx('Usa «Riesporta il simbolo»: riscrive il .kicad_sym nella cartella '
+                               'del componente dal simbolo applicato.')
             if saved.is_file():
                 if (symbol_text_without_metadata(saved.read_text(encoding='utf-8'))
                         != symbol_text_without_metadata(symbol)):
@@ -1722,9 +1863,7 @@ def verify_component(directory, name, rows, *, pending=False, issues=(), emit=la
         def run_json(args, output, key):
             """(report, '') of one kicad-cli JSON report, or (None, reason): never an ERROR."""
             try:
-                proc = subprocess.run([cli, *map(str, args)], capture_output=True, text=True,
-                                      errors='replace', timeout=60, cwd=str(neutral_working_dir(cli)),
-                                      creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+                proc = _run_cli([cli, *map(str, args)], timeout=60, cwd=str(neutral_working_dir(cli)))
             except subprocess.TimeoutExpired:
                 return None, tx('kicad-cli non ha risposto entro 60 secondi.')
             except OSError as exc:
@@ -1795,7 +1934,8 @@ def verify_component(directory, name, rows, *, pending=False, issues=(), emit=la
 
         # The KiCad libraries the component was installed in.
         if footprint_text is not None:
-            for result in library_checks(name, footprint_text, installs, step, model_offset):
+            for result in library_checks(name, footprint_text, installs, step, model_offset,
+                                         symbol_path=root / f'{name}.kicad_sym'):
                 publish(result)
     manual = tx('ERC del tuo schema e DRC della tua scheda in KiCad; controlla a vista posizione, '
                 'scala e orientamento del modello STEP.')

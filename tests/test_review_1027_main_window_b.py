@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 from PyQt6.QtCore import QCoreApplication, QEvent
-from PyQt6.QtWidgets import QComboBox, QDialog, QMenu, QMessageBox, QWizard
+from PyQt6.QtWidgets import QComboBox, QDialog, QMenu, QMessageBox, QPushButton, QWizard
 
 from kicadgen.gui import main_window as gui
 from kicadgen.gui.project_state import saved_package_geometry, write_project_config
@@ -134,6 +134,12 @@ def test_b8_a_malformed_history_row_never_breaks_the_table(window, monkeypatch):
 # ── B3 and K: the install sink re-checks the gate and words the plan ────
 
 def _global_install(window, tmp_path, artifacts):
+    # CONTRACT CHANGED 2026-11-15: the global install brings the symbol and
+    # refuses BEFORE its question when KiCad's global sym-lib-table is missing;
+    # a started KiCad has both tables next to each other, so the fake has both.
+    symbols = tmp_path / "sym-lib-table"
+    if not symbols.exists():
+        symbols.write_text("(sym_lib_table\n  (version 7)\n)\n", encoding="utf-8")
     window._install_kicad_library(tmp_path / "dest", project_library=False,
                                   table_path=tmp_path / "fp-lib-table", table_version="10.0",
                                   artifacts=artifacts)
@@ -315,30 +321,28 @@ def test_b6_the_footprint_text_menu_is_released(window, monkeypatch):
     assert len(window.findChildren(QMenu)) == before
 
 
-# ── B7: wizard page 3 calls the export and names the written file ───────
+# ── B7: the wizard follows the installation, which brings the symbol ────
+# CONTRACT CHANGED 2026-11-15 (user, «opzione 1»): the installation puts the
+# symbol into KiCad with the footprint, so the wizard has no page to export
+# and register the symbol by hand any more, and no export button.
 
-def test_b7_the_wizard_export_explains_a_refusal(window, monkeypatch):
-    """@brief Positive: unapplied symbol edits -> a visible reason, no export call."""
-    shown, exported = [], []
-    monkeypatch.setattr(window.symbol_tab, "has_pending_edits", lambda: True)
-    monkeypatch.setattr(QMessageBox, "information", lambda *a: shown.append(a[2]))
-    monkeypatch.setattr(window, "_export_electrical_symbol", lambda: exported.append(1))
-    window._export_symbol_from_wizard()
-    assert exported == [] and shown and "non applicate" in shown[0]
-
-
-def test_b7_the_wizard_export_runs_when_allowed(window, monkeypatch):
-    """@brief Negative: no pending edit and no mismatch -> the export itself runs."""
-    exported = []
-    monkeypatch.setattr(window.symbol_tab, "has_pending_edits", lambda: False)
-    monkeypatch.setattr(window, "_symbol_pad_mismatch", lambda: "")
-    monkeypatch.setattr(window, "_export_electrical_symbol", lambda: exported.append(1))
-    window._export_symbol_from_wizard()
-    assert exported == [1]
+def test_b7_the_wizard_has_no_manual_symbol_step(window, monkeypatch):
+    """@brief Positive: three pages, the symbol placed from KiCadGen; negative: no export button."""
+    shown = []
+    monkeypatch.setattr(QWizard, "exec", lambda wizard: shown.append(wizard) or 0)
+    window._show_kicad_usage_wizard()
+    wizard = shown[0]
+    titles = [wizard.page(page_id).title() for page_id in wizard.pageIds()]
+    assert titles == ["1. Installa il componente", "2. Aggiungi il simbolo allo schema",
+                      "3. Aggiorna e verifica il PCB"]
+    buttons = [button.text() for button in wizard.findChildren(QPushButton)
+               if button.text().startswith(("Installa", "Esporta"))]
+    assert buttons == ["Installa nel progetto KiCad…", "Installa come libreria globale…"]
+    assert not hasattr(window, "_export_symbol_from_wizard")
 
 
 def test_b7_every_wizard_text_is_in_the_catalogue():
-    """@brief Positive: the five pages, their buttons and page 3's new text have four languages."""
+    """@brief Positive: the pages and their buttons have four languages."""
     tree = ast.parse(Path(gui.__file__).read_text(encoding="utf-8"))
     method = next(node for node in ast.walk(tree)
                   if isinstance(node, ast.FunctionDef) and node.name == "_show_kicad_usage_wizard")
@@ -350,8 +354,8 @@ def test_b7_every_wizard_text_is_in_the_catalogue():
     # The method's own docstring is documentation, not interface text.
     literals.discard(method.body[0].value.value)
     texts = {text for text in literals if any(ch.isalpha() for ch in text) and " " in text}
-    assert any(text.startswith("3. Registra il simbolo") for text in texts)
-    assert not any("Esporta il simbolo .kicad_sym" in text for text in texts)
+    assert any(text.startswith("2. Aggiungi il simbolo") for text in texts)
+    assert not any(text.startswith("3. Registra il simbolo") for text in texts)
     for text in texts:
         entry = DEFAULT_TRANSLATIONS.get("ui:" + text)
         assert entry and all(entry.get(language) for language in LANGUAGES), text

@@ -576,6 +576,15 @@ def _calls(count: int) -> str:
     return tx("{count} chiamata", count=count) if count == 1 else tx("{count} chiamate", count=count)
 
 
+def calls_text(count: int) -> str:
+    """@brief Public form of `_calls`: «1 call» or «N calls» in the active language.
+
+    @param count Number of calls.
+    @return The translated count with its own singular or plural.
+    """
+    return _calls(count)
+
+
 def format_model_lines(by_model) -> list:
     """@brief One translated line per model, the most expensive first.
 
@@ -599,6 +608,52 @@ def format_model_lines(by_model) -> list:
     return lines
 
 
+def single_model(by_model) -> Optional[str]:
+    """@brief The one model of a tally whose lines would only repeat the total, or None.
+
+    @param by_model Mapping model -> (cost_usd, calls, calls_without_cost), as
+        for `format_model_lines`.
+    @return The model name when the tally holds exactly one model and every
+        one of its calls reported a cost; None otherwise.
+    @note With one model its line says the same amount and calls as the total
+        (user, 2026-11-15: the finished card looked like it said the same thing
+        twice), so the caller names the model in the total instead. A model with
+        calls without cost keeps its line: «at least ... without cost» is
+        information the total does not carry.
+    """
+    items = list((by_model or {}).items())
+    if len(items) != 1:
+        return None
+    model, (_cost, calls, missing) = items[0]
+    return model if calls and not missing else None
+
+
+def format_cached_lines(cached_by_model) -> list:
+    """@brief One translated line per model whose answers were replayed from the local cache.
+
+    @param cached_by_model Mapping model -> number of answers served from the
+        local cache (`UsageTotals.cached_by_model` or
+        `ProjectCosts.run_cached_by_model`).
+    @return «model: N readings from the cache (free)» lines, the model with
+        most readings first; empty without cached answers.
+    @note A cached answer never reached a provider: it costs nothing and is
+        not a call. The line exists so a model the analysis used only through
+        the cache is not mistaken for a model left unused (user, 2026-11-15:
+        «e deepseek?», and DeepSeek?).
+    """
+    lines = []
+    counts = [(model, count) for model, count in (cached_by_model or {}).items()
+              if isinstance(count, int) and not isinstance(count, bool) and count > 0]
+    for model, count in sorted(counts, key=lambda item: (-item[1], item[0])):
+        # Singular and plural are two whole sentences, as for `_calls`.
+        if count == 1:
+            lines.append(tx("{model}: 1 lettura dalla cache (gratis)", model=model))
+        else:
+            lines.append(tx("{model}: {count} letture dalla cache (gratis)",
+                            model=model, count=count))
+    return lines
+
+
 @dataclass
 class UsageTotals:
     """@brief Totals of one processing run: calls, tokens and actual cost reported by OpenRouter.
@@ -608,8 +663,9 @@ class UsageTotals:
         lists: it already accounts for the provider that actually served the
         request, for the discounts on tokens read from the model cache and
         for the reasoning tokens.
-    @note Responses served by the local disk cache do not pass through here
-        and count as zero, which is correct: they never touched the API.
+    @note Responses served by the local disk cache are not calls and cost
+        nothing, which is correct: they never touched the API. They are only
+        counted, per model, in `cached_by_model` (`record_cached_answer`).
     """
 
     calls: int = 0
@@ -624,6 +680,16 @@ class UsageTotals:
     #: the model the program asked for, the one the user chose in «Modello
     #: AI»; the name in the answer only when no request name is known.
     by_model: dict = field(default_factory=dict)
+    #: Model -> answers of this run replayed from the local cache instead of
+    #: being asked again (free, not calls; user, 2026-11-15).
+    cached_by_model: dict = field(default_factory=dict)
+
+    def cached_lines(self) -> list:
+        """@brief One line per model whose answers this run took from the local cache.
+
+        @return `format_cached_lines` of `cached_by_model`; empty without any.
+        """
+        return format_cached_lines(self.cached_by_model)
 
     @property
     def complete(self) -> bool:
@@ -696,7 +762,8 @@ def usage_totals() -> UsageTotals:
         # The per-model lists are copied too: the snapshot must not move with later calls.
         return UsageTotals(**{**vars(_usage_totals),
                               "by_model": {key: list(value)
-                                           for key, value in _usage_totals.by_model.items()}})
+                                           for key, value in _usage_totals.by_model.items()},
+                              "cached_by_model": dict(_usage_totals.cached_by_model)})
 
 
 def _usage_int(container: Any, key: str) -> int:
@@ -743,6 +810,52 @@ def set_usage_listener(listener) -> None:
     """
     global _usage_listener
     _usage_listener = listener
+
+
+#: Called once per answer replayed from a local cache, from the thread that
+#: read it (see `set_cached_answer_listener`). None when nobody listens.
+_cached_answer_listener = None
+
+
+def set_cached_answer_listener(listener) -> None:
+    """@brief Be told about every AI answer served from a local cache instead of a provider.
+
+    @param listener Callable taking one dict (``model``, ``time`` ISO UTC of
+        the replay), or None to stop.
+    @note Kept apart from `set_usage_listener` on purpose: a cached answer is
+        not a paid call, and a listener of paid calls must never count one.
+        Same threading contract: called from the worker thread, a listener
+        that raises never breaks the analysis.
+    """
+    global _cached_answer_listener
+    _cached_answer_listener = listener
+
+
+def record_cached_answer(model: str) -> None:
+    """@brief Note that one AI answer of `model` was replayed from a local cache.
+
+    @param model The model the request named (part of every cache key).
+    @note Called by every cache of AI answers (photo_grounding.cached_call,
+        the global inventory, the crop readings) at the moment it serves a
+        stored answer instead of asking again. It adds the answer to the run
+        tally (`UsageTotals.cached_by_model`) and tells the listener, which
+        keeps it in the project's cost file with the current analysis. Never
+        a call, never a cost (user, 2026-11-15).
+    """
+    model_key = str(model or "") or "?"
+    with _usage_lock:
+        counts = _usage_totals.cached_by_model
+        counts[model_key] = counts.get(model_key, 0) + 1
+    listener = _cached_answer_listener
+    if listener is None:
+        return
+    record = {"model": model_key,
+              # ISO text: the record crosses a queued Qt signal.
+              "time": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+    try:
+        listener(record)
+    except Exception:  # noqa: BLE001 - bookkeeping only, the analysis goes on
+        pass
 
 
 def _token_count(usage: Any, key: str) -> Optional[int]:
@@ -990,8 +1103,10 @@ def _record_usage(payload: Any, *, sent_at: Optional[datetime] = None,
         moment = sent_at or datetime.now(timezone.utc)
         if moment.tzinfo is None:
             moment = moment.replace(tzinfo=timezone.utc)
-        record = {"cost_usd": cost, "model": str((payload.get("model") if isinstance(payload, dict)
-                                              else "") or model or ""),
+        # The model the program asked for, as the run tally and the cached
+        # answers name it; the answer's own name only without one (review
+        # 2026-11-15, L3: one model must not show under two names).
+        record = {"cost_usd": cost, "model": str(model or answered or ""),
                   # None, not 0, when not reported or unusable (B5).
                   "prompt_tokens": _token_count(usage, "prompt_tokens"),
                   "completion_tokens": _token_count(usage, "completion_tokens"),

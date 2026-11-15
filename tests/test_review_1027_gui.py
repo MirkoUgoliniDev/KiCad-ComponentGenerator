@@ -227,7 +227,9 @@ def test_the_verification_thread_survives_the_deletion_of_its_dialog(qapp, monke
         release.wait(5)
         return []
     monkeypatch.setattr(ui, "verify_component", slow_verify)
-    dialog = ui.ComponentCheckDialog(dict(directory=".", name="Demo", rows=[]))
+    # CONTRACT CHANGED 2026-11-15: the check is a panel of the KiCad tab (same worker).
+    dialog = ui.ComponentCheckPanel()
+    dialog.run(dict(directory=".", name="Demo", rows=[]))
     worker = dialog.worker
     assert worker.parent() is qapp
     assert _wait_for(started.is_set)

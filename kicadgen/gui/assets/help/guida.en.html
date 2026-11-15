@@ -401,8 +401,8 @@ the host lands can be edited, with <span class="ui">Undo edit</span> /
 not applied, <span class="ui">Recover draft</span> restores a draft not
 applied after an unexpected shutdown. The commands of the
 <span class="ui">KiCad</span> tab use the applied file: a draft not applied is not
-installed and is reported by <span class="ui">Check component for
-KiCad</span>.</p>
+installed and is reported by the component check (<span class="ui">KiCad</span>
+tab, step 1).</p>
 <p>In a package footprint the two body sides are <strong>editable
 dimensions</strong>: double click the dimension, or right click and choose
 <span class="ui">Edit dimension…</span>, and type the new value; the body stays
@@ -493,12 +493,10 @@ behaviour of the circuit. Check on the datasheet whether input, output,
 bidirectional, power_in or other types are needed before using KiCad's electrical
 checks. Equal names such as GND can belong to different numbers; numbers
 that are duplicated or absent from the footprint prevent the export.</p>
-<p><strong>Export KiCad symbol</strong> saves a <code>.kicad_sym</code> library.
-Add it in KiCad to the symbol libraries. The reference to the footprint is
-<code>KiCadGen:nome_componente</code>: use the same library name when
-you install the footprint, or change the association in KiCad. The installation
-from the «KiCad» tab still handles footprint and STEP model; the symbol
-library is exported separately.</p>
+<p>The installations of the «KiCad» tab also bring the symbol into KiCad, already
+linked to the footprint <code>KiCadGen:nome_componente</code>: there is no need to
+export it. <strong>Export KiCad symbol</strong> still saves a copy of the
+symbol in a <code>.kicad_sym</code> file of your choice, to use elsewhere.</p>
 <p>Shortcuts: Ctrl+3 opens the symbol, Ctrl+4 the STEP model, Ctrl+5 KiCad.</p>
 <h3>Electrical types suggested by the AI</h3>
 <p>In the <span class="ui">Electrical symbol</span> tab, <span class="ui">Suggest pin types with AI</span>
@@ -581,7 +579,7 @@ complete generation with this version; if dimensions, components,
 annotations or model files also change, the complete procedure is run again.</p>
 
 <h2 id="kicad">13. The «KiCad» tab: testing and installation</h2>
-<p>The <span class="ui">Files ready for KiCad</span> panel lists footprint,
+<p>Step 3 lists, under <span class="ui">What gets installed:</span>, footprint,
 electrical symbol and STEP model with their state. The isolated test and the two
 installations are <strong>blocked until the files on disk match the
 parameters</strong> of the project, and each block names its remedy, enabled right
@@ -597,7 +595,7 @@ project saved by an earlier version may require an
 <span class="ui">Apply to files</span>. The commands are also blocked while
 a background job is running. They use the <strong>applied</strong> files: a draft of the
 footprint or symbol that has not been applied does not block the commands, is not installed and
-is reported by <span class="ui">Check component for KiCad</span>.</p>
+is reported by the component check (step 1).</p>
 <p>The collapsible <span class="ui">Component metadata</span> panel contains
 reference designator (letters only: KiCad adds the number; the proposal
 in grey counts as filled), description, keywords, datasheet (URL or
@@ -607,19 +605,21 @@ commands' tooltip says which fields are missing. The
 <span class="ui">KiCad checks (KLC)</span> list updates while you type (⛔ error,
 ⚠ warning) and <span class="ui">Apply to files</span> writes the values into the footprint and
 the symbol; a ⛔ error makes the application be refused.</p>
-<p>In <span class="ui">Review before installation</span> there are three icons:
-<span class="ui">Quick guide to using the component in KiCad</span> (a five-page
-procedure: install, place the footprint, export and register the
-symbol, link them, update the PCB), <span class="ui">Check component for
-KiCad</span> (see below) and <span class="ui">Test in KiCad...</span>. In
-<span class="ui">Library installation</span> the two installations.</p>
+<p>The tab is a path in <strong>three steps</strong>, in the order in which they
+are done: <span class="ui">1 · Component check</span> (it starts by itself, see
+<a href="#controllo">below</a>), <span class="ui">2 · Look at it in KiCad
+(optional)</span> with <span class="ui">Open in KiCad</span>, and
+<span class="ui">3 · Install in the library</span>, with a sentence that says what
+you can do now, the two installations and the files they install. Below the steps
+is the metadata. <span class="ui">Guide</span>, at the top right, opens a three-page
+procedure: install, add the symbol to the schematic, update the PCB.</p>
 <p>Without a STEP model (for example on a computer without FreeCAD) the three commands still
 work: after a confirmation the footprint reaches KiCad without a 3D view and
 <code>KiCadGen.3dshapes</code> is not created. To add the model, install FreeCAD,
 regenerate the STEP model and repeat the command.</p>
 <table>
   <tr><th>Command</th><th>What it does</th></tr>
-  <tr><td class="ui">Test in KiCad...</td>
+  <tr><td class="ui">Open in KiCad</td>
       <td>Creates a small temporary project with the footprint, the symbol and the STEP
       model, in the component's <code>.kicad-preview</code> subfolder, opens the schematic
       in the Schematic Editor and the board in the PCB Editor, and shows a 3D image of the
@@ -627,28 +627,34 @@ regenerate the STEP model and repeat the command.</p>
       <kbd>Alt</kbd>+<kbd>3</kbd> for the interactive 3D view. Without a symbol only the
       board opens and the log says why; without a STEP model the 3D image is not made.
       It does not install and does not change any KiCad library.</td></tr>
-  <tr><td class="ui">Install in KiCad project...</td>
+  <tr><td class="ui">Install in the KiCad project (recommended)</td>
       <td>The recommended choice. Choose the folder of a KiCad project:
-      <code>KiCadGen.pretty</code> and <code>KiCadGen.3dshapes</code> are created and the
-      library is registered in the project's table with relative paths
-      (<code>${KIPRJMOD}</code>), so the project stays portable.</td></tr>
-  <tr><td class="ui">Install as global library...</td>
-      <td>Makes the footprint available in all the projects of this computer.
-      It requires KiCad to be installed (the user's global table is
+      <code>KiCadGen.pretty</code> (the footprints), <code>KiCadGen.3dshapes</code>
+      (the STEP models) and <code>KiCadGen.kicad_sym</code> (the symbols) are created, and
+      the libraries are registered in the project's tables (<code>fp-lib-table</code> and
+      <code>sym-lib-table</code>) with relative paths (<code>${KIPRJMOD}</code>),
+      so the project stays portable. In KiCad you find the symbol
+      <code>KiCadGen:name</code> right away, already linked to its footprint.</td></tr>
+  <tr><td class="ui">Install as a global library</td>
+      <td>Makes symbol and footprint available in all the projects of this computer.
+      It requires KiCad to be installed (the user's global tables are
       found with <code>kicad-cli</code>); choose the libraries folder and the
-      library is registered in KiCad's global <code>fp-lib-table</code>
-      with absolute paths. The other libraries of the table stay as they are.
-      If KiCad has never been started that table does not exist yet and
-      the installation is refused: start KiCad once, complete the initial
-      library setup and try again.</td></tr>
+      libraries are registered in KiCad's global <code>fp-lib-table</code> and
+      <code>sym-lib-table</code> with absolute paths. The other libraries of the
+      tables stay as they are. If KiCad has never been started those tables do not
+      exist yet and the installation is refused: start KiCad once, complete the
+      initial library setup and try again.</td></tr>
 </table>
+<p>The symbol is <strong>added</strong> to the <code>KiCadGen.kicad_sym</code>
+library, which collects the symbols of every component installed there: the other
+symbols stay as they are, and a symbol with the same name is replaced after a
+confirmation. If the component does not have its symbol file yet, the installation
+brings only footprint and STEP model and the report says how to fix it
+(<span class="ui">Apply</span> in the «Electrical symbol» tab).</p>
 <p>Before overwriting a component already installed, or moving a
 <code>KiCadGen</code> library already registered elsewhere, the program asks for confirmation. Before
 changing a table it keeps a <code>.kicadgen-backup</code> copy of it and, if a
-step fails, it puts back everything it had touched. The symbol is not
-registered in any table: it is exported with <span class="ui">Export KiCad
-symbol…</span> (also from the symbol row of this tab) and added in
-KiCad with <em>Manage Symbol Libraries</em>.
+step fails, it puts back everything it had touched.
 <span class="ui">Open component folder</span> opens the folder with footprint,
 STEP model and documents. The <span class="ui">Exports</span> tab
 (<kbd>Ctrl</kbd>+<kbd>6</kbd>) keeps the history of the installations and
@@ -657,9 +663,10 @@ symbol exports made from this computer.</p>
 apply; nothing is written until you answer:</p>
 <ul>
   <li><span class="ui">KiCadGen library already registered</span>: for a project
-  install, the global table already has a <code>KiCadGen</code> library at another
-  location. In that project KiCad will use the project's library and will no longer
-  find the footprints of the global library with the same name.</li>
+  install, the global table (of footprints or of symbols) already has a
+  <code>KiCadGen</code> library at another location. In that project KiCad will use
+  the project's library and will no longer find the footprints or symbols of the
+  global library with the same name.</li>
   <li><span class="ui">Project open in KiCad</span>: KiCad's lock files
   (<code>~&lt;name&gt;.kicad_pro.lck</code> and the like) show the project is open.
   KiCad will see the new library only after the project is reopened: close it
@@ -674,15 +681,37 @@ removes it after one day, or you can delete it yourself. An export history that
 can no longer be read (<code>kicad_exports.json</code>) is moved aside as
 <code>kicad_exports.json.corrupt-&lt;date-time&gt;</code> and a new one is started:
 no record is lost silently.</p>
-<h3>Checking the component</h3>
-<p>In the <span class="ui">KiCad</span> tab, the <span class="ui">Check component for KiCad</span> icon
-checks the generated files, the match of the pin-pad numbers and, if <code>kicad-cli</code> is
-available, tries reading footprint, symbol and STEP with KiCad CLI, using a temporary
-folder (without it, that test is reported as not run). The copyable report distinguishes
-passed checks, errors, warnings and checks not run. The applied symbol is tested
-even if not yet exported; drafts not applied are excluded and reported.
-This check does not certify pinout, dimensions, visual 3D alignment or installed libraries;
-ERC and DRC must be run on the final schematic and board.</p>
+<h3 id="controllo">Component check (step 1)</h3>
+<p>When you open the <span class="ui">KiCad</span> tab with files that no check has
+read yet, the check <strong>starts by itself</strong>: it asks nothing and does not
+change KiCad's configuration. It waits only if a job is writing the files or if the
+files do not match the parameters (the line at the top of the step says why).
+It checks the generated files, the match of the pin-pad numbers and, if
+<code>kicad-cli</code> is available, tries reading footprint, symbol and STEP with
+KiCad CLI (DRC and ERC included). The outcome stays written in the step: a verdict, one
+line for each thing to do with its button (for example <span class="ui">Open the Pinout
+table</span> or <span class="ui">Suggest with AI</span>) and the passed checks.
+<span class="ui">Check again</span> repeats it, <span class="ui">Stop</span>
+stops it at once, <span class="ui">Copy report</span> copies verdict, lines and
+technical details.</p>
+<p>The outcome decides step 3:</p>
+<ul>
+  <li><strong>errors</strong> (verdict <span class="ui">DO NOT USE</span>): installation
+  stays blocked until you fix them;</li>
+  <li><strong>warnings</strong> or checks not run: you can install, and the sentence of
+  step 3 says what to review before production;</li>
+  <li><strong>all clear</strong> (only the checks to do by hand in KiCad remain):
+  <span class="ui">Install in the KiCad project (recommended)</span> is highlighted.</li>
+</ul>
+<p>Any change to the files that the installation copies (a regeneration,
+<span class="ui">Apply to files</span>, a new export of the symbol) makes the
+outcome stale: the installation buttons are disabled and the check starts again. A
+problem of the checking tool (KiCad CLI that does not answer within 60 seconds or
+does not start) is not an error of the component: it is reported as «not run» and
+does not block installation. After an installation only the KiCad library line is
+updated. The applied symbol is tested even if not yet exported; drafts not applied
+are excluded and reported. This check does not certify pinout, dimensions or visual
+3D alignment; ERC and DRC must be run on the final schematic and board.</p>
 <p>The check stays available when the footprint exists but the STEP is missing;
 installation stays disabled until the required files are present.
 The original 3D references and transformations are checked separately from the

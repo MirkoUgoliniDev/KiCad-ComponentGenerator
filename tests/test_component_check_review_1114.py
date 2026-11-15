@@ -170,7 +170,7 @@ def test_a_non_zero_exit_keeps_the_first_stderr_line_and_runs_outside_the_projec
     art = _artifacts(tmp_path)
     cwds = []
     _fake_cli(monkeypatch, fail=('drc',))
-    fake = check.subprocess.run
+    fake = check._run_cli
 
     def run(command, **kwargs):
         cwds.append(kwargs.get('cwd'))
@@ -178,7 +178,7 @@ def test_a_non_zero_exit_keeps_the_first_stderr_line_and_runs_outside_the_projec
         if result.returncode:
             return subprocess.CompletedProcess(command, 3, '', '\nBoard not loaded: version too new\nmore')
         return result
-    monkeypatch.setattr(check.subprocess, 'run', run)
+    monkeypatch.setattr(check, '_run_cli', run)
     results = check.verify_component(art.component_dir, 'Demo', [{'pin': '1', 'name': 'A'}])
     drc = next(r for r in results if r.code == 'drc')
     assert 'Board not loaded: version too new' in drc.detail and 'more' not in drc.detail

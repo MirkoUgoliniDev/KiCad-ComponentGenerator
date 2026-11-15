@@ -237,7 +237,12 @@ def test_a_linked_model_offers_no_link_action(tmp_path, monkeypatch):
 # --- dialog verdict ------------------------------------------------------------------------------
 
 def _dialog(qapp, monkeypatch, checks, *, tx=lambda text: text, actions=None, calls=None):
-    """Run ComponentCheckDialog on a faked verification emitting `checks`; wait until finished."""
+    """Run the check panel of the KiCad tab on a faked verification emitting `checks`; wait until finished.
+
+    @note CONTRACT CHANGED 2026-11-15 (guided KiCad tab): the modal window
+        became `ComponentCheckPanel`, shown in step 1 of the KiCad tab; same
+        rows, verdict and actions, started by `run`.
+    """
     from kicadgen.gui import component_check_dialog as ccd
 
     def verify(*, emit, **_):
@@ -246,7 +251,8 @@ def _dialog(qapp, monkeypatch, checks, *, tx=lambda text: text, actions=None, ca
         for item in checks:
             emit(item)
     monkeypatch.setattr(ccd, 'verify_component', verify)
-    dialog = ccd.ComponentCheckDialog({}, tx=tx, actions=actions)
+    dialog = ccd.ComponentCheckPanel(tx=tx)
+    dialog.run({}, actions=actions)
     _CREATED.append(dialog)
     deadline = time.monotonic() + 5
     while dialog._running and time.monotonic() < deadline:
@@ -421,7 +427,11 @@ def test_the_real_alignment_warnings_make_review_before_use(qapp, monkeypatch, t
     by_rank = {}
     for item in dialog.items:
         by_rank.setdefault(item.rank, []).append(item.text)
-    assert any('Esporta il simbolo' in text for text in by_rank[module.RANK_BEFORE_PRODUCTION])
+    # CONTRACT CHANGED 2026-11-15: the KiCad tab has no export command any more
+    # (the installation brings the symbol), so the remedy names the row's own
+    # action «Riesporta il simbolo» instead of «Esporta il simbolo … dal tab KiCad».
+    assert any('Riesporta il simbolo' in text for text in by_rank[module.RANK_BEFORE_PRODUCTION])
+    assert not any('dal tab KiCad' in text for text in by_rank[module.RANK_BEFORE_PRODUCTION])
     assert not any('Installa la libreria' in text for text in by_rank[module.RANK_BEFORE_PRODUCTION])
     assert any('Installa la libreria' in text for text in by_rank[module.RANK_FINAL_REVIEW])
     dialog.close()

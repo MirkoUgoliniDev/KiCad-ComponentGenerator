@@ -103,12 +103,19 @@ def test_a_view_runs_without_a_recheck(qapp, monkeypatch):
 
 
 def test_a_handoff_closes_the_dialog_and_names_what_to_do(qapp, monkeypatch):
-    """@brief Positive: «Vai alla scheda KiCad» and «Suggerisci con AI» close with their hand-off;
-    no callable is needed for a hand-off."""
+    """@brief Positive: «Vai alla scheda KiCad» and «Suggerisci con AI» hand over what to do;
+    no callable is needed for a hand-off.
+
+    @note CONTRACT CHANGED 2026-11-15 (guided KiCad tab): the check is a panel
+        of the KiCad tab, not a modal window that closes: a hand-off is the
+        signal `handoff_requested`, which the window routes.
+    """
     dialog = _dialog(qapp, monkeypatch, [_LIBRARY])
+    handed = []
+    dialog.handoff_requested.connect(handed.append)
     dialog.action_buttons[check.ACTION_OPEN_KICAD_TAB].click()
     assert dialog.handoff == check.ACTION_OPEN_KICAD_TAB and not dialog.ai_review_requested
-    assert dialog.result() == dialog.DialogCode.Accepted
+    assert handed == [check.ACTION_OPEN_KICAD_TAB]
     types = [Check('WARN', 'Revisione simbolo', 'Tipo elettrico da verificare: 1', 'final', 3, '', None,
                    'electrical_type', ('1',))]
     dialog = _dialog(qapp, monkeypatch, types)
@@ -212,18 +219,24 @@ def test_the_details_list_problems_first(qapp, monkeypatch):
 
 
 def test_a_failing_args_builder_ends_in_one_error_row(qapp, monkeypatch):
-    """@brief Review L4: the builder raises -> one ERROR row through the normal end, never stuck."""
+    """@brief Review L4: the builder raises -> one row through the normal end, never stuck.
+
+    @note CONTRACT CHANGED 2026-11-15 (guided KiCad tab, review H1): the row is
+        «not run» (SKIP), not an ERROR: a failure of the check itself says
+        nothing about the component, and an ERROR forbids its installation.
+    """
     import time
     from kicadgen.gui import component_check_dialog as module
 
     def broken():
         raise OSError('project folder gone')
-    dialog = module.ComponentCheckDialog(broken, tx=lambda text: text)
+    dialog = module.ComponentCheckPanel(tx=lambda text: text)
+    dialog.run(broken)
     deadline = time.monotonic() + 5
     while dialog._running and time.monotonic() < deadline:
         qapp.processEvents()
         time.sleep(0.01)
-    assert not dialog._running and dialog.verdict.text() == 'NON USARE'
+    assert not dialog._running and dialog.verdict.text() == 'ESITO NON CONCLUSIVO'
     assert [r.detail for r in dialog.results] == ['project folder gone']
     dialog.close()
     dialog.deleteLater()

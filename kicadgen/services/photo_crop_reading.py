@@ -89,7 +89,7 @@ from pathlib import Path
 
 from .ai_diagnostics import CallCancelled
 from .messages import as_warning, tx
-from .openrouter import OpenRouterError
+from .openrouter import OpenRouterError, record_cached_answer
 from .photo_audit import write_stage_audit
 
 #: Version of the factory SYSTEM_PROMPT, the request text, observation_tool
@@ -1999,6 +1999,8 @@ def read_bodies(photo, components, length_mm, width_mm, model, call, log, cache_
             observation = _cached(directory, key)
             if observation is not None:
                 summary.readings_cached += 1
+                # Counted as a free cached answer of this model, never as a call.
+                record_cached_answer(model)
                 observations.append(observation)
                 continue
             while not summary.interrupted:

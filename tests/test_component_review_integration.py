@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 from PyQt6.QtCore import QObject, pyqtSignal
 from PyQt6.QtWidgets import QDialog, QMessageBox
-from kicadgen.gui import component_check_dialog, pin_type_dialog
+from kicadgen.gui import pin_type_dialog
 
 
 def test_verification_is_guarded_and_uses_applied_snapshot(window, monkeypatch):
@@ -10,23 +10,17 @@ def test_verification_is_guarded_and_uses_applied_snapshot(window, monkeypatch):
     window.symbol_tab.set_data('Demo', [{'pin': '1', 'name': 'GND'}])
     window.symbol_tab.table.item(0, 1).setText('Draft')
     captured = []
-    class Dialog:
-        # CONTRACT CHANGED 2026-11-13: the check dialog also receives its fixes
-        # (`actions`, the symbol re-export); this stub only records `args`.
-        def __init__(self, args, parent, tx, actions=None):
-            # CONTRACT CHANGED 2026-11-14 (review P2): the window gives an args BUILDER,
-            # called by the dialog for every run; the stub calls it once.
-            captured.append(args() if callable(args) else args)
-        def exec(self):
-            assert window._background_work_running()
-            assert not window._can_leave_project()
 
-        # CONTRACT CHANGED 2026-10-27 (review B6): the window releases every modal
-        # it opens (`MainWindow._run_modal` calls `deleteLater`), so a fake dialog
-        # must answer it like the QDialog it stands for.
-        def deleteLater(self):
-            pass
-    monkeypatch.setattr(component_check_dialog, 'ComponentCheckDialog', Dialog)
+    def run(args, actions=None, keep_status=False):
+        # CONTRACT CHANGED 2026-11-14 (review P2): the window gives an args BUILDER,
+        # called for every run; the stub calls it once.
+        captured.append(args() if callable(args) else args)
+        return True
+    # CONTRACT CHANGED 2026-11-15 (guided KiCad tab): the check runs in the panel
+    # of the KiCad tab, not in a modal dialog, and does not count as work in
+    # progress: it reads scratch copies, so nothing else has to wait for it
+    # (a file changed meanwhile only makes its outcome stale).
+    monkeypatch.setattr(window.kicad_check_panel, 'run', run)
     window._verify_component()
     assert captured[0]['pending']
     assert captured[0]['rows'][0]['name'] == 'GND'
@@ -37,9 +31,10 @@ def test_verification_refuses_concurrent_generation(window, monkeypatch):
     window._automatic_generation_active = True
     notices = []
     monkeypatch.setattr(QMessageBox, 'information', lambda *args: notices.append(args))
-    monkeypatch.setattr(component_check_dialog, 'ComponentCheckDialog', lambda *a, **kw: None)
+    started = []
+    monkeypatch.setattr(window.kicad_check_panel, 'run', lambda *a, **kw: started.append(a))
     window._verify_component()
-    assert len(notices) == 1
+    assert len(notices) == 1 and started == []
     window._automatic_generation_active = False
 
 

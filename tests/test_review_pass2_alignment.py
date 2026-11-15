@@ -20,7 +20,6 @@ L6: the KiCad commands did not follow the review dialogs.
 import re
 import time
 
-from PyQt6.QtWidgets import QDialog
 
 from kicadgen.gui import main_window as gui
 from tests.test_photo_inventory_gui import fill_required_metadata
@@ -280,24 +279,36 @@ def test_an_unresolved_doubt_keeps_its_note(window, monkeypatch, tmp_path):  # n
 # ── L6 ─────────────────────────────────────────────────────────────────────
 
 def test_the_review_dialog_switches_the_commands_off_and_back_on(window, monkeypatch, tmp_path):  # noqa: F811
+    """@brief L6: the installations are off while the check runs, back on when it ends.
+
+    @note CONTRACT CHANGED 2026-11-15 (guided KiCad tab): the check is the
+        panel of step 1, not a modal dialog; the installations wait for a
+        check of the current files (off before it, off while it runs) and come
+        back when it ends without errors.
+    """
+    import threading
     from tests.test_generated_files_alignment import _project
-    from kicadgen.gui import component_check_dialog
+    from tests.qt_fixtures import use_real_kicad_check
+    from kicadgen.gui import component_check_dialog as ccd
+    from kicadgen.services.component_check import Check
     _project(window, monkeypatch, tmp_path)
-    assert window.action_export.isEnabled()
-    during = []
+    use_real_kicad_check(window)
+    gate = threading.Event()
 
-    class FakeCheck(QDialog):
-        """Stands for ComponentCheckDialog, which starts its own checking thread."""
-
-        # CONTRACT CHANGED 2026-11-13: the check dialog also receives its
-        # fixes (`actions`, the symbol re-export); accepted and ignored here.
-        def __init__(self, args, parent=None, tx=None, actions=None):
-            super().__init__(parent)
-
-        def exec(self):  # noqa: D401 - QDialog override in the fake
-            during.append(window.action_export.isEnabled())
-            return QDialog.DialogCode.Rejected
-    monkeypatch.setattr(component_check_dialog, "ComponentCheckDialog", FakeCheck)
+    def verify(*, emit, **_):
+        gate.wait(5)
+        emit(Check('OK', 'Geometria del footprint', 'ok', code='footprint_geometry'))
+    monkeypatch.setattr(ccd, "verify_component", verify)
+    window._refresh_output_actions()
+    assert not window.action_export.isEnabled()          # no check of these files yet
     window._verify_component()
-    assert during == [False]
+    assert window.kicad_check_panel.is_running() and not window.action_export.isEnabled()
+    gate.set()
+    deadline = time.monotonic() + 5
+    while window.kicad_check_panel.is_running() and time.monotonic() < deadline:
+        window.kicad_check_panel.window().repaint()
+        from PyQt6.QtWidgets import QApplication
+        QApplication.processEvents()
+        time.sleep(0.01)
+    assert not window.kicad_check_panel.is_running()
     assert window.action_export.isEnabled()
