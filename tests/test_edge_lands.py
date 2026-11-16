@@ -138,7 +138,7 @@ def test_the_measured_width_replaces_what_the_model_did_not_read(pad_width, sour
     assert side["pad_width_mm"] == 1.82 and side["land_inward_mm"] == 2.2
     assert params.value_sources["castellated_sides.right.pad_width_mm"] == "measured"
     assert "misurata sulla foto: 1.82 mm" in params.notes
-    assert "non e' una misura" not in params.notes      # nothing to downgrade any more
+    assert "non è una misura" not in params.notes      # nothing to downgrade any more
 
 
 def test_a_width_read_in_the_documents_outranks_the_photo_and_is_compared():

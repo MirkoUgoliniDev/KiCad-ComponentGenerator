@@ -90,7 +90,7 @@ def test_a_missing_main_height_equal_to_the_plan_width_is_not_adopted_without_su
     apply_dedicated_body(data, {"values": {"body_height": 23.0}, "printed": _quotes((23.0, "plan")),
                                 "notes": ""}, logs.append)
     assert data.get("body_height_mm") is None and "body_height_mm" not in data["package_geometry"]
-    assert any("non e' sostenuta da nessuna quota stampata" in line for line in logs)
+    assert any("non è sostenuta da nessuna quota stampata" in line for line in logs)
     # Positive twin: the same value declared the body height by the reader is adopted.
     data = _main(body_length_mm=38.0, body_width_mm=23.0)
     data["printed_vertical_quotes"] = _quotes((23.0, "body_height"))

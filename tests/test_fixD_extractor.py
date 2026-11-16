@@ -159,7 +159,7 @@ def test_invalid_confidence_becomes_low():
 # ── D3: castellated sides ──────────────────────────────────────────────────
 
 def test_two_sides_on_the_same_edge_are_rejected():
-    with pytest.raises(ExtractionError, match="piu' volte"):
+    with pytest.raises(ExtractionError, match="più volte"):
         _castellated_sides([dict(edge="left", count=2, pitch_mm=2.54),
                             dict(edge="LEFT", count=3, pitch_mm=2.54)])
 

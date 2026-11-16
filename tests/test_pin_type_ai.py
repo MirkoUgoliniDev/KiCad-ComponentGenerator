@@ -21,30 +21,53 @@ def test_unknown_sources_and_missing_pins_are_unresolved():
     assert {p['pin'] for p in result} == {'1', '2'}
 
 
+# CONTRACT CHANGED 2026-11-15 (review A3/M7/F6/F7): `source` is an enum of the
+# sent file names and the page/table goes into `location`; a free-text source
+# is no longer parsed, so the real HLK answer is expressed in the new schema
+# and its former free-text form is now a negative case.
 @pytest.mark.parametrize('source', [
-    'pinout.jpeg, FUNZIONE PIN table and mechanical drawing (pins 1/2)',   # the real HLK answer
-    'PINOUT.JPEG',                                                         # letter case
-    'Table on page 1 of pinout.jpeg.',                                     # name inside a sentence
+    'pinout.jpeg',                      # the enum value, as the schema asks
+    'PINOUT.JPEG',                      # letter case changed by a provider that ignores enums
+    '  pinout.jpeg ',                   # surrounding blanks
 ])
-def test_a_source_that_names_a_sent_document_is_evidence(source):
-    """Real run 2026-11-15 (HLK-5M05B): the model wrote the table next to the file name and every
-    proposal was demoted, so nothing could be applied. The file stays the source, the rest goes to the reason."""
-    result = ai.validate_suggestions({'pins': [proposal(source=source)]}, ROWS, ['pinout.jpeg'])
+def test_a_source_that_is_a_sent_document_is_evidence(source):
+    """Real run 2026-11-15 (HLK-5M05B), in the new schema: the file in `source`, the table in
+    `location`; the sent name is the source and the location heads the shown rationale."""
+    item = dict(proposal(source=source), location='FUNZIONE PIN table and mechanical drawing (pins 1/2)')
+    result = ai.validate_suggestions({'pins': [item]}, ROWS, ['pinout.jpeg'])
     first = result[0]
     assert first['electrical_type'] == 'power_in' and first['source'] == 'pinout.jpeg'
-    assert 'module supply return' in first['reason']
+    assert first['reason'] == ('FUNZIONE PIN table and mechanical drawing (pins 1/2): '
+                               'Page 2: module supply return.')
 
 
 @pytest.mark.parametrize('source', [
-    'datasheet.pdf, page 3',            # a document that was not sent
+    'datasheet.pdf',                    # an enum value of a document that was not sent
+    'datasheet.pdf, page 3',            # a document that was not sent, with a location
     'my_pinout.jpeg',                   # a longer name containing the sent one
+    'my-pinout.jpeg',                   # same, with a hyphen
     'pinout.jpeg.bak',                  # another file whose name starts with it
+    'pinout.jpeg (copy).jpeg',          # another file whose name starts with it, with blanks
+    'https://vendor.example/pinout.jpeg',   # a URL ending with the name
+    'C:/other/pinout.jpeg',             # a path to another file of the same name
+    'pinout.jpeg does NOT show pin 3',  # a sentence that denies the evidence
+    'pinout.jpeg, FUNZIONE PIN table',  # the former free-text form: the location has its field now
+    'Table on page 1 of pinout.jpeg.',  # the name inside a sentence
     '',                                 # no source at all
 ])
-def test_a_source_that_names_no_sent_document_stays_unresolved(source):
-    """Negative twin: only a document that was SENT, as a whole name, is evidence."""
+def test_a_source_that_is_not_a_sent_document_stays_unresolved(source):
+    """Negative twin: only a value EQUAL to a sent file name is evidence; no prose is parsed."""
     result = ai.validate_suggestions({'pins': [proposal(source=source)]}, ROWS, ['pinout.jpeg'])
     assert result[0]['electrical_type'] == 'unknown'
+
+
+def test_a_sent_name_that_ends_another_one_is_not_cited_by_it():
+    """«datasheet-v2.pdf» is not the sent «v2.pdf», and «v2.pdf» is: equality, not a suffix."""
+    sent = ['v2.pdf']
+    assert ai.validate_suggestions({'pins': [proposal(source='datasheet-v2.pdf')]}, ROWS,
+                                   sent)[0]['electrical_type'] == 'unknown'
+    assert ai.validate_suggestions({'pins': [proposal(source='v2.pdf')]}, ROWS,
+                                   sent)[0]['electrical_type'] == 'power_in'
 
 
 def test_call_uses_documents_and_only_pin_metadata(tmp_path, monkeypatch):
@@ -146,7 +169,8 @@ def test_ai_evidence_tooltip_does_not_interpret_markup(qapp, tmp_path):
     assert '&lt;qt&gt;' not in shown and '&lt;br&gt;' not in shown
     dialog.close()
 
-@pytest.mark.parametrize('field,value', [('reason', None), ('reason', {}), ('source', ['sheet.pdf']), ('pin', 1)])
+@pytest.mark.parametrize('field,value', [('reason', None), ('reason', {}), ('source', ['sheet.pdf']), ('pin', 1),
+                                         ('location', 3), ('location', ['page 2'])])
 def test_rejects_malformed_evidence_schema(field, value):
     item = proposal()
     item[field] = value
@@ -154,10 +178,12 @@ def test_rejects_malformed_evidence_schema(field, value):
         ai.validate_suggestions({'pins': [item]}, ROWS, ['sheet.pdf'])
 
 
-def test_duplicate_document_names_rejected_before_call(tmp_path, monkeypatch):
+@pytest.mark.parametrize('second', ['same.pdf', 'SAME.pdf'])
+def test_duplicate_document_names_rejected_before_call(tmp_path, monkeypatch, second):
+    """Equal names, also equal only after casefold (F7): one source for the model, refused."""
     monkeypatch.setattr(ai, 'ensure_providers_ready', lambda *a: pytest.fail('network'))
     with pytest.raises(ValueError, match='nomi distinti'):
-        ai.suggest_pin_types('Demo', ROWS, [tmp_path/'a'/'same.pdf', tmp_path/'b'/'same.pdf'], 'model')
+        ai.suggest_pin_types('Demo', ROWS, [tmp_path/'a'/'same.pdf', tmp_path/'b'/second], 'model')
 
 
 def test_cancellation_before_document_load(tmp_path, monkeypatch):

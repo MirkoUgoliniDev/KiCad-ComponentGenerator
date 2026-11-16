@@ -54,7 +54,7 @@ def test_an_invented_height_outside_the_printed_quotes_yields_to_the_printed_one
     assert params.body_height_mm == pytest.approx(16.9)
     assert params.body_conflict is None
     assert params.body_length_mm == pytest.approx(20.5)
-    assert any("18.90 mm) non e' una quota stampata letta da entrambe" in line for line in logs)
+    assert any("18.90 mm) non è una quota stampata letta da entrambe" in line for line in logs)
     assert any("Quote del corpo nella risposta principale" in line and "18.9 (read)" in line
                and "16.9 (other), 0.4 (other), 3.5 (other)" in line for line in logs)
 
@@ -97,5 +97,5 @@ def test_an_estimated_height_is_replaced_by_the_printed_quote_end_to_end(offline
     assert params.body_height_mm == pytest.approx(16.9)
     # With the printed lists the estimate is judged by the vote first: 18.9 is
     # printed by neither list, so the line names the vote, not the estimate.
-    assert any("18.90 mm) non e' una quota stampata letta da entrambe" in line for line in logs)
+    assert any("18.90 mm) non è una quota stampata letta da entrambe" in line for line in logs)
     assert not any("sostituisce la stima" in line for line in logs)

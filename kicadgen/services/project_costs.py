@@ -107,6 +107,10 @@ class ProjectCosts:
     #: model -> answers of the current analysis served from a local cache
     #: (free, not calls): what each model answered without being asked again.
     run_cached_by_model: dict = None
+    #: The file holds a «cached_answers» that is not a list (hand-edited or
+    #: damaged): it was read as absent, and it is left as it is. Free
+    #: bookkeeping never takes the paid totals down with it.
+    cached_answers_damaged: bool = False
 
     @property
     def run_complete(self) -> bool:
@@ -214,8 +218,11 @@ def _parse(path: Path, raw) -> dict:
     run = data.get("run", 0)
     if _count(run) is None or not isinstance(data.get("runs", []), list):
         raise ProjectCostsError(f"{path.name}: invalid analyses")
-    if not isinstance(data.get("cached_answers", []), list):
-        raise ProjectCostsError(f"{path.name}: invalid cached answers")
+    # CONTRACT CHANGED 2026-11-15: a damaged «cached_answers» no longer makes
+    # the whole file unreadable. It holds only free readings, and refusing
+    # the file for it stopped every later PAID call from being recorded.
+    # It is read as absent (`_cached_items`, ProjectCosts.cached_answers_damaged)
+    # and left untouched by `add_call`; only `add_cached_answer` refuses it.
     if (total is None or total < 0 or calls is None or missing is None
             or missing > calls or not isinstance(entries, list)
             or not isinstance(data.get("since", ""), str)):
@@ -302,7 +309,8 @@ def _totals(data: dict, run: Optional[int] = None) -> ProjectCosts:
                         run_calls_without_cost=sum(
                             missing for _total, _calls, missing in current.values()),
                         run_by_provider=current, run_by_model=models,
-                        run_cached_by_model=_cached_counts(data, run) if run else {})
+                        run_cached_by_model=_cached_counts(data, run) if run else {},
+                        cached_answers_damaged=_cached_answers_damaged(data))
 
 
 def load_project_costs(project_dir: Path, run: Optional[int] = None) -> ProjectCosts:
@@ -336,7 +344,18 @@ def _by_provider(data: dict, run: Optional[int] = None) -> dict:
 
 
 def _model_of(entry: dict) -> str:
-    """Model that names an entry's row in the per-model split; «?» when the entry has none."""
+    """Model that names an entry's row in the per-model split; «?» when the entry has none.
+
+    Transitional limit (review 2026-11-15): entries written before 8ea6323
+    store only the name the provider ANSWERED with (e.g. a dated
+    «openai/gpt-5.6-sol-20261101»), later ones the name the program
+    REQUESTED. An old entry carries no requested name, so nothing maps it
+    reliably: an analysis that spans the upgrade (a re-read joining an
+    older run) shows one model under two names. Deliberately no matching on
+    name prefixes or date suffixes, which would be a rule on names; the
+    split heals by itself at the next «Estrai parametri con AI», which
+    starts an analysis made of new entries only.
+    """
     return str(entry.get("model") or "") or "?"
 
 
@@ -364,10 +383,21 @@ def _cached_count(item: dict) -> Optional[int]:
     return count if _count(count) else None
 
 
+def _cached_answers_damaged(data: dict) -> bool:
+    """Tell whether the file holds a ``cached_answers`` that is not a list (null included)."""
+    return "cached_answers" in data and not isinstance(data["cached_answers"], list)
+
+
+def _cached_items(data: dict) -> list:
+    """Items of ``cached_answers``; empty when absent or damaged (a damaged list reads as absent)."""
+    items = data.get("cached_answers")
+    return items if isinstance(items, list) else []
+
+
 def _cached_counts(data: dict, run: int) -> dict:
     """Answers served from a local cache during analysis `run`, per model; damaged items skipped."""
     counts = {}
-    for item in data.get("cached_answers") or ():
+    for item in _cached_items(data):
         if isinstance(item, dict) and item.get("run") == run and _cached_count(item):
             model = _model_of(item)
             counts[model] = counts.get(model, 0) + _cached_count(item)
@@ -385,7 +415,10 @@ def add_cached_answer(project_dir: Path, record: dict,
         optional ``count`` (answers grouped by the caller, 1 by default).
     @param now Time of the replay (UTC now by default).
     @return The new totals.
-    @throws ProjectCostsError, OSError As `add_call`, with the same guarantees.
+    @throws ProjectCostsError, OSError As `add_call`, with the same guarantees;
+        ProjectCostsError also when the file's ``cached_answers`` is not a list:
+        the file is then left untouched (the paid calls are still recorded by
+        `add_call`, see ProjectCosts.cached_answers_damaged).
     @note Never a call: the total, the call counts and the entries are left
         as they are. Nothing is noted while the file records no analysis
         (run 0): there is no analysis to show it with.
@@ -405,8 +438,11 @@ def add_cached_answer(project_dir: Path, record: dict,
 def _add_cached_once(folder: Path, record: dict, now: Optional[datetime]) -> ProjectCosts:
     """One read-modify-write that notes a cached answer (see `add_cached_answer`)."""
     path = folder / COSTS_FILE
-    stamp = (now or datetime.now(timezone.utc)).isoformat(timespec="seconds")
+    stamp = _stamp(now)
     data = _read(path) or _empty(stamp)
+    if _cached_answers_damaged(data):
+        # Never rewritten: a person may want to see what is there.
+        raise ProjectCostsError(f"{path.name}: invalid cached answers")
     current = data.get("run", 0)
     run = _count(record.get("run"))
     run = run if run and run <= current else current
@@ -440,7 +476,8 @@ def add_call(project_dir: Path, record: dict, now: Optional[datetime] = None) ->
         file's current analysis, as before; a ``run`` the file does not know
         is ignored the same way.
     @param now Time of the call -- the request, not the write, which may
-        come later when the file was busy (UTC now by default).
+        come later when the file was busy (UTC now by default). Stored in
+        UTC whatever its zone; a naive time is taken as UTC (`_stamp`).
     @return The new totals.
     @throws ProjectCostsError When the existing file is not usable: it is
         left untouched and the call is not recorded.
@@ -486,6 +523,20 @@ def _locked_update(folder: Path, update) -> ProjectCosts:
     raise AssertionError("unreachable")
 
 
+def _stamp(now: Optional[datetime]) -> str:
+    """ISO text of `now` in UTC, the one convention of every time in the file.
+
+    Every writer has stored UTC since the first version (7223819): a time
+    given in another zone is converted, never written with its own offset,
+    so the file never mixes «+00:00» with local offsets. A naive time is
+    taken as UTC, as `ai_account._call_time` does for the records.
+    """
+    moment = now or datetime.now(timezone.utc)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(timezone.utc).isoformat(timespec="seconds")
+
+
 def _empty(stamp: str) -> dict:
     """Content of a cost file with nothing recorded yet."""
     return {"format": FORMAT, "version": VERSION, "since": stamp, "total_usd": 0.0,
@@ -495,7 +546,7 @@ def _empty(stamp: str) -> dict:
 def _start_run_once(folder: Path, now: Optional[datetime]) -> ProjectCosts:
     """One read-modify-write that opens a new analysis (see `start_run`)."""
     path = folder / COSTS_FILE
-    stamp = (now or datetime.now(timezone.utc)).isoformat(timespec="seconds")
+    stamp = _stamp(now)
     data = _read(path) or _empty(stamp)
     data["run"] = data.get("run", 0) + 1
     data.setdefault("runs", []).append({"run": data["run"], "started": stamp})
@@ -594,7 +645,7 @@ class _exclusive_lock:
 def _add_call_once(folder: Path, record: dict, now: Optional[datetime]) -> ProjectCosts:
     """One read-modify-write of the cost file (see `add_call`)."""
     path = folder / COSTS_FILE
-    stamp = (now or datetime.now(timezone.utc)).isoformat(timespec="seconds")
+    stamp = _stamp(now)
     data = _read(path) or _empty(stamp)
     cost = _entry_cost(record)
     data["version"] = VERSION

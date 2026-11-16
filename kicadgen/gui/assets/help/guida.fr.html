@@ -686,23 +686,83 @@ et un nouveau est commencé : aucun enregistrement n’est perdu en silence.</p>
 <h3 id="controllo">Contrôle du composant (étape 1)</h3>
 <p>Quand vous ouvrez l’onglet <span class="ui">KiCad</span> avec des fichiers qu’aucun
 contrôle n’a encore lus, le contrôle <strong>démarre tout seul</strong> : il ne demande
-rien et ne modifie pas la configuration de KiCad. Il attend seulement si un travail est
-en train d’écrire les fichiers ou si les fichiers ne correspondent pas aux paramètres
-(la ligne en haut de l’étape dit pourquoi). Il contrôle les fichiers générés, la
+rien et ne modifie pas la configuration de KiCad. Il ne démarre pas tant que le
+composant n’a pas d’empreinte, et il attend (la ligne en haut de l’étape dit pourquoi et
+quel est le remède) tant que : un travail (génération, modèle STEP, analyse) écrit les
+fichiers ; les positions des pastilles ont été laissées bloquées ; une question sur
+l’empreinte reste ouverte (disposition des pastilles, numérotation des côtés, entraxe
+des rangées, type de contact, vue des terminaux) ; les fichiers sur le disque ne
+correspondent pas aux paramètres, c’est-à-dire qu’une modification appliquée à
+l’empreinte n’est pas encore écrite dans le fichier, que le fichier du symbole ne
+correspond pas au symbole appliqué ou que le modèle STEP est obsolète. Dès que la cause
+disparaît, le contrôle démarre tout seul. Il contrôle les fichiers générés, la
 correspondance des numéros broche-pastille et, si <code>kicad-cli</code> est disponible,
 teste la lecture de l’empreinte, du symbole et du STEP avec KiCad CLI (DRC et ERC
 compris). Le résultat reste écrit dans l’étape : un verdict, une ligne pour chaque chose
 à faire avec son bouton (par exemple <span class="ui">Ouvrir le tableau Pinout</span> ou
 <span class="ui">Suggérer avec l’IA</span>) et les contrôles réussis.
 <span class="ui">Contrôler à nouveau</span> le répète, <span class="ui">Interrompre</span>
-l’arrête aussitôt, <span class="ui">Copier le rapport</span> copie le verdict, les lignes
-et les détails techniques.</p>
+l’arrête aussitôt (il faut alors le répéter avant d’installer), <span class="ui">Copier
+le rapport</span> copie le verdict, les lignes et les détails techniques.</p>
 <p>Le résultat décide de l’étape 3 :</p>
 <ul>
   <li><strong>erreurs</strong> (verdict <span class="ui">NE PAS UTILISER</span>) :
   l’installation reste bloquée tant que vous ne les avez pas corrigées ;</li>
-  <li><strong>avertissements</strong> ou contrôles non exécutés : vous pouvez installer,
-  et la phrase de l’étape 3 dit ce qu’il faut revoir avant la production ;</li>
+  <li><strong>avertissements</strong> ou contrôles non exécutés parce que KiCad CLI
+  n’est pas installé : vous pouvez installer, et la phrase de l’étape 3 dit ce qu’il faut
+  revoir avant la production ;</li>
+  <li><strong>KiCad n’a pas lu tous les fichiers</strong> que l’installation copie
+  (l’empreinte et, s’il existe, le fichier du symbole) : KiCad CLI est là, mais une
+  lecture a été sautée ou interrompue, par exemple elle n’a pas répondu dans les 60
+  secondes ; l’installation reste bloquée tant que
+  <span class="ui">Contrôler à nouveau</span> n’a pas mené chaque lecture à son
+  terme ;</li>
+  <li><strong>même échec de KiCad CLI dans deux contrôles de suite</strong> : chaque
+  lecture par KiCad échoue du côté de l’outil, avec la même cause dans deux contrôles
+  consécutifs : KiCad CLI ne démarre pas, se ferme chaque fois avec le même code de
+  sortie (un code de plantage aussi), se termine sans produire aucun résultat, ne
+  répond jamais à temps, refuse même un fichier de test valide (voir plus bas), ou le
+  dossier temporaire du contrôle est inutilisable (antivirus, disque plein,
+  permissions) ; une combinaison fixe de ces causes compte aussi. C’est une cause
+  durable, traitée comme KiCad CLI non installé : vous pouvez installer, et l’étape 3 en
+  indique la cause. Aucune cause durable n’est jamais supposée quand KiCad CLI a
+  fonctionné dans le même contrôle (une lecture réussie, un DRC ou un ERC exécuté) : les
+  lectures manquantes concernent alors les fichiers, et elles sont à refaire ou sont une
+  erreur du composant (voir plus bas). Une erreur interne du programme ne compte jamais
+  comme une cause durable : elle relève toujours du point suivant ;</li>
+  <li><strong>contrôle arrêté par une erreur interne</strong> : vous ne pouvez installer
+  que s’il avait déjà conclu chaque vérification qui peut bloquer le composant et qui le
+  concerne :
+  <ul class="required-checks">
+    <li>avec KiCad CLI, la version de KiCad ;</li>
+    <li>le fichier de l’empreinte et ses pastilles (pastilles superposées, liens vers le
+    modèle STEP) et, quand il y a des terminaux déclarés, leur passage dans les
+    trous ;</li>
+    <li>la correspondance broche-pastille et la construction du symbole ;</li>
+    <li>avec KiCad CLI, les lectures par KiCad de l’empreinte, du symbole appliqué et du
+    fichier du symbole installé, quand il existe, et le DRC de l’aperçu (un contact
+    réel entre deux pastilles) ;</li>
+    <li>le brochage du document, quand il existe une lecture du document ;</li>
+    <li>les fonctions des contacts (NC, NO, commun), quand le symbole déclare des
+    contacts ;</li>
+    <li>quand il y a un STEP, l’intégrité du modèle STEP et, avec KiCad CLI, son
+    importation dans KiCad.</li>
+  </ul>
+  Dans ce cas, l’étape 3 indique que le résultat est incomplet ; sinon l’installation
+  reste bloquée tant que <span class="ui">Contrôler à nouveau</span> ne les a pas
+  conclues ;</li>
+  <li><strong>contrôle interrompu</strong> ou qui n’a pas pu démarrer : ce n’est pas un
+  résultat, l’installation reste bloquée tant que vous ne le répétez pas avec
+  <span class="ui">Contrôler à nouveau</span> ;</li>
+  <li><strong>un fichier du composant est utilisé par un autre programme</strong> : le
+  contrôle s’est terminé, mais une vérification nécessaire à l’installation n’a pas pu
+  être faite parce que le fichier était ouvert ailleurs ; l’installation reste bloquée :
+  fermez le programme qui le tient ouvert et utilisez
+  <span class="ui">Contrôler à nouveau</span> ;</li>
+  <li><strong>contrôle terminé sans conclure toutes les vérifications
+  nécessaires</strong> à l’installation (les lignes sautées de l’étape 1 disent
+  lesquelles) : l’installation reste bloquée tant que
+  <span class="ui">Contrôler à nouveau</span> ne les a pas conclues ;</li>
   <li><strong>tout est en ordre</strong> (il ne reste que les vérifications à faire à la
   main dans KiCad) : <span class="ui">Installer dans le projet KiCad (conseillé)</span>
   est mis en évidence.</li>
@@ -710,15 +770,26 @@ et les détails techniques.</p>
 <p>Toute modification des fichiers que l’installation copie (une régénération,
 <span class="ui">Appliquer aux fichiers</span>, une nouvelle exportation du symbole) rend
 le résultat périmé : les boutons d’installation se désactivent et le contrôle redémarre.
-Un problème de l’outil de contrôle (KiCad CLI qui ne répond pas dans les 60 secondes ou
-ne démarre pas) n’est pas une erreur du composant : il apparaît comme « non exécuté » et
-ne bloque pas l’installation. Après une installation, seule la ligne de la bibliothèque
+Quand KiCad échoue sur le fichier du composant (il le refuse deux fois, se ferme, même
+avec un code de plantage, se termine sans rien produire ou ne finit jamais de le lire),
+le contrôle lui fait lire avec la même commande un petit fichier de test valide du même
+type : si KiCad le lit, le défaut est celui du composant (une erreur). Un exemple est un
+nom qui contient « % », que KiCad traite comme un code de format et qui le fait se
+fermer à chaque lecture : c’est pourquoi ce caractère n’est pas admis dans les noms des
+composants. Si KiCad échoue aussi sur le fichier de test, ou si le test ne peut pas être
+fait, le problème vient de l’outil de contrôle ou de l’ordinateur (l’installation de
+KiCad, un antivirus, le dossier temporaire) et non du composant : la lecture apparaît
+comme « non exécutée », et elle ne bloque l’installation que lorsqu’il manque une
+lecture par KiCad des fichiers que l’installation copie, tant que le contrôle ne l’a pas
+menée à son terme ou que la cause ne s’est pas révélée durable (voir plus haut) ; un DRC
+ou un ERC non exécuté ne la bloque pas. Après une installation, seule la ligne de la bibliothèque
 KiCad est mise à jour. Le symbole appliqué est testé même s’il n’est pas encore exporté ;
 les brouillons non appliqués sont exclus et signalés. Ce contrôle ne certifie ni le
 brochage, ni les dimensions, ni l’alignement visuel 3D ; l’ERC et le DRC doivent être
 exécutés sur le schéma et la carte définitifs.</p>
-<p>Le contrôle reste disponible quand l’empreinte existe mais que le STEP manque ;
-l’installation reste désactivée tant que les fichiers requis ne sont pas présents.
+<p>Le contrôle et l’installation restent disponibles quand l’empreinte existe mais que
+le STEP manque (l’installation demande confirmation et apporte le composant sans vue
+3D) ; l’installation reste désactivée tant qu’il n’y a pas d’empreinte.
 Les références et les transformations 3D d’origine sont contrôlées séparément de la
 copie temporaire normalisée. Les chemins relatifs ou les variables KiCad non résolus
 doivent être vérifiés dans le projet de destination.</p>

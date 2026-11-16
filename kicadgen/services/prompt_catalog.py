@@ -176,7 +176,11 @@ SUPERSEDED_DIGESTS: dict[str, frozenset] = {
     # 2026-11-12: the Italian default, replaced by its English translation.
     "role_prompt_datasheet": frozenset({"cb0f333eb10c3e5ad24a51caad148e1e49b3aa75d1f14fcbdcf6f13112f678bc"}),
     # 2026-11-12: the Italian default, replaced by its English translation.
-    "pin_type_prompt": frozenset({"d896ef4b07b6c8c11c1733d4f275c09f3b9bf3bb4b761c1f4205fa7a9634edfb"}),
+    # 2026-11-15: the English default that asked for the file name and the
+    # page/location in free text; `source` is now an enum of the sent files
+    # and the location has its own field (review A3/M7/F6/F7).
+    "pin_type_prompt": frozenset({"d896ef4b07b6c8c11c1733d4f275c09f3b9bf3bb4b761c1f4205fa7a9634edfb",
+                                  "64cce1f386941e9a583a1d5d76d0afe91369c6ada27400304ea631a52628da07"}),
     "grounding_prompt": frozenset(),
     "mechanical_evidence_prompt": frozenset(),
     "image_instructions": frozenset(),

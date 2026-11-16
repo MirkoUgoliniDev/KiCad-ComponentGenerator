@@ -922,7 +922,7 @@ DETECTOR_GHOST_TOLERANCE_PX = 1.0
 _INFO_DETECTOR_INTRO = (
     "I riquadri sono le proposte del rilevatore. Tieni quelli che sono componenti, "
     "elimina gli altri, aggiungi quelli che mancano. I tratteggiati sono le proposte "
-    "su cui non si e' fidato: ci sono perche' una confidenza bassa non e' prova di "
+    "su cui non si è fidato: ci sono perché una confidenza bassa non è prova di "
     "assenza.")
 
 ## Second paragraph of the detector stage: sub-threshold proposals are opt-in.
@@ -1327,28 +1327,35 @@ def _kicad_model_state(component, _tr) -> str:
     SOT-23-6 the review had called unchosen). Afterwards the line names the
     matcher's own status and the file it hooked, if any.
     """
+    # CONTRACT CHANGED 2026-11-15 (round 2): «state: file» is composed through
+    # the catalogue template «{label}: {value}», so French writes its space
+    # before the colon (it was a literal ": " concatenation).
+    def labelled(state, value):
+        """The translated state, followed by its value when there is one."""
+        return _tr("{label}: {value}").format(label=state, value=value) if value != "" else state
+
     selection = component.get("model_selection") or {}
     if isinstance(selection, dict) and selection.get("status") == "confirmed":
         path = _text(selection.get("path"))
-        return _tr("confermato") + (": " + Path(path).name if path else "")
+        return labelled(_tr("confermato"), Path(path).name if path else "")
     match = component.get("model_match")
     if not isinstance(match, dict) or not _text(match.get("status")):
         return _tr("non ancora cercato: la ricerca in libreria parte dopo «Applica correzioni»")
     status = match["status"].strip()
     hooked = _text(match.get("selected_path"))
-    file_name = (": " + Path(hooked).name) if hooked else ""
+    file_name = Path(hooked).name if hooked else ""
     if status in ("provisional_matched", "auto_matched"):
-        return _tr("agganciato dalla sola geometria, da confermare") + file_name
+        return labelled(_tr("agganciato dalla sola geometria, da confermare"), file_name)
     if status == "library_matched":
-        return _tr("dall'archivio dei tuoi abbinamenti, da confermare") + file_name
+        return labelled(_tr("dall'archivio dei tuoi abbinamenti, da confermare"), file_name)
     if status == "review_required":
         candidates = match.get("candidates")
         count = len(candidates) if isinstance(candidates, list) else 0
-        return _tr("candidati da scegliere") + f": {count}"
+        return labelled(_tr("candidati da scegliere"), str(count))
     if status == "unresolved":
         return _tr("nessun candidato compatibile in libreria")
     if status == "import_failed":
-        return _tr("importazione STEP fallita") + file_name
+        return labelled(_tr("importazione STEP fallita"), file_name)
     return _tr("non confermato") + " · " + status
 
 def _section_band(title, colour) -> str:
@@ -3667,7 +3674,10 @@ class PhotoReviewDialog(QDialog):
             (detector first, then AI); the modal shows them in two headed
             sections (HANDOFF 157, 163).
         """
-        return "\n".join(f"{label}: {value}" for label, value in
+        # CONTRACT CHANGED 2026-11-15 (round 2): «Label: value» through the
+        # catalogue template, so French writes its space before the colon.
+        template = self._tr("{label}: {value}")
+        return "\n".join(template.format(label=label, value=value) for label, value in
                          component_attribute_lines(component, self._tr, self._stage))
 
     def _show_attributes(self, component):
@@ -3678,10 +3688,14 @@ class PhotoReviewDialog(QDialog):
         not. Every value is escaped: the label interprets HTML.
         """
         html = []
+        # The colon comes from the catalogue template (French « : »); only the
+        # label is bold, and both values are escaped before entering it.
+        template = escape(self._tr("{label}: {value}"))
         for title, colour, lines in component_attribute_sections(component, self._tr, self._stage):
             html.append(_section_band(title, colour))
             html.extend(
-                f"<p style='margin:0 0 5px 0'><b>{escape(label)}:</b> {escape(value)}</p>"
+                "<p style='margin:0 0 5px 0'>"
+                + template.format(label=f"<b>{escape(label)}</b>", value=escape(value)) + "</p>"
                 for label, value in lines)
         self.attributes_label.setText("".join(html))
         self.corrections_label.setText(_section_band(self._tr(CORRECTIONS_TITLE), AI_SECTION_COLOR))

@@ -1,10 +1,11 @@
 """@brief Non-blocking progress overlay: which tool is working, real progress only."""
+import functools
 import html
 import math
 import re
 from time import monotonic
 
-from ..services.messages import WARNING, kind_of
+from ..services.messages import WARNING, Message, kind_of
 
 from PyQt6.QtCore import QEvent, QPointF, QRect, QRectF, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import (QColor, QFont, QFontMetrics, QFontMetricsF, QPainter, QPainterPath,
@@ -348,6 +349,361 @@ _CARD_FALLBACK_HEIGHT = 720
 _WORST_CASE_STATUS = " ".join(["M" * 8] * 30)[:_STATUS_CHAR_LIMIT]
 
 
+#: One token of a catalogue template: a literal doubled brace, or a
+#: placeholder «{name}» / «{name:spec}» / «{name!r}» (`str.format` syntax, the
+#: one `messages.tx` and `I18n.tr` fill).
+_TEMPLATE_TOKEN = re.compile(r"\{\{|\}\}|\{(\w+)(?:![rsa])?(?::[^{}]*)?\}")
+#: A word of at least three letters: what anchors a template to a line. A
+#: template whose literal text has no such word («{a}: {b}», «{count} {unit}»)
+#: would match almost any line, so it is never used to recognise one.
+_ANCHOR_WORD = re.compile(r"[^\W\d_]{3,}")
+#: Lazily built index {anchor word: [(source, language, parts)]} of the bundled
+#: catalogue (`_catalog_index`), and the compiled pattern of each template.
+_CATALOG_INDEX = None
+_TEMPLATE_PATTERNS = {}
+#: Longest line a catalogue template is matched against (`_template_match_limit`),
+#: derived from the catalogue when the index is built.
+_TEMPLATE_MATCH_LIMIT = None
+#: Lines classified and lines matched against the catalogue, memoised per text:
+#: the card asks again for the same line at every redraw and language switch.
+_CACHE_SIZE = 1024
+
+
+def _template_parts(text):
+    """Split a catalogue template into ("lit", text) and ("ph", name) parts, blanks collapsed.
+
+    The literal text keeps single spaces only, like a status line (`" ".join(
+    text.split())`), so a template written over two lines still matches.
+    """
+    parts, position = [], 0
+    for match in _TEMPLATE_TOKEN.finditer(text):
+        if match.start() > position:
+            parts.append(("lit", text[position:match.start()]))
+        token = match.group(0)
+        if token in ("{{", "}}"):
+            parts.append(("lit", token[0]))
+        else:
+            parts.append(("ph", match.group(1)))
+        position = match.end()
+    if position < len(text):
+        parts.append(("lit", text[position:]))
+    # Merge adjacent literals, then collapse blanks as the lines are collapsed.
+    merged = []
+    for kind, value in parts:
+        if merged and kind == "lit" and merged[-1][0] == "lit":
+            merged[-1] = ("lit", merged[-1][1] + value)
+        else:
+            merged.append((kind, value))
+    collapsed = [(kind, re.sub(r"\s+", " ", value) if kind == "lit" else value)
+                 for kind, value in merged]
+    if collapsed and collapsed[0][0] == "lit":
+        collapsed[0] = ("lit", collapsed[0][1].lstrip())
+    if collapsed and collapsed[-1][0] == "lit":
+        collapsed[-1] = ("lit", collapsed[-1][1].rstrip())
+    return tuple((kind, value) for kind, value in collapsed if kind == "ph" or value)
+
+
+def _literal_text(parts):
+    """The literal text of a template: what every rendering carries whatever its values."""
+    return "".join(value for kind, value in parts if kind == "lit")
+
+
+def _anchor_word(parts):
+    """The word a template is indexed under (lower case), or None when its literal text has none.
+
+    The longest word of three letters or more, taken inside ONE literal
+    piece, preferring a word that does not touch a placeholder: a value
+    glued to the literal («dichiarato{reason}» rendered «dichiarato (…)» or
+    «dichiaratoX») would change the word the line shows, and the index
+    would miss the line.
+    """
+    free, touching = [], []
+    for position, (kind, value) in enumerate(parts):
+        if kind != "lit":
+            continue
+        glued_before = position > 0 and parts[position - 1][0] == "ph"
+        glued_after = position < len(parts) - 1 and parts[position + 1][0] == "ph"
+        for match in _ANCHOR_WORD.finditer(value):
+            touches = ((glued_before and match.start() == 0)
+                       or (glued_after and match.end() == len(value)))
+            (touching if touches else free).append(match.group(0))
+    words = free or touching
+    return max(words, key=len).lower() if words else None
+
+
+def _catalog_index():
+    """The anchor-word index of every `ui:` template of the bundled catalogue, in every language.
+
+    Built once, on first need (about 18 000 templates, a tenth of a second).
+    It also fixes `_TEMPLATE_MATCH_LIMIT` from the same templates.
+    DECLARED LIMIT: it reads `DEFAULT_TRANSLATIONS`, not a translation edited
+    in the profile database; such a line is simply not recognised, i.e. it is
+    treated exactly as before this index existed.
+    """
+    global _CATALOG_INDEX, _TEMPLATE_MATCH_LIMIT
+    if _CATALOG_INDEX is not None:
+        return _CATALOG_INDEX
+    from ..services.i18n import DEFAULT_TRANSLATIONS
+    index, longest = {}, 0
+    for key, entry in DEFAULT_TRANSLATIONS.items():
+        if not key.startswith("ui:") or len(key) == 3 or not isinstance(entry, dict):
+            continue
+        source = key[3:]
+        for language, text in entry.items():
+            if not isinstance(text, str) or not text.strip():
+                continue
+            parts = _template_parts(text)
+            anchor = _anchor_word(parts)
+            if anchor is None:
+                continue
+            longest = max(longest, len(_literal_text(parts)))
+            index.setdefault(anchor, []).append((source, language, parts))
+    # A line a template renders is that template's literal text plus its
+    # values. The values of a status line are names, counts and at most one
+    # nested catalogue sentence (an outcome inside «Componente … — {name}:
+    # {outcome}», which `recompose_in_language` recomposes): so no rendering
+    # of the catalogue is longer than its longest literal text TWICE -- one
+    # template plus values as long as the longest other one. A longer line is
+    # not a catalogue line, and matching it would only cost time on the GUI
+    # thread (the lazy groups grow with the line). Derived from the catalogue,
+    # not tuned: it follows the catalogue when a longer sentence is added.
+    _TEMPLATE_MATCH_LIMIT = 2 * longest
+    _CATALOG_INDEX = index
+    return index
+
+
+def _template_match_limit():
+    """@brief Longest line, in characters, that is matched against the catalogue templates.
+
+    @return Twice the longest literal text of an indexed template (see
+        `_catalog_index`); a longer line is never a catalogue rendering.
+    """
+    _catalog_index()
+    return _TEMPLATE_MATCH_LIMIT
+
+
+@functools.lru_cache(maxsize=None)
+def _template_needles(parts):
+    """The literal pieces every rendering of a template contains (the optional full stop aside).
+
+    The same pieces `_template_pattern` escapes, without compiling a regex:
+    the prefilter of `catalog_readings` asks it of hundreds of candidates.
+    Bounded by the catalogue: one entry per template.
+    """
+    needles, previous = [], None
+    for kind, value in parts:
+        if kind == "lit":
+            needle = value[1:] if previous == "ph" and value.startswith(".") else value
+            if needle:
+                needles.append(needle)
+        previous = kind
+    return tuple(needles)
+
+
+def _template_pattern(parts):
+    """(compiled regex, {placeholder: first group}, [group of every occurrence]) of a template.
+
+    Literals are escaped and every placeholder occurrence is a lazy group of
+    its own; a placeholder repeated in the template must carry the same value
+    (its later groups wrap a back-reference to the first). A full stop right
+    after a placeholder is optional: `messages.tx` drops it when the value
+    already ends a sentence (`_no_double_period`).
+
+    A lazy group and the literal that closes it form an ATOMIC group: the
+    value ends at the FIRST place its next literal appears, and a failure
+    later in the line never makes the engine try the next occurrence. With
+    no back-reference this loses no match -- placing each literal as early
+    as possible leaves the most room for the rest, so if any alignment
+    renders the line the earliest one does -- and it keeps a match linear in
+    the line instead of growing with the power of the number of placeholders
+    (a 5 000-character line of catalogue sentences took 22 s). Two closing
+    literals stay out of the atomic form, because "as early as possible" is
+    wrong for them: the template's LAST literal, which a whole-line match
+    needs at the END of the line, not at its first occurrence; and a literal
+    that can match nothing (the optional full stop alone), which would let
+    the value end empty. DECLARED LIMIT: with a repeated placeholder
+    (back-reference) an earliest choice can miss an alignment a later one
+    would give; such a line is then simply not recognised.
+
+    """
+    compiled = _TEMPLATE_PATTERNS.get(parts)
+    if compiled is not None:
+        return compiled
+    pieces, first, occurrences = [], {}, []
+    pending, previous = None, None
+    for position, (kind, value) in enumerate(parts):
+        if kind == "ph":
+            if pending is not None:
+                # Two placeholders in a row: the first one stays a free lazy group.
+                pieces.append(pending)
+                pending = None
+            group = f"g{len(occurrences)}"
+            occurrences.append(group)
+            if value in first:
+                pieces.append(f"(?P<{group}>(?P={first[value]}))")
+            else:
+                first[value] = group
+                pending = f"(?P<{group}>.*?)"
+        else:
+            if previous == "ph" and value.startswith("."):
+                literal, required = r"\.?" + re.escape(value[1:]), value[1:]
+            else:
+                literal, required = re.escape(value), value
+            if pending is not None and required and position < len(parts) - 1:
+                pieces.append(f"(?>{pending}{literal})")
+            else:
+                pieces.append((pending or "") + literal)
+            pending = None
+        previous = kind
+    if pending is not None:
+        pieces.append(pending)
+    compiled = (re.compile("".join(pieces)), first, occurrences)
+    _TEMPLATE_PATTERNS[parts] = compiled
+    return compiled
+
+
+def catalog_readings(text, whole=True):
+    """@brief The catalogue templates (any language) a line was composed from.
+
+    @param text One line, blanks collapsed by the caller or not.
+    @param whole True: the template must render the WHOLE line (a line built
+        by one `tx`); False: it may render a part of it (a line built by
+        joining several `tx`), and the match is returned for its spans.
+    @return [(source, language, parts, match)] for every anchored template
+        that renders the line (or a part of it); [] when none does.
+    @note This is the line's ORIGIN, recovered from the only channel that
+        carries it: a line composed by `messages.tx` crosses worker signals as
+        a plain string and loses its type, but its literal words are those of
+        one catalogue entry. A template without a literal word of three
+        letters or more is never used (`_ANCHOR_WORD`): it would recognise
+        almost anything.
+    @note A line longer than `_template_match_limit` is no catalogue
+        rendering and gets []. The result is memoised per line, so asking
+        again for the same line (every redraw of the card) costs nothing.
+    """
+    line = " ".join(str(text or "").split())
+    if not line or len(line) > _template_match_limit():
+        return []
+    return list(_cached_readings(line, bool(whole)))
+
+
+@functools.lru_cache(maxsize=_CACHE_SIZE)
+def _cached_readings(line, whole):
+    """The readings of `catalog_readings` for a collapsed line, memoised (a tuple)."""
+    index = _catalog_index()
+    seen, readings = set(), []
+    for word in {word.lower() for word in _ANCHOR_WORD.findall(line)}:
+        for candidate in index.get(word, ()):
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            source, language, parts = candidate
+            # Cheap rejection first, before compiling anything: most candidates
+            # lack one of their literals.
+            if not all(needle in line for needle in _template_needles(parts)):
+                continue
+            pattern = _template_pattern(parts)[0]
+            match = pattern.fullmatch(line) if whole else pattern.search(line)
+            if match is not None:
+                readings.append((source, language, parts, match))
+    return tuple(readings)
+
+
+def _literal_spans(match, parts):
+    """Spans of `match` covered by the template's literal text (the values excluded)."""
+    spans, cursor = [], match.start()
+    for group in _template_pattern(parts)[2]:
+        start, end = match.span(group)
+        if start >= cursor:
+            spans.append((cursor, start))
+            cursor = end
+    spans.append((cursor, match.end()))
+    return [(start, end) for start, end in spans if end > start]
+
+
+#: Rules that keep their meaning inside a VALUE of a template (see
+#: `_values_carry_record_shapes`). The record marker is left out because it
+#: is positional -- it is a record header only at the head of the LINE, and
+#: inside a value UPPER_SNAKE is a reference designator («RX_TX») -- and the
+#: spaced colon because a value carrying one is already refused by the
+#: colon's position.
+_VALUE_RULES = tuple(rule for rule in _MACHINE_LINE_RULES
+                     if rule not in (_MACHINE_MARKER, _SPACED_KEY_VALUE))
+
+
+def _values_carry_record_shapes(match, parts):
+    """True when a value of this reading has the shape of a trace field's value.
+
+    Only asked of a BARE template (`_is_bare_template`): its literal text
+    is one word and a colon, the very «Field : value» shape of a trace record,
+    so the words alone are thin evidence of origin. The values then decide:
+    a value that IS an absolute path («Fichier : C:/tmp/x.step», the «Step File
+    Name : C:/…» record) or that fires one of the record rules on its own
+    (a «key=value» record, a decoration, an entity count, a banner -- the
+    rules an Italian «Campo: valore» line meets, since they skip a leading
+    «Word: ») is a field of an external trace, not the program's sentence.
+    DECLARED LIMIT: a bare program template whose value is a lone path is
+    then dropped in French (the only catalogue language that spaces the
+    colon) while the Italian line is shown; a path inside prose («Échec : [Errno 2] … 'C:/x'») is not a lone path and
+    is kept.
+    """
+    for group in _template_pattern(parts)[1].values():
+        value = (match.group(group) or "").strip()
+        if not value:
+            continue
+        if any(rule.fullmatch(value) for rule in _PATH_RULES):
+            return True
+        if any(rule.search(value) for rule in _VALUE_RULES):
+            return True
+    return False
+
+
+def _is_bare_template(parts):
+    """True when a template's literal text has at most one anchor word («Fichier : {path}»).
+
+    Words are counted piece by piece, as `_anchor_word` finds them: two
+    pieces glued around a placeholder never make one word.
+    """
+    return sum(len(_ANCHOR_WORD.findall(value)) for kind, value in parts if kind == "lit") <= 1
+
+
+def _colons_are_catalog_typography(line):
+    """True when ONE catalogue template renders the whole line and writes each of its spaced colons.
+
+    French typography writes «Terminé : empreinte…» with a space before the
+    colon, the very shape `_SPACED_KEY_VALUE` takes for a trace field
+    («WorkSession : Sending all data»). A colon that the program's own
+    catalogue wrote is not a field of an external tool, in any language.
+
+    The evidence is a property of the WHOLE template, not of the piece of
+    text around the colon: the template must render the entire line
+    (`catalog_readings(whole=True)`), its literal text -- anywhere, not
+    necessarily next to the colon -- must carry an anchor word (the index
+    holds no other template), and every spaced colon of the line must fall
+    in its literal text. So «Composant 3 sur 12 — U1 : lectures concordantes»
+    is excused by «Composant {current} sur {total} — {name} : {outcome}.»
+    although the piece « : » has no word, while a spaced colon inside a
+    VALUE (an external record quoted in a sentence) is not covered, and a
+    catalogue label inside a longer external line («[OCC] Fichier : C:/…»,
+    where «Fichier :» is the label «File:») renders no whole line.
+    A BARE template (one word and a colon) excuses its line only when its
+    values carry no record shape (`_values_carry_record_shapes`).
+    """
+    # The line is collapsed to single spaces: a spaced colon is « : ».
+    colons = [position for position in range(1, len(line) - 1)
+              if line[position] == ":" and line[position - 1] == " " and line[position + 1] == " "]
+    if not colons:
+        return False
+    for _source, _language, parts, match in catalog_readings(line, whole=True):
+        spans = _literal_spans(match, parts)
+        if not all(any(start <= position < end for start, end in spans) for position in colons):
+            continue
+        if _is_bare_template(parts) and _values_carry_record_shapes(match, parts):
+            continue
+        return True
+    return False
+
+
 def is_machine_line(text):
     """@brief Tell a line written for the log from a line written for a person.
 
@@ -363,9 +719,93 @@ def is_machine_line(text):
     @note Naming a file is NOT one of those shapes: the outcome of this program
         is files, so a path is shortened for display (see elide_paths) instead
         of costing the line its place on the card.
+    @note The spaced colon is the one shape a LANGUAGE's typography produces
+        (French «Terminé : …»): when it is the only rule the line triggers and
+        one catalogue template renders the whole line with each of its colons
+        as literal text, the line is the program's own translated sentence and
+        stays on the card (`_colons_are_catalog_typography`). Every other rule
+        keeps applying to catalogue lines too: a catalogued «prompt=…;
+        sha256=…» record still goes to the log.
+    @note Memoised per line text; a line longer than the longest catalogue
+        rendering (`_template_match_limit`) is not matched against the
+        catalogue, so a 5 000-character line is classified in milliseconds.
     """
-    line = " ".join(str(text or "").split())
-    return any(rule.search(line) for rule in _MACHINE_LINE_RULES)
+    return _machine_line(" ".join(str(text or "").split()))
+
+
+@functools.lru_cache(maxsize=_CACHE_SIZE)
+def _machine_line(line):
+    """`is_machine_line` of a line already collapsed to single spaces, memoised."""
+    # CONTRACT CHANGED 2026-11-15 (round 2): in French the finished card's
+    # outcome «Terminé : empreinte…» and every catalogue sentence with « : »
+    # were dropped as «key : value» trace fields; the program's own colons are
+    # now recognised by their origin, the catalogue.
+    # CONTRACT CHANGED 2026-11-15 (round 3): the origin is the WHOLE template
+    # rendering the whole line, not the literal piece around the colon (112
+    # French templates such as «{name} : {outcome}» were still dropped, and a
+    # catalogue label inside an external record excused it).
+    fired = [rule for rule in _MACHINE_LINE_RULES if rule.search(line)]
+    if not fired:
+        return False
+    if fired == [_SPACED_KEY_VALUE] and _colons_are_catalog_typography(line):
+        return False
+    return True
+
+
+def recompose_in_language(text, i18n, depth=2):
+    """@brief A line composed from the catalogue, composed again in the active language.
+
+    @param text The line as it was composed (in the language of that moment).
+    @param i18n The application's I18n, or None (the line comes back unchanged).
+    @param depth How many levels of values are recomposed too (a value that is
+        itself a catalogue sentence, e.g. a reason inside an outcome).
+    @return The line in the active language; the line unchanged when no
+        anchored template renders it whole, or when the MOST SPECIFIC templates
+        that do -- those with the most literal characters -- disagree in the
+        active language (an ambiguous origin is never guessed).
+    @note A generic template («Pin {number}») also renders every line of a
+        more specific one («Pin {number}: {name}», the value swallowing the
+        rest); requiring all readings to agree left such lines untranslated.
+        The template that explains more of the line by its own literal text is
+        the better origin; a tie between different renderings stays a doubt.
+    @note A catalogue source with no placeholder is resolved first through
+        `I18n.text`, then through the templates of every language. The values
+        are carried over as written: numbers are formatted the same way in
+        every language (the templates share their format specs).
+    """
+    # CONTRACT CHANGED 2026-11-15 (round 3): all readings had to agree, so a
+    # line matching a generic template too was never recomposed; the most
+    # specific reading now decides, a tie still leaves the line unchanged.
+    if i18n is None or not text:
+        return text
+    # The source as written first: a few catalogue keys carry a double space.
+    translated = i18n.text(str(text))
+    if translated != str(text):
+        return translated
+    line = " ".join(str(text).split())
+    readings = [(len(_literal_text(parts)), source, parts, match)
+                for source, _language, parts, match in catalog_readings(line)]
+    if not readings:
+        return text
+    # Only the most specific readings are origins; a less specific one never
+    # stands in for them, even when their translation cannot be rendered.
+    best = max(reading[0] for reading in readings)
+    renderings = set()
+    for specificity, source, parts, match in readings:
+        if specificity < best:
+            continue
+        target_parts = _template_parts(i18n.raw("ui:" + source, default=source))
+        values = {}
+        for name, group in _template_pattern(parts)[1].items():
+            value = match.group(group)
+            values[name] = (recompose_in_language(value, i18n, depth - 1)
+                            if depth > 0 and value else value)
+        if any(kind == "ph" and value not in values for kind, value in target_parts):
+            # The translation names a placeholder the line cannot supply.
+            continue
+        renderings.add("".join(values[value] if kind == "ph" else value
+                               for kind, value in target_parts))
+    return renderings.pop() if len(renderings) == 1 else text
 
 
 def enumeration_lines(text):
@@ -1222,6 +1662,9 @@ class AnalysisOverlay(QWidget):
         #: card, the list must be shortened and measured again on the new
         #: width, otherwise the lines shortened for the old width overflow.
         self._status_source = ""
+        #: Last status line as received (`set_status`), recomposed in the
+        #: active language on a switch (`_refresh_running_status`).
+        self._status_message = ""
         # The card enters the overlay BEFORE being measured: the 1 px border
         # the overlay's style sheet gives it narrows the text space, and a
         # card that is not yet a child of the overlay does not know it.
@@ -1255,10 +1698,39 @@ class AnalysisOverlay(QWidget):
                        "Apri il log completo dell'analisi AI, aggiornato in tempo reale", tr)
         set_tool_texts(self.abort_button, "Interrompi", "",
                        "Interrompi l'operazione in corso: verrà chiesta conferma.", tr)
+        # CONTRACT CHANGED 2026-11-15 (round 2): every composed text of the
+        # card follows the switch -- header, steps and their results, count
+        # and running status -- not only the phases and the outcome (they
+        # stayed in the language of the moment they were written).
+        # A switch is also when a catalogue edited meanwhile is read again.
+        self._translations = {}
+        if getattr(self, "tool", None) is not None and getattr(self, "_tool_source", None):
+            self._render_tool()
+        if getattr(self, "steps", None) is not None and getattr(self, "_step_sources", None):
+            self._translate_steps()
+            self._render_steps()
+        if getattr(self, "progress_label", None) is not None and getattr(self, "_progress_count", None):
+            unit = self._render_progress_label()
+            if getattr(self, "_phase_progress", None) is not None:
+                done, total, _old_unit = self._phase_progress
+                self._phase_progress = (done, total, unit)
         if getattr(self, "phases", None) is not None:
             self._render_phases()
         if getattr(self, "_outcome", None) is not None and self.is_holding_completed():
             self._render_outcome()
+        elif getattr(self, "status", None) is not None:
+            self._refresh_running_status()
+
+    def _refresh_running_status(self):
+        """Compose the running status again in the active language (count line or last message)."""
+        if self._phase_name and not self._step_labels and self._phase_progress:
+            self._status_source = elide_paths(
+                self._translate(self._phase_name) + " — " + self._progress_text())
+        elif getattr(self, "_status_message", ""):
+            self._status_source = elide_paths(self._translate(self._status_message))
+        else:
+            return
+        self._render_status()
 
     def _available_card_width(self):
         """@brief Widest card the hosting window can show without clipping.
@@ -1564,13 +2036,17 @@ class AnalysisOverlay(QWidget):
         # `sizeHint` the card resizes on.
         self._status_extra = 0
         self._status_source = ""
+        self._status_message = ""
+        # The count of the previous operation is not this one's.
+        self._progress_count = None
         self.status.clear()
         # The highlighted outcome of a finished job (`show_completed`) does not
         # carry over to the running lines of the next operation.
         self._outcome = None
         self._set_outcome_look("")
         self._size_the_card()
-        self.set_status(status)
+        # The first status is the caller's own catalogue text, never tool output.
+        self.set_status(status, composed=True)
         self.setGeometry(self.parentWidget().rect())
         self._tick()
         self.show()
@@ -1610,14 +2086,23 @@ class AnalysisOverlay(QWidget):
         if source is not None:
             self.transfer.set_source(source, color)
         self.transfer.setVisible(source is not None)
-        detail = " ".join(str(detail or "").split())
-        self.tool.setText(f"{name} · {detail}" if name and detail else name)
-        self.tool.setToolTip(self.tool.text())
+        # The tool's source name and detail as received: the header is composed
+        # again in the active language on a switch (`refresh_command_texts`).
+        self._tool_source = (source_name, " ".join(str(detail or "").split()))
+        self._render_tool()
         self.tool.ink = color
         self.tool.setStyleSheet(f"font-weight: 600; color: {color};")
         self.tool.setVisible(bool(name))
         self.progress.setStyleSheet(
             f"QProgressBar::chunk {{ background: {color}; border-radius: 5px; }}")
+
+    def _render_tool(self):
+        """Write the header «tool · detail» in the active language (name and detail recomposed)."""
+        source_name, detail = getattr(self, "_tool_source", ("", ""))
+        name = self._translate(source_name) if source_name else ""
+        detail = self._translate(detail) if detail else ""
+        self.tool.setText(f"{name} · {detail}" if name and detail else name)
+        self.tool.setToolTip(self.tool.text())
 
     def set_steps(self, labels, unavailable=None):
         """@brief Show the steps of a multi-phase job, none of them started yet.
@@ -1626,15 +2111,18 @@ class AnalysisOverlay(QWidget):
         @param unavailable Optional {index: reason}: steps that will not run
             (e.g. FreeCAD missing), drawn struck through with the reason.
         """
-        translate = self.i18n.text if self.i18n is not None else (lambda text: text)
         # A stepped job ticks its steps: the phase list is not needed and
         # its space goes back to the status (the resize is just below).
         self._phases_reserved = False
         self.clear_phases()
-        self._step_labels = [translate(str(label)) for label in labels]
-        self._step_results = {}
-        self._step_unavailable = {int(index): translate(str(reason))
-                                  for index, reason in (unavailable or {}).items()}
+        # CONTRACT CHANGED 2026-11-15 (round 2): the sources are kept and the
+        # step texts composed again on a language switch (they stayed in the
+        # language of the moment they were set).
+        self._step_sources = [str(label) for label in labels]
+        self._step_result_sources = {}
+        self._step_unavailable_sources = {int(index): str(reason)
+                                          for index, reason in (unavailable or {}).items()}
+        self._translate_steps()
         self._step_current = -1
         self._render_steps()
         # Called right after `start`, before the first paint: the card takes
@@ -1650,9 +2138,20 @@ class AnalysisOverlay(QWidget):
         """
         if not self._step_labels or not 0 <= int(index) < len(self._step_labels):
             return
-        self._step_results[int(index)] = str(result)
+        if not hasattr(self, "_step_result_sources"):
+            self._step_result_sources = {}
+        self._step_result_sources[int(index)] = str(result)
+        self._step_results[int(index)] = self._translate(str(result))
         self._render_steps()
         self._size_the_card()
+
+    def _translate_steps(self):
+        """Compose the step labels, results and reasons from their kept sources, in the active language."""
+        self._step_labels = [self._translate(label) for label in getattr(self, "_step_sources", [])]
+        self._step_results = {index: self._translate(result) for index, result
+                              in getattr(self, "_step_result_sources", {}).items()}
+        self._step_unavailable = {index: self._translate(reason) for index, reason
+                                  in getattr(self, "_step_unavailable_sources", {}).items()}
 
     def set_current_step(self, index):
         """@brief Mark step `index` as running and every earlier step as done.
@@ -1718,7 +2217,10 @@ class AnalysisOverlay(QWidget):
         if source and self.i18n is not None:
             message = self.i18n.text(source)
         self._set_outcome_look("partial" if partial else "done", larger=False)
-        self.set_status(f"{'⚠' if partial else '✓'} {message}")
+        # CONTRACT CHANGED 2026-11-15 (round 2): the outcome is the program's
+        # own translated sentence; it never passes the machine-line filter
+        # (in French «Terminé : …» was dropped as a «key : value» field).
+        self.set_status(f"{'⚠' if partial else '✓'} {message}", composed=True)
         self._fit_outcome()
         total = getattr(self, "_outcome_total", None)
         if total is not None and getattr(self, "_outcome_total_whole", True):
@@ -1959,8 +2461,26 @@ class AnalysisOverlay(QWidget):
         return probe.sizeHint().height()
 
     def _translate(self, source):
-        """Catalogue text of an Italian source, or the source itself without i18n."""
-        return self.i18n.text(source) if self.i18n is not None else source
+        """Catalogue text of a source in the active language, or the text itself without i18n.
+
+        An Italian source is looked up; a line `messages.tx` composed in the
+        language of an earlier moment is composed again from its catalogue
+        template (`recompose_in_language`), so the card follows a language
+        switch for the texts the workers composed, not only for its own.
+        """
+        if self.i18n is None:
+            return source
+        # Memoised per language: the phase list is redrawn at every timer
+        # tick (the pulsing «●»), and recomposing from the templates costs
+        # about a millisecond per line. A catalogue edited in the database
+        # meanwhile is picked up at the next language switch.
+        cache = getattr(self, "_translations", None)
+        if cache is None or len(cache) > 512:
+            cache = self._translations = {}
+        key = (getattr(self.i18n, "language", ""), source)
+        if key not in cache:
+            cache[key] = recompose_in_language(source, self.i18n)
+        return cache[key]
 
     def _phase_outcome_text(self, source):
         """Outcome of a phase as shown: translated now, paths shortened, one line.
@@ -2014,6 +2534,7 @@ class AnalysisOverlay(QWidget):
     def clear_steps(self):
         """@brief Hide the step row (single-phase operations have none)."""
         self._step_labels, self._step_unavailable, self._step_current = [], {}, -1
+        self._step_sources, self._step_result_sources, self._step_unavailable_sources = [], {}, {}
         self._steps_plain = []
         self.steps.clear()
         self.steps.hide()
@@ -2093,18 +2614,27 @@ class AnalysisOverlay(QWidget):
             return
         self.progress.setRange(0, total)
         self.progress.setValue(done)
-        percent = round(done * 100 / total)
-        if unit and self.i18n is not None:
-            unit = self.i18n.text(unit)
-        self.progress_label.setText(
-            f"{percent}% · {done}/{total} {unit}".rstrip() if unit
-            else f"{percent}% · {done}/{total}")
+        # The count and its unit as received: the label is composed again on
+        # a language switch (`refresh_command_texts`); the unit usually
+        # arrives already translated by `messages.tx`.
+        self._progress_count = (done, total, str(unit or ""))
+        unit = self._render_progress_label()
         if self._phase_name and not self._step_labels:
             self._phase_progress = (done, total, unit)
             self._render_phases()
             self._status_source = elide_paths(
                 self._translate(self._phase_name) + " — " + self._progress_text())
             self._render_status()
+
+    def _render_progress_label(self):
+        """Write «98% · 45/46 componenti» in the active language; return the translated unit."""
+        done, total, unit = getattr(self, "_progress_count", None) or (0, 0, "")
+        unit = self._translate(unit) if unit else ""
+        percent = round(done * 100 / total) if total else 0
+        self.progress_label.setText(
+            f"{percent}% · {done}/{total} {unit}".rstrip() if unit
+            else f"{percent}% · {done}/{total}")
+        return unit
 
     def _progress_text(self):
         """«17 di 42 componenti» for the running phase, in the current language.
@@ -2168,10 +2698,16 @@ class AnalysisOverlay(QWidget):
         self.cost_cached.setText("\n".join(lines))
         self.cost_cached.setVisible(bool(lines))
 
-    def set_status(self, message):
+    def set_status(self, message, composed=False):
         """@brief Show one status written for a person, never a service line.
 
         @param message Status line; machine bookkeeping is dropped, not shown.
+        @param composed True when the caller composed the line itself from the
+            catalogue (an outcome, the first status of `start`): its ORIGIN is
+            known, so the machine-line filter, which exists for the output of
+            external tools, is not applied. A `messages.Message` (built by
+            `messages.marked`/`warning`) is program text by construction and
+            counts as composed too.
             One line in, one line shown -- unless the line enumerates, and then
             it is laid out as a list (see the last note).
         @note The lines the program writes for itself (AI_CALL_... at the head
@@ -2205,9 +2741,15 @@ class AnalysisOverlay(QWidget):
         # Full messages stay in the log; keep the card stable for long replies.
         warned = kind_of(message) == WARNING
         source = " ".join(str(message).split())
-        if is_machine_line(source):
+        # CONTRACT CHANGED 2026-11-15 (round 2): text the program composed is
+        # told from tool output by its origin, never by a typographic shape
+        # that one language's punctuation triggers (French « : »).
+        if not (composed or isinstance(message, Message)) and is_machine_line(source):
             return
-        text = self.i18n.text(source) if self.i18n is not None else source
+        # The line as received: re-composed in the new language on a switch
+        # (`refresh_command_texts`) while the operation is still running.
+        self._status_message = source
+        text = self._translate(source)
         self._status_source = elide_paths(text)
         if self._phase_name:
             # Phase outcome: the FIRST status after its announcement; a

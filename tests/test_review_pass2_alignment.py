@@ -298,6 +298,24 @@ def test_the_review_dialog_switches_the_commands_off_and_back_on(window, monkeyp
     def verify(*, emit, **_):
         gate.wait(5)
         emit(Check('OK', 'Geometria del footprint', 'ok', code='footprint_geometry'))
+        # CONTRACT CHANGED 2026-11-15 (review M6): an outcome in which KiCad
+        # read none of the files keeps the installation off; a real run with
+        # kicad-cli carries its read rows.
+        emit(Check('OK', 'Lettura footprint in KiCad', 'File letto da KiCad.',
+                   code='kicad_footprint_read'))
+        # CONTRACT CHANGED 2026-11-15 (round 2, R4): KiCad must read EACH file
+        # the installation copies; the generated project holds its symbol file.
+        emit(Check('OK', 'File del simbolo: lettura in KiCad', 'File letto da KiCad.',
+                   code='kicad_symbol_file_read'))
+        # CONTRACT CHANGED 2026-11-15 (round 4, item 2): a run that ended
+        # without concluding a check the installation needs now reads
+        # «incomplete» and blocks. The fake was no real run shape: a real run
+        # always emits the footprint file's and pin-pad's own rows and ends
+        # with the manual checks.
+        emit(Check('OK', 'Footprint su disco', 'footprint', code='footprint_file'))
+        emit(Check('OK', 'Corrispondenza pin-pad', '2 numeri elettrici corrispondenti.', code='pin_pad'))
+        emit(Check('WARN', 'Verifiche manuali', 'ERC e DRC in KiCad.', category='manual',
+                   code='manual_checks'))
     monkeypatch.setattr(ccd, "verify_component", verify)
     window._refresh_output_actions()
     assert not window.action_export.isEnabled()          # no check of these files yet

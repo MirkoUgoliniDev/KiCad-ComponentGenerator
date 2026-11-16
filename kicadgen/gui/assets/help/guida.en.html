@@ -684,36 +684,96 @@ no record is lost silently.</p>
 <h3 id="controllo">Component check (step 1)</h3>
 <p>When you open the <span class="ui">KiCad</span> tab with files that no check has
 read yet, the check <strong>starts by itself</strong>: it asks nothing and does not
-change KiCad's configuration. It waits only if a job is writing the files or if the
-files do not match the parameters (the line at the top of the step says why).
+change KiCad's configuration. It does not start until the component has a footprint,
+and it waits (the line at the top of the step says why and what the remedy is) while:
+a job (generation, STEP model, analysis) is writing the files; the pad positions were
+left blocked; a footprint question is still open (pad layout, side numbering, row
+spacing, contact type, terminal view); the files on disk do not match the parameters,
+that is an applied footprint change is not yet written to the file, the symbol file
+does not match the applied symbol or the STEP model is obsolete. As soon as the cause
+goes away the check starts by itself.
 It checks the generated files, the match of the pin-pad numbers and, if
 <code>kicad-cli</code> is available, tries reading footprint, symbol and STEP with
 KiCad CLI (DRC and ERC included). The outcome stays written in the step: a verdict, one
 line for each thing to do with its button (for example <span class="ui">Open the Pinout
 table</span> or <span class="ui">Suggest with AI</span>) and the passed checks.
 <span class="ui">Check again</span> repeats it, <span class="ui">Stop</span>
-stops it at once, <span class="ui">Copy report</span> copies verdict, lines and
-technical details.</p>
+stops it at once (it must then be repeated before installing), <span class="ui">Copy
+report</span> copies verdict, lines and technical details.</p>
 <p>The outcome decides step 3:</p>
 <ul>
   <li><strong>errors</strong> (verdict <span class="ui">DO NOT USE</span>): installation
   stays blocked until you fix them;</li>
-  <li><strong>warnings</strong> or checks not run: you can install, and the sentence of
-  step 3 says what to review before production;</li>
+  <li><strong>warnings</strong> or checks not run because KiCad CLI is not installed:
+  you can install, and the sentence of step 3 says what to review before production;</li>
+  <li><strong>KiCad did not read every file</strong> the installation copies (the
+  footprint and, when it exists, the symbol file): KiCad CLI is there, but a read was
+  skipped or interrupted, for example it did not answer within 60 seconds; installation
+  stays blocked until <span class="ui">Check again</span> gets every read
+  through;</li>
+  <li><strong>same KiCad CLI failure in two checks in a row</strong>: every KiCad read
+  fails on the tool's side, with the same cause in two consecutive checks: KiCad CLI
+  does not start, closes every time with the same exit code (a crash code too), ends
+  without producing any result, never answers in time, refuses even a valid test file
+  (see below), or the check's temporary folder is unusable (antivirus, full disk,
+  permissions); a fixed combination of these causes counts too. It is a lasting cause,
+  treated like KiCad CLI not installed: you can install, and step 3 names the cause. No
+  lasting cause is ever assumed when KiCad CLI worked in the same check (a read that
+  succeeded, a DRC or an ERC that ran): the missing reads are then about the files, and
+  they must be repeated or are an error of the component (see below). An internal error
+  of the program never counts as a lasting cause: it always falls under the next
+  point;</li>
+  <li><strong>check stopped by an internal error</strong>: you can install only if it
+  had already concluded every check that can block the component and applies to it:
+  <ul class="required-checks">
+    <li>with KiCad CLI, the KiCad version;</li>
+    <li>the footprint file and its pads (overlapping pads, links to the STEP model)
+    and, when there are declared terminals, whether they pass through the holes;</li>
+    <li>the pin-pad match and the building of the symbol;</li>
+    <li>with KiCad CLI, KiCad's reads of the footprint, of the applied symbol and of
+    the installed symbol file, when it exists, and the DRC of the preview (a real
+    contact between two pads);</li>
+    <li>the document pinout, when there is a reading of the document;</li>
+    <li>the contact functions (NC, NO, common), when the symbol declares
+    contacts;</li>
+    <li>when there is a STEP, the integrity of the STEP model and, with KiCad CLI, its
+    import into KiCad.</li>
+  </ul>
+  In that case step 3 says the outcome is incomplete; otherwise installation stays
+  blocked until <span class="ui">Check again</span> concludes them;</li>
+  <li><strong>check stopped</strong> or one that could not start: it is not an outcome,
+  installation stays blocked until you repeat it with
+  <span class="ui">Check again</span>;</li>
+  <li><strong>a file of the component is in use by another program</strong>: the check
+  ended, but a check the installation needs could not be made because the file was open
+  elsewhere; installation stays blocked: close the program that holds it open and use
+  <span class="ui">Check again</span>;</li>
+  <li><strong>check ended without concluding every check the installation
+  needs</strong> (the skipped rows of step 1 say which): installation stays blocked
+  until <span class="ui">Check again</span> concludes them;</li>
   <li><strong>all clear</strong> (only the checks to do by hand in KiCad remain):
   <span class="ui">Install in the KiCad project (recommended)</span> is highlighted.</li>
 </ul>
 <p>Any change to the files that the installation copies (a regeneration,
 <span class="ui">Apply to files</span>, a new export of the symbol) makes the
-outcome stale: the installation buttons are disabled and the check starts again. A
-problem of the checking tool (KiCad CLI that does not answer within 60 seconds or
-does not start) is not an error of the component: it is reported as «not run» and
-does not block installation. After an installation only the KiCad library line is
+outcome stale: the installation buttons are disabled and the check starts again. When
+KiCad fails on the component's file (refuses it twice, closes, even with a crash code,
+ends without producing anything or never finishes reading it), the check has it read a
+small valid test file of the same kind with the same command: if KiCad reads it, the
+defect is the component's (an error). One example is a name containing «%», which KiCad
+handles as a format code and which makes it close on every read: this is why the
+character is not allowed in component names. If KiCad fails on the test file too, or
+the test cannot be made, the problem is the checking tool's or the computer's (the
+KiCad installation, an antivirus, the temporary folder), not the component's: the read
+is reported as «not run», and it blocks installation only when a KiCad read of the
+files the installation copies is missing, until the check gets it through or the cause
+proves lasting (see above); a DRC or ERC not run does not block it. After an installation only the KiCad library line is
 updated. The applied symbol is tested even if not yet exported; drafts not applied
 are excluded and reported. This check does not certify pinout, dimensions or visual
 3D alignment; ERC and DRC must be run on the final schematic and board.</p>
-<p>The check stays available when the footprint exists but the STEP is missing;
-installation stays disabled until the required files are present.
+<p>The check and the installation stay available when the footprint exists but the
+STEP is missing (the installation asks for confirmation and brings the component
+without a 3D view); installation stays disabled until there is a footprint.
 The original 3D references and transformations are checked separately from the
 normalised temporary copy. Relative paths or KiCad variables that are not resolved
 need checking in the destination project.</p>

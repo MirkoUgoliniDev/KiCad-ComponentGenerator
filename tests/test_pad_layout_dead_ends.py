@@ -275,7 +275,7 @@ def test_an_unverifiable_witness_is_not_a_refutation():
     ext.apply_dedicated_pads(data, _reading(TRUE), check_layout=_witness(
         refused=_verdict("unverifiable", "pads_not_visible")))
     assert len(_pad_layout_questions(data)) == 1
-    assert "ne' confermate ne' smentite" in _pad_layout_questions(data)[0]["text"]
+    assert "né confermate né smentite" in _pad_layout_questions(data)[0]["text"]
 
 
 def test_a_dedicated_reading_with_fewer_witnessed_pads_is_never_offered():
@@ -799,7 +799,7 @@ def test_a_confirmed_layout_comes_first_and_says_so():
     options = questions[0]["options"]
     assert options[0]["value"].startswith("dedicated:")
     assert "coincidono" in options[0]["label"]
-    assert "ne' confermate ne' smentite" in options[1]["label"]
+    assert "né confermate né smentite" in options[1]["label"]
     # The provisional pads stay the main answer's, and the note says which
     # option the holes confirm.
     assert "confermano invece: lettura dedicata" in data["_numbering_note"]
@@ -811,7 +811,7 @@ def test_two_layouts_the_holes_cannot_check_keep_todays_order_and_both_say_so():
                                                                      "pads_not_visible")))
     options = questions[0]["options"]
     assert options[0]["value"].startswith("main:") and options[1]["value"].startswith("dedicated:")
-    assert all("ne' confermate ne' smentite" in option["label"] for option in options)
+    assert all("né confermate né smentite" in option["label"] for option in options)
 
 
 def test_a_confirmation_on_marks_only_is_labelled_as_such():
@@ -916,7 +916,7 @@ def test_an_unobservable_no_match_ranks_with_the_unverifiable():
 def test_no_machine_code_reaches_the_users_text(reason):
     """Lower item: a «cannot tell» verdict is worded, never shown as its code."""
     text = ext._hole_text(_verdict("unverifiable", reason))
-    assert reason not in text and "ne' confermate ne' smentite" in text
+    assert reason not in text and "né confermate né smentite" in text
 
 
 def test_a_withheld_offer_says_why_when_the_holes_refute_it():

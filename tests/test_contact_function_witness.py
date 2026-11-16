@@ -252,8 +252,8 @@ def test_two_saved_assignments_that_disagree_contradict():
 # ── why one reading only (M7), coverage (L8), witness after an answer (L9) ──
 
 def test_the_missing_second_reading_says_why():
-    cases = {"failed": "non e' riuscita", "old_prompt": "non chiede le funzioni",
-             "no_symbol": "non ha visto un simbolo", None: "non e' stata fatta"}
+    cases = {"failed": "non è riuscita", "old_prompt": "non chiede le funzioni",
+             "no_symbol": "non ha visto un simbolo", None: "non è stata fatta"}
     for reason, words in cases.items():
         data = _data(RIGHT, {} if reason else None, reason=reason)
         ext._confront_contact_functions(data)

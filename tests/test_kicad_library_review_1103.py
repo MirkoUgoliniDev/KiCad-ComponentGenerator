@@ -342,7 +342,13 @@ def test_rollback_continues_after_a_restore_raising_kicad_library_error(
 def test_install_reports_rollback_incomplete_when_a_restore_raises(tmp_path, monkeypatch):
     artifacts = _artifacts(tmp_path)
     project = tmp_path / "Board"
-    install_component_library(artifacts, project)
+    first = install_component_library(artifacts, project)
+    # CONTRACT CHANGED 2026-11-15 (P3): an identical re-install writes no
+    # file, so there was nothing to restore and the case vanished. The source
+    # footprint changes, so the re-install really publishes the footprint and
+    # the rollback must restore it -- the restore that fails here.
+    artifacts.footprint_path.write_text(FOOTPRINT.replace("(size 1 1)", "(size 1.2 1)"),
+                                        encoding="utf-8")
 
     def table_fails(*_args, **_kwargs):
         raise OSError("disk full")
@@ -354,6 +360,7 @@ def test_install_reports_rollback_incomplete_when_a_restore_raises(tmp_path, mon
     with pytest.raises(KiCadLibraryError) as caught:
         install_component_library(artifacts, project, overwrite=True)
     assert caught.value.code == "rollback_incomplete"
+    assert str(first.footprint_path) in caught.value.context["failures"]
     assert Path(caught.value.context["rollback_dir"]).is_dir()
 
 

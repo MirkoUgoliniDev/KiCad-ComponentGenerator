@@ -62,8 +62,9 @@ def _decode_utf8(data: bytes, path: Path, *, keep_newlines: bool = False) -> str
         it adds; by default they are universal newlines like ``read_text``.
     @return The text without a leading UTF-8 byte order mark (`UTF8_BOM`).
         A BOM made a valid table look like ``invalid_table``: the text no
-        longer started with ``(fp_lib_table``. A caller that rewrites the file
-        restores the BOM itself (see update_fp_lib_table).
+        longer started with ``(fp_lib_table``. A caller that rewrites a
+        KiCad library or table writes it WITHOUT the BOM, which KiCad 10
+        does not load (see update_fp_lib_table, review 2026-11-15, L3).
     @throws KiCadLibraryError ``file_not_utf8`` (context ``path``, ``error``)
         when the bytes are not valid UTF-8.
     @note KiCad reads and writes its tables and footprints in UTF-8. A table
@@ -203,6 +204,36 @@ class LibraryInstallResult:
     #: No symbol shipped, yet the library keeps one of this name from an
     #: earlier install, which may not match the new footprint any more.
     symbol_left_stale: bool = False
+    #: Installed files that already held exactly what this install would
+    #: write and were therefore left untouched (`InstallPlan.unchanged`).
+    unchanged: tuple[Path, ...] = ()
+    #: The shared library already held exactly this symbol and was not
+    #: rewritten (`InstallPlan.symbol_identical`).
+    symbol_identical: bool = False
+    #: Files that started with a UTF-8 byte order mark and were rewritten
+    #: without it: KiCad 10 does not load a ``.kicad_sym``, ``sym-lib-table``
+    #: or ``fp-lib-table`` that starts with one (checked with kicad-cli
+    #: 10.0.8, review 2026-11-15, L3), so the BOM is dropped, never kept.
+    bom_removed: tuple[Path, ...] = ()
+    #: The install added or rewrote the library's row in `table_path` (a
+    #: row the user removed, disabled or pointed elsewhere): the table was
+    #: written although every component file may be unchanged. A BOM dropped
+    #: alone is not a row change; it is in `bom_removed`. Declared by the
+    #: install that computed it (review 2026-11-15, round 3), so the window
+    #: never says «niente da scrivere» (nothing to write) over a table write.
+    table_changed: bool = False
+    #: Same as `table_changed` for the symbol table (`symbol_table_path`);
+    #: False when no symbol was installed.
+    symbol_table_changed: bool = False
+
+    @property
+    def symbol_library_bom_removed(self) -> bool:
+        """@brief Whether the shared symbol library lost a leading BOM in this install.
+
+        @return True when `symbol_library_path` is in `bom_removed`: the
+            library was unloadable in KiCad before this install and loads now.
+        """
+        return self.symbol_library_path is not None and self.symbol_library_path in self.bom_removed
 
 
 @dataclass(frozen=True)
@@ -243,7 +274,10 @@ class InstallPlan:
     links not resolved.
     @note ``replaced`` lists the existing targets the install overwrites and
         ``removed`` those it deletes (a WRL present in the library when the
-        source has none). A dangling symbolic link counts as existing: it is
+        source has none). An existing target that already holds exactly the
+        bytes the install would write is in ``unchanged`` instead (review
+        2026-11-15, P3): a re-install of the same component asks nothing
+        and rewrites nothing, but still makes sure of the table rows. A dangling symbolic link counts as existing: it is
         listed in ``replaced`` so the user is asked, and the install then
         refuses it (``target_link_unresolved``) because nothing can be
         written through it.
@@ -324,6 +358,20 @@ class InstallPlan:
     #: True when no symbol is shipped but the library still holds one of this
     #: name from an earlier install (review 2026-11-15, finding 9).
     symbol_left_stale: bool = False
+    #: Existing targets whose bytes are already exactly what the install
+    #: would write (review 2026-11-15, P3): not in `replaced`, never
+    #: rewritten, and not a reason for the overwrite question.
+    unchanged: tuple[Path, ...] = ()
+    #: The shared library already holds exactly this symbol block as it
+    #: would be written, without a BOM to drop (P3); `symbol_replaced` is
+    #: then False and the library is not rewritten (unless it starts with a
+    #: BOM, see `bom_to_remove`).
+    symbol_identical: bool = False
+    #: Files the install rewrites WITHOUT the UTF-8 byte order mark they
+    #: start with: the shared symbol library and the library tables it
+    #: touches. KiCad 10 does not load any of them with a BOM (kicad-cli
+    #: 10.0.8, review 2026-11-15, L3), so dropping it only makes them loadable.
+    bom_to_remove: tuple[Path, ...] = ()
 
     @property
     def with_symbol(self) -> bool:
@@ -908,7 +956,9 @@ def _library_symbol(library_text: str, name: str) -> str:
     @throws _SymbolUnusable ``symbol_unreadable``, ``symbol_not_found`` or
         ``symbol_derived``.
     """
-    if not library_text.lstrip().startswith("(kicad_symbol_lib"):
+    # The exact root token, as everywhere else (`_SYMBOL_LIBRARY_ROOT`): a
+    # loose prefix accepted «(kicad_symbol_libX», another file.
+    if not _SYMBOL_LIBRARY_ROOT.match(library_text):
         raise _SymbolUnusable("symbol_unreadable")
     try:
         ranges = _direct_child_ranges(library_text, "symbol")
@@ -1400,6 +1450,45 @@ _SYMBOL_LIBRARY_ROOT = re.compile(r"\A\s*\(\s*kicad_symbol_lib(?=[\s()])")
 _SEXPR_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 
+#: Library nickname the program itself writes into a generated symbol's
+#: ``Footprint`` property: the symbol editor and the component check write
+#: ``KiCadGen:<component>`` (main_window ``footprint=f'KiCadGen:{name}'``,
+#: component_check ``serialize_symbol(..., footprint=f'KiCadGen:{name}')``).
+#: A Footprint under this nickname or under the install's target library
+#: names a footprint this program wrote; any other nickname was chosen by a
+#: person (review 2026-11-15, M5).
+GENERATED_FOOTPRINT_LIBRARY = "KiCadGen"
+
+
+def _own_footprint_name(value: str, own_libraries: tuple[str, ...]) -> str | None:
+    """@brief The footprint name of a ``Footprint`` value that names one of this program's footprints.
+
+    @param value The property's value, ``<library>:<footprint>`` or a bare name.
+    @param own_libraries Nicknames this program writes footprints into.
+    @return The footprint part when the value carries no library (a bare
+        name KiCad cannot resolve, so it can only mean this component's own
+        footprint, review 2026-11-15, F10) or a library of `own_libraries`;
+        None for a value naming another library, and for an empty value.
+    @note KiCad splits a footprint identifier at its FIRST colon (a library
+        nickname cannot hold one), so the split is the same here.
+    @note Declared limit (review 2026-11-15, round 2), by design: this only
+        recognises a value as the program's own; `_named_symbol_block`
+        rewrites it only when the footprint part is also the symbol's old
+        name or the new one. A Footprint a person edited to another library
+        («Package_DIP:DIP-8»), or to ``KiCadGen:<other name>`` (a footprint
+        of another component of the same library), is therefore installed as
+        it is, not rewritten to this component's footprint: the program
+        cannot tell a deliberate choice from a stale reference, and keeping a
+        chosen footprint is recoverable while overwriting it is not. The
+        component check and the symbol editor are where such a mismatch is
+        seen.
+    """
+    library, separator, footprint = value.partition(":")
+    if not separator:
+        return value or None
+    return footprint if library in own_libraries else None
+
+
 def _named_symbol_block(block: str, name: str, library_name: str = "KiCadGen") -> str:
     """@brief A top-level symbol block ready for the shared library under `name`.
 
@@ -1409,8 +1498,8 @@ def _named_symbol_block(block: str, name: str, library_name: str = "KiCadGen") -
     @return The block with its head named `name`, every unit sub-symbol named
         ``<name>_<unit>_<style>``, its ``Footprint`` property pointing at
         ``<library_name>:<name>`` when it named this component's footprint
-        (under the old or the new name), its ``Value`` renamed when it was
-        the old name and the automatic token of ``ki_fp_filters``
+        (see the notes), its ``Value`` renamed when it was the generator's own
+        name of the symbol, and the automatic token of ``ki_fp_filters``
         (`fp_filter_pattern`) following the name; every other byte verbatim.
     @throws _SymbolUnusable ``symbol_unreadable`` when the block has no
         named head, holds a control character, or has a unit sub-symbol whose
@@ -1420,8 +1509,34 @@ def _named_symbol_block(block: str, name: str, library_name: str = "KiCadGen") -
         footprint is renamed by `name_footprint`, and a symbol library renamed
         by hand (the one symbol under another name, which `_library_symbol`
         accepts) must not install a symbol pointing at another component's
-        footprint (review 2026-11-15, finding 2). A Footprint property naming
-        some other footprint was chosen by the user and is kept.
+        footprint (review 2026-11-15, finding 2).
+    @note The ``Footprint`` property names this component's footprint only
+        when BOTH its library and its name say so (review 2026-11-15, M5):
+        the library is one this program writes (`GENERATED_FOOTPRINT_LIBRARY`
+        or `library_name`) or absent (F10: a bare name, which KiCad cannot
+        resolve), and the name is the symbol's old name or `name`. A
+        footprint of another library («Package_TO_SOT_SMD:SOT-23») was chosen
+        by a person and is kept even when its name matches: matching by name
+        alone turned it into «<library>:SOT-23», a footprint that does not
+        exist.
+    @note The ``Value`` follows the rename only when it is the name the
+        generator gave the symbol (review 2026-11-15, F8). The generator
+        writes Value, symbol name and Footprint name as ONE name; the
+        witness is the Footprint property: when it names one of this
+        program's footprints under the symbol's old name and the Value is
+        that same name, the three still carry the generator's convention and
+        all follow. A Value equal to a symbol name a person chose
+        («LM358», Footprint still naming the component) is a vendor value and
+        stays. Without that witness (Footprint foreign or empty) the Value is
+        kept: keeping a name is recoverable, overwriting a part number is not.
+    @note Declared limit of the Value rule (review 2026-11-15, round 2): a
+        component NAMED like a part number («NE555P») whose Value a person
+        typed equal to that name is renamed with the component, because the
+        file holds nothing that tells a typed Value from the generator's own
+        default when the two texts are equal. Only a declared attribute
+        («Value typed by the user», saved with the project and passed here)
+        would separate them; until then the witness above is the best the
+        file offers, and the Value can be typed again after the install.
     @note KiCad requires a unit's name to be its parent's name plus
         ``_<unit>_<style>``: units are renamed from their suffix, whatever
         their prefix was, so a unit left under a stale prefix cannot break
@@ -1431,6 +1546,7 @@ def _named_symbol_block(block: str, name: str, library_name: str = "KiCadGen") -
     if head is None or _SEXPR_CONTROL.search(block):
         raise _SymbolUnusable("symbol_unreadable")
     old = _atom_value(head.group(2))
+    own_libraries = (GENERATED_FOOTPRINT_LIBRARY, library_name)
     for start, end in reversed(_direct_child_ranges(block, "symbol")):
         child = block[start:end]
         child_head = _SYMBOL_HEAD.match(child)
@@ -1441,18 +1557,26 @@ def _named_symbol_block(block: str, name: str, library_name: str = "KiCadGen") -
         if _atom_value(child_head.group(2)) != wanted:
             child = child[:child_head.start(2)] + quote(wanted) + child[child_head.end(2):]
             block = block[:start] + child + block[end:]
-    for start, end in reversed(_direct_child_ranges(block, "property")):
+    # (start, end, head match, key, value) of every property, read once
+    # before any rewrite; rewritten from the last so earlier ranges hold.
+    properties = []
+    for start, end in _direct_child_ranges(block, "property"):
+        match = _PROPERTY_HEAD.match(block[start:end])
+        if match is not None:
+            properties.append((start, end, match, _atom_value(match.group(2)),
+                               _atom_value(match.group(4))))
+    # The generator's convention is witnessed by the ORIGINAL Footprint
+    # property: one of this program's footprints named after the symbol (F8).
+    generated_name = next(
+        (_own_footprint_name(value, own_libraries)
+         for _start, _end, _match, key, value in properties if key == "Footprint"), None)
+    for start, end, match, key, value in reversed(properties):
         child = block[start:end]
-        match = _PROPERTY_HEAD.match(child)
-        if match is None:
-            continue
-        key, value = _atom_value(match.group(2)), _atom_value(match.group(4))
         new_value = None
         if key == "Footprint":
-            _library, separator, footprint = value.rpartition(":")
-            if separator and footprint in (old, name):
+            if _own_footprint_name(value, own_libraries) in (old, name):
                 new_value = f"{library_name}:{name}"
-        elif key == "Value" and value == old:
+        elif key == "Value" and value == old and generated_name == old:
             new_value = name
         elif key == "ki_fp_filters" and old != name:
             # The automatic filter token follows the name, as the window's
@@ -1579,6 +1703,16 @@ def merged_symbol_library_text(
         text = text[:closing].rstrip() + newline + "  " + block + newline + text[closing:]
     ours, _range = _root_version(source_text)
     theirs, theirs_range = _root_version(text)
+    # DECLARED CHOICE (review 2026-11-15, F9): the root takes the NEWER of the
+    # two versions, never the older. One root version covers every symbol of
+    # the file; the appended block is written in the component's format, which
+    # an older version would tell KiCad not to expect. Raising it is harmless
+    # for the older symbols: checked with kicad-cli 10.0.8 (`sym export svg`)
+    # on a KiCad 7/8 symbol (bare `hide` flags, `pin_names ... hide`,
+    # `in_bom`), version 20231120 and the same file raised to 20251024 load
+    # both and render identical SVGs (the hidden pin hidden in both). A
+    # format change that made an older symbol read differently under a newer
+    # root would need a conversion here, not a different version.
     if ours is not None and theirs is not None and ours > theirs:
         start, end = theirs_range
         text = text[:start] + f"(version {ours})" + text[end:]
@@ -2813,7 +2947,8 @@ def update_fp_lib_table(
         pass False for KiCad's global table, which KiCad must create itself.
     @param root Table root: `FP_TABLE_ROOT` (default) or `SYM_TABLE_ROOT`
         (`update_sym_lib_table`).
-    @return True when the table contents changed.
+    @return True when the table was rewritten: its rows changed, or it
+        started with a UTF-8 BOM, which is dropped (review 2026-11-15, L3).
     @throws KiCadLibraryError ``global_table_missing`` when the table is
         absent and ``create_missing`` is False, ``file_not_utf8`` when the
         table is not UTF-8 text (nothing is written); see
@@ -2851,16 +2986,20 @@ def update_fp_lib_table(
         raise _global_table_missing(table, root)
     updated = _updated_fp_lib_table_text(
         original, library_name, uri, table, replace_entry=replace_entry, root=root)
-    if updated == original:
+    had_bom = original_bytes is not None and original_bytes.startswith(UTF8_BOM)
+    if updated == original and not had_bom:
         return False
     table.parent.mkdir(parents=True, exist_ok=True)
     fresh = (_stage_table_backup(table, original_bytes)
              if original_bytes is not None else None)
-    # A BOM the file started with is written back: the rewrite keeps every
-    # byte except the added or repointed row.
-    bom = (UTF8_BOM if original_bytes is not None
-           and original_bytes.startswith(UTF8_BOM) else b"")
-    updated_bytes = bom + updated.encode("utf-8")
+    # CONTRACT CHANGED 2026-11-15 (review L3): a leading BOM is DROPPED, no
+    # longer written back. KiCad 10 does not load a fp-lib-table or
+    # sym-lib-table that starts with one, project or global (kicad-cli 10.0.8
+    # ERC: «La configurazione corrente non include la libreria», "the current
+    # configuration does not include the library", for every row of it), so
+    # the rows this install registers were unusable. Every other byte is kept;
+    # the pre-change copy, BOM included, is the history backup.
+    updated_bytes = updated.encode("utf-8")
     try:
         try:
             _atomic_write_bytes(table, updated_bytes)
@@ -3158,10 +3297,60 @@ def _remove_created_directories(directories: list[Path]) -> None:
             pass
 
 
+def _snapshot_table_history(table: Path, rollback_dir: Path,
+                            aliases: dict[Path, Path]) -> list[tuple[Path, Path | None]]:
+    """@brief Keep the backup history of `table` as it is before the install.
+
+    @param table A library table the install may update (the user's path).
+    @param rollback_dir This install's rollback folder, receiving the copies.
+    @param aliases Internal path -> user's file map, extended with the copies.
+    @return (history slot, rollback copy) for every slot of
+        `_table_backup_history`, the copy None when the slot did not exist.
+    @throws OSError When a copy cannot be taken (the install then fails
+        before its first change and rolls back).
+    @note The history sits next to the REAL table (links resolved), as
+        `update_fp_lib_table` writes it.
+    """
+    slots: list[tuple[Path, Path | None]] = []
+    for slot in _table_backup_history(_write_target(table)):
+        copy = None
+        if slot.is_file():
+            copy = rollback_dir / f"history-{len(aliases)}-{slot.name}"
+            aliases[copy] = slot
+            _copy_writable(slot, copy)
+        slots.append((slot, copy))
+    return slots
+
+
+def _restore_table_history(slots: list[tuple[Path, Path | None]]) -> list[str]:
+    """@brief Put a table's backup history back as it was before a failed install.
+
+    @param slots What `_snapshot_table_history` kept.
+    @return One message per slot that could not be put back.
+    @note A slot that did not exist is removed (this install created it); a
+        slot that existed gets its exact bytes back when they differ (the
+        rotation shifted it, or dropped the oldest copy). Only the exact
+        history names are touched.
+    """
+    failures: list[str] = []
+    for slot, copy in slots:
+        try:
+            if copy is None:
+                if slot.is_file():
+                    _clear_readonly(slot)
+                    slot.unlink()
+            elif not _same_content(slot, copy):
+                _restore_file(copy, slot)
+        except (OSError, KiCadLibraryError) as error:
+            failures.append(f"{slot}: {error}")
+    return failures
+
+
 def _rollback_install(
         installed: list[Path], backups: dict[Path, Path], table: Path,
         table_backup: Path | None, table_existed: bool,
-        *, extra_tables: list[tuple[Path, Path | None, bool]] = ()) -> list[str]:
+        *, extra_tables: list[tuple[Path, Path | None, bool]] = (),
+        histories: dict[Path, list[tuple[Path, Path | None]]] | None = None) -> list[str]:
     """@brief Undo a failed install; return one message per step that failed.
 
     @param installed Targets this install really changed, in order: replaced
@@ -3173,6 +3362,11 @@ def _rollback_install(
     @param extra_tables (table, rollback copy or None, existed) of the other
         tables the install may have changed (the symbol table), restored by
         the same rule as `table`.
+    @param histories Table -> its backup history before the install
+        (`_snapshot_table_history`). A failed install leaves no history file
+        it created and every older one byte-identical (review 2026-11-15,
+        L4): the history is put back once its table is back. A SUCCESSFUL
+        install keeps its history copies (the intended safety copy).
     @return Messages of the steps that failed; empty for a complete rollback.
     @note Only what was really changed is put back. Restoring every backup
         and the table regardless reported a false ``rollback_incomplete``
@@ -3214,7 +3408,20 @@ def _rollback_install(
                 each_table.unlink()
         except (OSError, KiCadLibraryError) as error:
             failures.append(f"{each_table}: {error}")
+            # The table is not back: its history may hold the only good
+            # copy of it, so the history is left as the update made it.
+            continue
+        if histories and each_table in histories:
+            # The table is back as before, so the history copy this install
+            # made of it is redundant: the history returns to its pre-install
+            # state too, no new file left (review 2026-11-15, L4).
+            failures.extend(_restore_table_history(histories[each_table]))
     return failures
+
+
+#: Bytes read from each file per step of `_same_content`. A memory bound, not
+#: a threshold on the result: any value gives the same answer.
+_COMPARE_CHUNK_BYTES = 1 << 20
 
 
 def _same_content(first: Path, second: Path) -> bool:
@@ -3223,9 +3430,24 @@ def _same_content(first: Path, second: Path) -> bool:
     @param first File compared (missing or unreadable -> False).
     @param second Reference copy.
     @return True only when both files can be read and are byte-identical.
+    @note Sizes first, then both files in `_COMPARE_CHUNK_BYTES` steps that
+        stop at the first differing step (review 2026-11-15, round 2): the
+        plan in the KiCad tab and the install itself both compare the STEP
+        model, which used to be read whole into memory twice per side.
+        Memory is bounded by two chunks whatever the file size.
     """
     try:
-        return first.read_bytes() == second.read_bytes()
+        with first.open("rb") as left, second.open("rb") as right:
+            if os.fstat(left.fileno()).st_size != os.fstat(right.fileno()).st_size:
+                return False
+            while True:
+                # Regular files return full chunks until the end, so equal
+                # files give equal chunks at every step.
+                chunk = left.read(_COMPARE_CHUNK_BYTES)
+                if chunk != right.read(_COMPARE_CHUNK_BYTES):
+                    return False
+                if not chunk:
+                    return True
     except OSError:
         return False
 
@@ -3499,6 +3721,11 @@ def plan_component_install(
         dropped.add(target_wrl_path)
     removed = tuple(path for path in existing if path in dropped)
     replaced = tuple(path for path in existing if path not in removed)
+    # Targets already holding exactly what would be written (P3) are neither
+    # replaced nor asked about.
+    unchanged = _unchanged_targets(artifacts, replaced, library_name=library_name,
+                                   project_library=project_library, with_model=with_model)
+    replaced = tuple(path for path in replaced if path not in unchanged)
     destination_table = Path(table_path) if table_path else root / "fp-lib-table"
     linked = tuple(path for path in (*existing, destination_table) if _is_link(path))
     library_uri = (f"${{KIPRJMOD}}/{library_name}.pretty"
@@ -3534,7 +3761,9 @@ def plan_component_install(
                   if project_library else symbol_library.as_posix())
     block, source_text, symbol_skipped = _component_symbol(artifacts, library_name)
     symbol_replaced = False
+    symbol_identical = False
     symbol_left_stale = False
+    bom_to_remove = [destination_table] if _starts_with_bom(destination_table) else []
     symbol_shadowing: LibraryShadowing | None = None
     if symbol_skipped is not None:
         # Nothing of the symbol is touched (review 2026-11-15, finding 8: a
@@ -3561,9 +3790,18 @@ def plan_component_install(
             # Read now, so a foreign or broken library is refused before
             # any question is asked and before anything is written; line
             # endings as stored (finding 3).
-            _merged, symbol_replaced = merged_symbol_library_text(
-                _decode_utf8(symbol_library.read_bytes(), symbol_library, keep_newlines=True),
-                block, artifacts.name, source_text, symbol_library)
+            stored = symbol_library.read_bytes()
+            current = _decode_utf8(stored, symbol_library, keep_newlines=True)
+            merged, had_symbol = merged_symbol_library_text(
+                current, block, artifacts.name, source_text, symbol_library)
+            # The same block already there is not a replacement (P3): the
+            # merge then returns the library text unchanged.
+            symbol_identical = had_symbol and merged == current
+            symbol_replaced = had_symbol and not symbol_identical
+            if stored.startswith(UTF8_BOM):
+                bom_to_remove.append(symbol_library)
+        if _starts_with_bom(symbol_table):
+            bom_to_remove.append(symbol_table)
         linked += tuple(path for path in (symbol_library, symbol_table)
                         if (path.exists() or _is_symlink(path)) and _is_link(path))
         other_symbols = (Path(other_symbol_table_path) if other_symbol_table_path
@@ -3598,7 +3836,109 @@ def plan_component_install(
         symbol_skipped=symbol_skipped, symbol_replaced=symbol_replaced,
         symbol_shadowing=symbol_shadowing, symbol_block=block,
         symbol_source_text=source_text, symbol_left_stale=symbol_left_stale,
+        unchanged=unchanged, symbol_identical=symbol_identical,
+        bom_to_remove=tuple(bom_to_remove),
     )
+
+
+def _starts_with_bom(path: Path) -> bool:
+    """@brief Whether `path` is a readable file starting with a UTF-8 byte order mark.
+
+    @param path File to look at (links followed).
+    @return False for a missing, unreadable or non-file path.
+    """
+    try:
+        with open(path, "rb") as handle:
+            return handle.read(len(UTF8_BOM)) == UTF8_BOM
+    except OSError:
+        return False
+
+
+def _installed_footprint_text(
+        artifacts: ComponentArtifacts, *, library_name: str, project_library: bool,
+        target_step: Path, with_model: bool) -> str:
+    """@brief The exact footprint text an install writes into the library.
+
+    @param artifacts The component being installed.
+    @param library_name Library nickname (the project model path names it).
+    @param project_library Portable ``${KIPRJMOD}`` model path when True,
+        the absolute `target_step` otherwise.
+    @param target_step Installed STEP path (the user's path, links kept).
+    @param with_model Whether the model is shipped (`InstallPlan.with_model`).
+    @return The footprint renamed after the component, with the model node
+        attached or removed.
+    @throws KiCadLibraryError / ValueError / OSError For a footprint or an
+        offset the install refuses (`name_footprint`, `_checked_offset`).
+    @note One function for the plan (`InstallPlan.unchanged`) and the
+        install, so «identical» is judged on the very bytes that would be
+        written.
+    """
+    model_reference = (
+        f"${{KIPRJMOD}}/{library_name}.3dshapes/{artifacts.name}.step"
+        if project_library else target_step.as_posix()
+    )
+    named = name_footprint(_read_utf8(artifacts.footprint_path), artifacts.name)
+    if with_model:
+        return attach_3d_model(named, model_reference, artifacts.model_offset)
+    # Validated as with a model, so a bad offset is refused either way.
+    _checked_offset(artifacts.model_offset)
+    return detach_3d_model(named)
+
+
+def _same_file_bytes(target: Path, source: Path) -> bool:
+    """@brief Whether two files hold the same bytes, comparing sizes first.
+
+    @param target Installed file (links followed; missing or unreadable -> False).
+    @param source File the install would copy.
+    @return True only when both are readable files with identical content.
+    @note The content is compared in chunks by `_same_content`, never read
+        whole (a STEP model can be tens of MB).
+    """
+    try:
+        if not target.is_file() or target.stat().st_size != source.stat().st_size:
+            return False
+    except OSError:
+        return False
+    return _same_content(target, source)
+
+
+def _unchanged_targets(
+        artifacts: ComponentArtifacts, candidates: tuple[Path, ...], *,
+        library_name: str, project_library: bool, with_model: bool) -> tuple[Path, ...]:
+    """@brief The existing targets that already hold exactly what the install writes.
+
+    @param artifacts The component being installed.
+    @param candidates Existing targets the install would overwrite, in the
+        order (footprint, STEP, WRL) of `InstallPlan.targets`.
+    @param library_name Library nickname.
+    @param project_library Portable paths when True.
+    @param with_model Whether the model is shipped.
+    @return The subset of `candidates` whose bytes equal the bytes the install
+        would write (review 2026-11-15, P3).
+    @note A footprint the install would refuse (bad file, bad offset) is
+        never «unchanged»: the install raises the same error itself before
+        writing. Content is compared byte for byte, never by date or size
+        alone.
+    """
+    unchanged: list[Path] = []
+    for target in candidates:
+        if target.suffix == ".kicad_mod":
+            try:
+                text = _installed_footprint_text(
+                    artifacts, library_name=library_name, project_library=project_library,
+                    target_step=target.parents[1] / f"{library_name}.3dshapes"
+                    / f"{artifacts.name}.step", with_model=with_model)
+            except (KiCadLibraryError, ValueError, OSError):
+                continue
+            if _file_holds(target, text.encode("utf-8")):
+                unchanged.append(target)
+        elif target.suffix == ".step" and with_model:
+            if _same_file_bytes(target, artifacts.step_path):
+                unchanged.append(target)
+        elif target.suffix == ".wrl" and with_model and artifacts.wrl_path is not None:
+            if _same_file_bytes(target, artifacts.wrl_path):
+                unchanged.append(target)
+    return tuple(unchanged)
 
 
 def _destination_row_already_there(
@@ -3654,6 +3994,15 @@ def install_component_library(
         rollback as the footprint. Without a usable symbol of the component
         (`InstallPlan.symbol_skipped`) the footprint is installed alone and
         the result says why; a symbol already in the library is then left.
+    @note Review 2026-11-15, P3: a target already holding exactly the bytes
+        this install writes (`InstallPlan.unchanged`) and a library already
+        holding exactly this symbol (`InstallPlan.symbol_identical`) are not
+        rewritten, not backed up and not a reason for ``files_exist``; the
+        table rows are still ensured. The result repeats both facts.
+    @note Review 2026-11-15, L3: the shared symbol library and the tables
+        are written without a leading UTF-8 BOM (KiCad 10 loads none of them
+        with one); the files that lost it are in
+        `LibraryInstallResult.bom_removed`.
 
     @param artifacts Validated generated artifacts of one component.
     @param destination_root Folder receiving ``<library>.pretty`` and
@@ -3775,15 +4124,20 @@ def install_component_library(
                       if table_existed else _EMPTY_TABLE)
     library_uri = plan.library_uri
     # Validate the table update and the footprint before the first write.
-    _updated_fp_lib_table_text(
+    # A table that keeps its text and has no BOM to drop is not changed by
+    # this install (P3): no rollback copy and no history snapshot for it.
+    # The row itself (round 3): added or rewritten, a BOM drop apart.
+    fp_table_row_changed = _updated_fp_lib_table_text(
         table_original, library_name, library_uri, destination_table,
-        replace_entry=replace_library_entry)
+        replace_entry=replace_library_entry) != table_original
+    fp_table_changes = fp_table_row_changed or destination_table in plan.bom_to_remove
+    symbol_table_changes = False
+    symbol_table_row_changed = False
     # ── the symbol library and its table, validated before the first write ──
     symbol_table = plan.symbol_table_path
     symbol_table_existed = plan.symbol_table_exists
     real_symbol: Path | None = None
     symbol_text: str | None = None
-    bom = b""
     if with_symbol:
         _write_target(symbol_table)
         if not symbol_table_existed and not project_library:
@@ -3792,33 +4146,34 @@ def install_component_library(
         symbol_table_original = (_decode_utf8(symbol_table.read_bytes(), symbol_table,
                                               keep_newlines=True)
                                  if symbol_table_existed else _empty_table(SYM_TABLE_ROOT))
-        _updated_fp_lib_table_text(
+        symbol_table_row_changed = _updated_fp_lib_table_text(
             symbol_table_original, library_name, plan.symbol_library_uri, symbol_table,
-            replace_entry=replace_symbol_library_entry, root=SYM_TABLE_ROOT)
+            replace_entry=replace_symbol_library_entry, root=SYM_TABLE_ROOT) != symbol_table_original
+        symbol_table_changes = symbol_table_row_changed or symbol_table in plan.bom_to_remove
         real_symbol = _write_target(plan.symbol_library_path)
-        # Line endings and a leading BOM kept as stored (review 2026-11-15,
-        # finding 3): read as bytes, decoded without normalising, the BOM
-        # written back, so only the component's block may differ.
+        # Line endings kept as stored (review 2026-11-15, finding 3): read as
+        # bytes, decoded without normalising, so only the component's block
+        # may differ.
         current_bytes = real_symbol.read_bytes() if real_symbol.is_file() else None
         current = (_decode_utf8(current_bytes, plan.symbol_library_path, keep_newlines=True)
                    if current_bytes is not None else None)
         merged, _had = merged_symbol_library_text(
             current, plan.symbol_block, artifacts.name, plan.symbol_source_text,
             plan.symbol_library_path)
-        bom = UTF8_BOM if current_bytes is not None and current_bytes.startswith(UTF8_BOM) else b""
-        # An identical library is not rewritten (a re-install of the same symbol).
-        symbol_text = None if merged == current else merged
-    model_reference = (
-        f"${{KIPRJMOD}}/{library_name}.3dshapes/{artifacts.name}.step"
-        if project_library else target_step.as_posix()
-    )
-    named = name_footprint(_read_utf8(artifacts.footprint_path), artifacts.name)
-    if with_model:
-        rendered = attach_3d_model(named, model_reference, artifacts.model_offset)
-    else:
-        # Validated as with a model, so a bad offset is refused either way.
-        _checked_offset(artifacts.model_offset)
-        rendered = detach_3d_model(named)
+        # CONTRACT CHANGED 2026-11-15 (review L3): a leading BOM is DROPPED,
+        # no longer written back. KiCad 10 refuses the whole library with it
+        # (kicad-cli 10.0.8 `sym export svg`: «Impossibile caricare la
+        # libreria», "cannot load the library"), so keeping it kept every
+        # symbol of the file unusable while the install reported success.
+        had_bom = current_bytes is not None and current_bytes.startswith(UTF8_BOM)
+        # An identical library is not rewritten (a re-install of the same
+        # symbol, P3), unless only the BOM must go.
+        symbol_text = None if merged == current and not had_bom else merged
+    rendered = _installed_footprint_text(
+        artifacts, library_name=library_name, project_library=project_library,
+        target_step=target_step, with_model=with_model)
+    #: Targets already holding these very bytes (P3): never staged, backed up or rewritten.
+    unchanged = set(plan.unchanged)
 
     # Folders created here are removed again by a failed install when empty.
     # Without a model the .3dshapes folder is neither needed nor created.
@@ -3843,12 +4198,16 @@ def install_component_library(
             shapes_dir.mkdir(parents=True, exist_ok=True)
         # Scratch files are siblings of the REAL files (same volume as the
         # final rename), so a linked target is never replaced by a plain file.
-        staged_footprint = _temporary_sibling(real_footprint)
-        staged.append((staged_footprint, real_footprint))
-        if with_model:
+        write_footprint = target_footprint not in unchanged
+        write_step = with_model and target_step not in unchanged
+        write_wrl = target_wrl is not None and target_wrl not in unchanged
+        if write_footprint:
+            staged_footprint = _temporary_sibling(real_footprint)
+            staged.append((staged_footprint, real_footprint))
+        if write_step:
             staged_step = _temporary_sibling(real_step)
             staged.append((staged_step, real_step))
-        if target_wrl is not None:
+        if write_wrl:
             staged_wrl = _temporary_sibling(real_wrl)
             staged.append((staged_wrl, real_wrl))
         if symbol_text is not None:
@@ -3861,16 +4220,21 @@ def install_component_library(
         # rollback folder is deleted after a successful install, so a power
         # loss could otherwise leave an empty .kicad_mod/.step that the table
         # already references (review 2026-10-15, M5).
-        _write_durably(staged_footprint, rendered.encode("utf-8"))
-        if with_model:
+        if write_footprint:
+            _write_durably(staged_footprint, rendered.encode("utf-8"))
+        if write_step:
             _copy_writable(artifacts.step_path, staged_step)
             _fsync_file(staged_step)
-        if target_wrl is not None and source_wrl is not None:
+        if write_wrl and source_wrl is not None:
             _copy_writable(source_wrl, staged_wrl)
             _fsync_file(staged_wrl)
         if symbol_text is not None:
-            _write_durably(staged_symbol, bom + symbol_text.encode("utf-8"))
-        rollback_dir.mkdir()
+            # Without a BOM (L3): KiCad does not load the library with one.
+            _write_durably(staged_symbol, symbol_text.encode("utf-8"))
+        # Nothing to change at all (an identical re-install, P3): no rollback
+        # folder either, so the library root is not touched.
+        if staged or plan.removed or fp_table_changes or symbol_table_changes:
+            rollback_dir.mkdir()
     except BaseException as exc:
         for temporary, _target in staged:
             _unlink_quietly(temporary)
@@ -3885,7 +4249,11 @@ def install_component_library(
     symbol_table_backup: Path | None = None
     #: The symbol table joins the rollback once this install may change it.
     extra_tables: list[tuple[Path, Path | None, bool]] = []
-    backed_up = list(real.values()) + ([real_symbol] if symbol_text is not None else [])
+    #: Pre-install state of each table's backup history (L4), for the rollback.
+    histories: dict[Path, list[tuple[Path, Path | None]]] = {}
+    # An unchanged target is never written, so it needs no rollback copy.
+    backed_up = ([real[target] for target in plan.targets if target not in unchanged]
+                 + ([real_symbol] if symbol_text is not None else []))
     try:
         for target in backed_up:
             if target.is_file():
@@ -3893,16 +4261,26 @@ def install_component_library(
                 aliases[backup] = target
                 _copy_writable(target, backup)
                 backups[target] = backup
-        if table_existed:
-            table_backup = rollback_dir / "table-backup"
-            aliases[table_backup] = destination_table
-            _copy_writable(destination_table, table_backup)
+        # A table's rollback copy is named to the rollback only once it
+        # exists: a refused copy left the name of a missing file, which the
+        # rollback then tried to restore from, turning a clean refusal into
+        # ``rollback_incomplete`` (found by the review 2026-11-15 fixes).
+        if table_existed and fp_table_changes:
+            copy = rollback_dir / "table-backup"
+            aliases[copy] = destination_table
+            _copy_writable(destination_table, copy)
+            table_backup = copy
         if with_symbol:
-            if symbol_table_existed:
-                symbol_table_backup = rollback_dir / "symbol-table-backup"
-                aliases[symbol_table_backup] = symbol_table
-                _copy_writable(symbol_table, symbol_table_backup)
+            if symbol_table_existed and symbol_table_changes:
+                copy = rollback_dir / "symbol-table-backup"
+                aliases[copy] = symbol_table
+                _copy_writable(symbol_table, copy)
+                symbol_table_backup = copy
             extra_tables.append((symbol_table, symbol_table_backup, symbol_table_existed))
+        for each_table, changes in ((destination_table, fp_table_changes),
+                                    (symbol_table, symbol_table_changes)):
+            if changes:
+                histories[each_table] = _snapshot_table_history(each_table, rollback_dir, aliases)
         for temporary, target in staged:
             # Retried like every other atomic write: an antivirus or KiCad's
             # file watcher holding the target for an instant must not undo
@@ -3937,7 +4315,7 @@ def install_component_library(
     except BaseException as exc:
         failures = _rollback_install(
             installed, backups, destination_table, table_backup, table_existed,
-            extra_tables=extra_tables)
+            extra_tables=extra_tables, histories=histories)
         for temporary, _target in staged:
             _unlink_quietly(temporary)
         if failures:
@@ -3982,6 +4360,11 @@ def install_component_library(
         symbol_skipped=plan.symbol_skipped,
         symbol_replaced=with_symbol and plan.symbol_replaced,
         symbol_left_stale=plan.symbol_left_stale,
+        unchanged=plan.unchanged,
+        symbol_identical=with_symbol and plan.symbol_identical,
+        bom_removed=plan.bom_to_remove,
+        table_changed=fp_table_row_changed,
+        symbol_table_changed=with_symbol and symbol_table_row_changed,
     )
 
 

@@ -179,4 +179,6 @@ def test_build_package_uses_the_project_description_and_keeps_the_generic_one_wi
     assert '(descr "Relè di segnale 2 contatti")' in with_text
     assert '(property "Description" "Relè di segnale 2 contatti"' in with_text
     generic = build_package(geometry, description='   ').render()
-    assert '(descr "soic package generico")' in generic
+    # CONTRACT CHANGED 2026-11-15 (round 2): the generic text is English like the
+    # notes appended to it (generators.package.GENERIC_PACKAGE_DESCRIPTION).
+    assert '(descr "soic generic package")' in generic

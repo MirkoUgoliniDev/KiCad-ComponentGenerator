@@ -687,24 +687,82 @@ neuer begonnen: Kein Eintrag geht stillschweigend verloren.</p>
 <h3 id="controllo">Bauteilprüfung (Schritt 1)</h3>
 <p>Wenn Sie die Registerkarte <span class="ui">KiCad</span> mit Dateien öffnen, die noch
 keine Prüfung gelesen hat, <strong>startet die Prüfung von selbst</strong>: Sie fragt
-nichts und ändert die Konfiguration von KiCad nicht. Sie wartet nur, wenn gerade eine
-Arbeit die Dateien schreibt oder wenn die Dateien nicht zu den Parametern passen (die
-Zeile oben im Schritt nennt den Grund). Sie prüft die erzeugten Dateien und die
+nichts und ändert die Konfiguration von KiCad nicht. Sie startet erst, wenn das Bauteil
+einen Footprint hat, und sie wartet (die Zeile oben im Schritt nennt den Grund und die
+Abhilfe), solange: eine Arbeit (Erzeugung, STEP-Modell, Analyse) die Dateien schreibt;
+die Pad-Positionen gesperrt gelassen wurden; eine Frage zum Footprint offen ist
+(Pad-Anordnung, Nummerierung der Seiten, Reihenabstand, Kontaktart, Ansicht der
+Anschlüsse); die Dateien auf der Festplatte nicht zu den Parametern passen, also eine
+übernommene Footprint-Änderung noch nicht in die Datei geschrieben ist, die Symboldatei
+nicht zum übernommenen Symbol passt oder das STEP-Modell veraltet ist. Sobald die
+Ursache wegfällt, startet die Prüfung von selbst. Sie prüft die erzeugten Dateien und die
 Übereinstimmung der Pin-Pad-Nummern und testet, falls <code>kicad-cli</code> verfügbar
 ist, das Lesen von Footprint, Symbol und STEP mit KiCad CLI (einschließlich DRC und ERC).
 Das Ergebnis bleibt im Schritt stehen: ein Urteil, eine Zeile für jede zu erledigende
 Sache mit ihrer Schaltfläche (zum Beispiel <span class="ui">Pinout-Tabelle öffnen</span>
 oder <span class="ui">Mit KI vorschlagen</span>) und die bestandenen Prüfungen.
 <span class="ui">Erneut prüfen</span> wiederholt sie, <span class="ui">Abbrechen</span>
-hält sie sofort an, <span class="ui">Bericht kopieren</span> kopiert Urteil, Zeilen und
-technische Details.</p>
+hält sie sofort an (dann ist sie vor dem Installieren zu wiederholen),
+<span class="ui">Bericht kopieren</span> kopiert Urteil, Zeilen und technische Details.</p>
 <p>Das Ergebnis bestimmt Schritt 3:</p>
 <ul>
   <li><strong>Fehler</strong> (Urteil <span class="ui">NICHT VERWENDEN</span>): Die
   Installation bleibt gesperrt, bis Sie die Fehler beheben;</li>
-  <li><strong>Warnungen</strong> oder nicht ausgeführte Prüfungen: Sie können
-  installieren, und der Satz in Schritt 3 sagt, was vor der Produktion zu überprüfen
-  ist;</li>
+  <li><strong>Warnungen</strong> oder Prüfungen, die nicht ausgeführt wurden, weil KiCad
+  CLI nicht installiert ist: Sie können installieren, und der Satz in Schritt 3 sagt,
+  was vor der Produktion zu überprüfen ist;</li>
+  <li><strong>KiCad hat nicht alle Dateien gelesen</strong>, die die Installation kopiert
+  (den Footprint und, falls vorhanden, die Symboldatei): KiCad CLI ist vorhanden, aber
+  ein Lesevorgang wurde übersprungen oder abgebrochen, zum Beispiel weil er nicht
+  innerhalb von 60 Sekunden antwortete; die Installation bleibt gesperrt, bis
+  <span class="ui">Erneut prüfen</span> jeden Lesevorgang zu Ende bringt;</li>
+  <li><strong>derselbe Fehler von KiCad CLI in zwei Prüfungen hintereinander</strong>:
+  Jedes Lesen durch KiCad scheitert auf der Seite des Werkzeugs, mit derselben Ursache in
+  zwei aufeinanderfolgenden Prüfungen: KiCad CLI startet nicht, beendet sich jedes Mal mit
+  demselben Exit-Code (auch einem Absturzcode), endet ohne irgendein Ergebnis, antwortet
+  nie rechtzeitig, lehnt sogar eine gültige Testdatei ab (siehe unten), oder der
+  temporäre Ordner der Prüfung ist nicht nutzbar (Virenschutz, volle Festplatte,
+  Berechtigungen); auch eine feste Kombination dieser Ursachen zählt. Das ist eine
+  dauerhafte Ursache, behandelt wie ein nicht installiertes KiCad CLI: Sie können
+  installieren, und Schritt 3 nennt die Ursache. Eine dauerhafte Ursache wird nie
+  angenommen, wenn KiCad CLI in derselben Prüfung funktioniert hat (ein gelungenes Lesen,
+  ein ausgeführter DRC oder ERC): Die fehlenden Lesevorgänge betreffen dann die Dateien
+  und sind zu wiederholen oder ein Fehler des Bauteils (siehe unten). Ein interner Fehler
+  des Programms gilt nie als dauerhafte Ursache: Er fällt immer unter den nächsten
+  Punkt;</li>
+  <li><strong>durch einen internen Fehler angehaltene Prüfung</strong>: Sie können nur
+  installieren, wenn sie jede Prüfung bereits abgeschlossen hatte, die das Bauteil
+  sperren kann und es betrifft:
+  <ul class="required-checks">
+    <li>mit KiCad CLI die KiCad-Version;</li>
+    <li>die Footprint-Datei und ihre Pads (überlappende Pads, Verweise auf das
+    STEP-Modell) und, wenn es deklarierte Anschlüsse gibt, ob sie durch die Bohrungen
+    passen;</li>
+    <li>die Pin-Pad-Übereinstimmung und der Aufbau des Symbols;</li>
+    <li>mit KiCad CLI das Lesen des Footprints, des übernommenen Symbols und der
+    installierten Symboldatei, falls vorhanden, durch KiCad sowie der DRC der Vorschau
+    (ein echter Kontakt zwischen zwei Pads);</li>
+    <li>die Pinbelegung des Dokuments, wenn es eine Lesung des Dokuments gibt;</li>
+    <li>die Kontaktfunktionen (NC, NO, gemeinsamer Kontakt), wenn das Symbol Kontakte
+    deklariert;</li>
+    <li>wenn ein STEP vorhanden ist, die Unversehrtheit des STEP-Modells und, mit KiCad
+    CLI, sein Import in KiCad.</li>
+  </ul>
+  Dann sagt Schritt 3, dass das Ergebnis unvollständig ist; andernfalls bleibt die
+  Installation gesperrt, bis <span class="ui">Erneut prüfen</span> sie
+  abschließt;</li>
+  <li><strong>abgebrochene Prüfung</strong> oder eine, die nicht starten konnte: Sie ist
+  kein Ergebnis, die Installation bleibt gesperrt, bis Sie sie mit
+  <span class="ui">Erneut prüfen</span> wiederholen;</li>
+  <li><strong>eine Datei des Bauteils wird von einem anderen Programm verwendet</strong>:
+  Die Prüfung ist beendet, aber eine Prüfung, die die Installation braucht, konnte nicht
+  ausgeführt werden, weil die Datei anderswo geöffnet war; die Installation bleibt
+  gesperrt: Schließen Sie das Programm, das sie geöffnet hält, und verwenden Sie
+  <span class="ui">Erneut prüfen</span>;</li>
+  <li><strong>Prüfung beendet, ohne alle Prüfungen abzuschließen, die die Installation
+  braucht</strong> (die übersprungenen Zeilen in Schritt 1 sagen, welche): Die
+  Installation bleibt gesperrt, bis <span class="ui">Erneut prüfen</span> sie
+  abschließt;</li>
   <li><strong>alles in Ordnung</strong> (es bleiben nur die von Hand in KiCad
   auszuführenden Prüfungen): <span class="ui">Im KiCad-Projekt installieren
   (empfohlen)</span> ist hervorgehoben.</li>
@@ -712,16 +770,26 @@ technische Details.</p>
 <p>Jede Änderung an den Dateien, die die Installation kopiert (eine Neuerzeugung,
 <span class="ui">Auf Dateien anwenden</span>, ein neuer Export des Symbols), macht das
 Ergebnis veraltet: Die Installationsschaltflächen werden deaktiviert, und die Prüfung
-startet erneut. Ein Problem des Prüfwerkzeugs (KiCad CLI antwortet nicht innerhalb von
-60 Sekunden oder startet nicht) ist kein Fehler des Bauteils: Es gilt als „nicht
-ausgeführt“ und sperrt die Installation nicht. Nach einer Installation wird nur die
+startet erneut. Scheitert KiCad an der Datei des Bauteils (lehnt sie zweimal ab,
+beendet sich, auch mit einem Absturzcode, endet ohne Ergebnis oder liest sie nie zu
+Ende), lässt die Prüfung es mit demselben Befehl eine kleine gültige Testdatei derselben
+Art lesen: Liest KiCad sie, liegt der Mangel beim Bauteil (ein Fehler). Ein Beispiel ist
+ein Name mit „%“, das KiCad als Formatcode behandelt und das es bei jedem Lesen beenden
+lässt: Deshalb ist das Zeichen in Bauteilnamen nicht erlaubt. Scheitert KiCad auch an
+der Testdatei oder lässt sich der Test nicht ausführen, liegt das Problem beim
+Prüfwerkzeug oder am Computer (der KiCad-Installation, einem Virenschutz, dem temporären
+Ordner) und nicht am Bauteil: Das Lesen gilt als „nicht ausgeführt“ und sperrt die
+Installation nur, wenn ein Lesen der Dateien, die die Installation kopiert, durch KiCad
+fehlt, bis die Prüfung es zu Ende bringt oder sich die Ursache als dauerhaft erweist
+(siehe oben); ein nicht ausgeführter DRC oder ERC sperrt sie nicht. Nach einer Installation wird nur die
 Zeile der KiCad-Bibliothek aktualisiert. Das übernommene Symbol wird auch getestet, wenn
 es noch nicht exportiert ist; nicht übernommene Entwürfe sind ausgeschlossen und werden
 gemeldet. Diese Prüfung bestätigt weder Pinbelegung, Maße noch visuelle
 3D-Ausrichtung; ERC und DRC sind am endgültigen Schaltplan und an der endgültigen
 Platine auszuführen.</p>
-<p>Die Prüfung bleibt verfügbar, wenn der Footprint vorhanden ist, das STEP aber fehlt;
-die Installation bleibt deaktiviert, bis die erforderlichen Dateien vorhanden sind.
+<p>Prüfung und Installation bleiben verfügbar, wenn der Footprint vorhanden ist, das
+STEP aber fehlt (die Installation fragt nach einer Bestätigung und bringt das Bauteil
+ohne 3D-Ansicht); die Installation bleibt deaktiviert, bis ein Footprint vorhanden ist.
 Die ursprünglichen 3D-Verweise und -Transformationen werden getrennt von der
 normalisierten temporären Kopie geprüft. Nicht aufgelöste relative Pfade oder KiCad-Variablen
 müssen im Zielprojekt geprüft werden.</p>

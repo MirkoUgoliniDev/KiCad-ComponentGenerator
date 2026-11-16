@@ -127,7 +127,7 @@ def test_without_hole_or_terminal_the_models_values_are_marked_estimated():
     pin = _pins(params)["1"]
     assert pin["drill_mm"] == 1.0 and pin["pad_length_mm"] == 1.8
     assert tht_estimates.unverified_values(pin["sources"]) == ("drill_mm", "pad_size", "shape")
-    assert "ne' foro stampato ne' terminale dichiarato" in params.notes
+    assert "né foro stampato né terminale dichiarato" in params.notes
     assert "Valori STIMATI o ricavati dal programma nei pad" in params.notes
 
 

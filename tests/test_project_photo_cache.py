@@ -109,7 +109,7 @@ def test_a_rename_never_overwrites_what_the_destination_already_has(window, tmp_
     assert (old / REVIEW_BUNDLE_SUBDIR / "proposals.json").read_text(encoding="utf-8") == "vecchia"
     assert (old / REVIEW_BUNDLE_SUBDIR / "photo.png").is_file()
     assert not (new / REVIEW_BUNDLE_SUBDIR / "photo.png").exists()
-    assert "Rinomina annullata: esiste gia' NomeNuovo." in window.ai_progress_text.toPlainText()
+    assert "Rinomina annullata: esiste già NomeNuovo." in window.ai_progress_text.toPlainText()
 
 
 def test_a_corrected_default_text_reaches_an_existing_database(tmp_path):

@@ -213,7 +213,7 @@ def test_a_layout_with_no_room_for_the_hole_is_not_applied_and_the_block_says_wh
     assert _assert_invariant(answered) == "unread" and answered.questions
     assert answered.unread_pad_geometry == dropped.unread_pad_geometry
     for text in (answered.pin_map_conflict, answered.notes):
-        assert "Disposizione dei pad scelta non applicabile" in text and "non c'e' posto per il foro" in text
+        assert "Disposizione dei pad scelta non applicabile" in text and "non c'è posto per il foro" in text
     # The block that was there stays: it names the unread position.
     assert dropped.pin_map_conflict in answered.pin_map_conflict
     # Negative twin: the same pads placed where there IS room are restored.
@@ -363,8 +363,8 @@ def _crowded(count, leads):
 def test_pads_that_share_one_reason_and_one_pair_of_values_are_one_entry_of_the_block():
     few, many = _crowded(4, [0.5]), _crowded(200, [0.5])
     assert _assert_invariant(few) == "unread" and _assert_invariant(many) == "unread"
-    assert "pad 1-4: a questo passo non c'e' posto per il foro 0.75 mm" in few.pin_map_conflict
-    assert "pad 1-200: a questo passo non c'e' posto per il foro 0.75 mm" in many.pin_map_conflict
+    assert "pad 1-4: a questo passo non c'è posto per il foro 0.75 mm" in few.pin_map_conflict
+    assert "pad 1-200: a questo passo non c'è posto per il foro 0.75 mm" in many.pin_map_conflict
     # Fifty times the pads, the same text but for the range.
     assert len(many.pin_map_conflict) - len(few.pin_map_conflict) == len("1-200") - len("1-4")
     assert len(many.unread_pads) == 200
@@ -376,7 +376,7 @@ def test_pads_with_different_values_keep_their_own_entries_up_to_a_bound():
     assert "pad 1, 3: a questo passo" in two.pin_map_conflict and "pad 2, 4: a questo passo" in two.pin_map_conflict
     leads = [round(0.30 + 0.05 * i, 2) for i in range(ESTIMATED_PADS_LISTED + 3)]
     many = _crowded(len(leads), leads)
-    assert many.pin_map_conflict.count("a questo passo non c'e' posto") == ESTIMATED_PADS_LISTED
+    assert many.pin_map_conflict.count("a questo passo non c'è posto") == ESTIMATED_PADS_LISTED
     assert "e altri 3 pad" in many.pin_map_conflict
 
 
@@ -423,7 +423,7 @@ def test_a_pad_lead_beyond_what_kicad_can_represent_is_an_invalid_terminal(lead)
 def test_a_drawing_unit_that_is_not_text_is_an_unknown_unit_never_an_exception(unit):
     params = _run(_main([_pin("1", 0.0), _pin("2", 2.54)], drawing_unit=unit))
     assert _assert_invariant(params) == "footprint"
-    assert "DUBBIO unita' di misura" in params.notes and "non riconosciuta" in params.notes
+    assert "DUBBIO unità di misura" in params.notes and "non riconosciuta" in params.notes
     assert _by_number(params)["2"]["x_mm"] == 2.54
 
 

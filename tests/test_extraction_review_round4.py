@@ -321,7 +321,7 @@ def test_a_lifted_hole_whose_derived_land_has_no_room_at_the_pitch_is_a_conflict
     """The land is not read: the program would need 0.85 + 2 x 0.15 mm of pad and 0.2 mm of gap in 1.27 mm."""
     params = _run(_header(land_read=False))
     assert _assert_invariant(params) == "unread"
-    assert "non c'e' posto" in params.pin_map_conflict and "0.85 mm" in params.pin_map_conflict
+    assert "non c'è posto" in params.pin_map_conflict and "0.85 mm" in params.pin_map_conflict
 
 
 def test_the_same_lifted_hole_at_a_wider_pitch_gets_its_derived_land():
@@ -374,7 +374,7 @@ def test_no_room_for_the_ring_at_the_pitch_is_a_conflict_never_a_thinner_ring(mo
     """
     params = _run(_leaded(1.0, 0.5, model_land))
     assert _assert_invariant(params) == "unread"
-    assert "non c'e' posto" in params.pin_map_conflict and "0.75 mm" in params.pin_map_conflict
+    assert "non c'è posto" in params.pin_map_conflict and "0.75 mm" in params.pin_map_conflict
     assert params.unread_pads == ["1", "2", "3"]
 
 

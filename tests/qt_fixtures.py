@@ -150,6 +150,26 @@ def window(qapp, monkeypatch, tmp_path):
     # its own tests, which set `_freecad_available = False` themselves
     # (tests/test_board_pipeline.py, tests/test_generated_files_alignment.py).
     monkeypatch.setattr(gui, "find_freecadcmd", lambda: "freecadcmd")
+    # The same for KiCad (review 2026-11-15, M12): the window looks KiCad up
+    # through `detect_external_applications` -- the PCB Editor of the
+    # preview, the kicad-cli version a project install warns about and the
+    # GLOBAL fp-lib-table `_other_scope_table` reads for a shadowing row --
+    # and on the developer's PC that ran the real kicad-cli and read the real
+    # %APPDATA%\kicad\<version>\fp-lib-table. Here KiCad is absent, as on the
+    # GitHub runner; a test that needs it fakes it (and its global table)
+    # itself, after this fixture (e.g. `dialogs` in
+    # tests/test_generated_files_alignment.py).
+    from kicadgen.services.system_dependencies import ExternalApplications
+    monkeypatch.setattr(gui, "detect_external_applications", lambda: ExternalApplications(
+        kicad_cli=None, freecadcmd="freecadcmd", pcbnew=None))
+
+    def no_global_table(*_args, **_kwargs):
+        # Reached only by a test that fakes kicad-cli without its table:
+        # never the developer's real KiCad configuration.
+        from kicadgen.services.kicad_library import KiCadLibraryError
+        raise KiCadLibraryError("global table not faked by this test", code="global_table_missing",
+                                path="(not faked)")
+    monkeypatch.setattr(gui, "resolve_global_fp_lib_table", no_global_table)
     # The guided KiCad tab (2026-11-15) runs the component check by itself
     # and gates the installations on its outcome. These tests start from a
     # CHECKED component -- their contract is elsewhere -- and never run

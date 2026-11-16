@@ -732,7 +732,15 @@ def test_zoom_pan_fit_do_not_change_geometry(dialog, app):
     assert dialog.view.transform().m11() == pytest.approx(fit_scale*1.2*1.2)
     dialog.view.zoom(4)
     app.processEvents()
-    before = dialog.view.horizontalScrollBar().value()
+    # The pan is measured from the middle of the scroll range: at a range end
+    # (the zoom anchor can leave it there, depending on the viewport size an
+    # earlier test leaves behind) a 50 px drag is clamped and the exact delta
+    # could not be observed (found 2026-11-15: value -393 at its minimum).
+    bar = dialog.view.horizontalScrollBar()
+    assert bar.maximum() - bar.minimum() >= 100, "zoom 4 must leave room to pan"
+    bar.setValue((bar.minimum() + bar.maximum()) // 2)
+    app.processEvents()
+    before = bar.value()
     _drag(app, dialog.view, QPoint(100, 100), QPoint(150, 110), Qt.MouseButton.MiddleButton)
     assert dialog.view.horizontalScrollBar().value() == before - 50
     dialog.fit_button.click()

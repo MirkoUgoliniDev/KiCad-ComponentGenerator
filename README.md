@@ -93,10 +93,11 @@ Requirements:
 - optional: **FreeCAD** with `freecadcmd` (STEP models). Without it the
   footprint and the symbol are still produced; the progress window says which
   step cannot run and why;
-- optional: **KiCad 10 or newer**: its PCB Editor (`pcbnew`) opens «Test in
-  KiCad...»; `kicad-cli` is needed for the global library installation and
-  for the real loading check of «Check component for KiCad», which without it
-  runs the other checks and skips that one. The generated
+- optional: **KiCad 10 or newer**: its PCB Editor (`pcbnew`) and Schematic
+  Editor (`eeschema`) open «Open in KiCad» (step 2 of the KiCad tab);
+  `kicad-cli` is needed for the global library installation and for the real
+  loading check of the component check (step 1), which without it runs the
+  other checks and skips that one. The generated
   files use the KiCad 10 formats (footprint `20260206`, symbol library
   `20251024`), which KiCad 8 and 9 cannot read;
 - optional local detectors: `requirements/yolo.txt` (ONNX Runtime, for `.onnx`
@@ -434,8 +435,10 @@ undo/redo, a draft recovered after a crash, and **Apply** / **Cancel**.
 passive types; the same check precedes the export. **Suggest pin types with
 AI** proposes electrical types from the pinout or datasheet documents (paid;
 the proposals carry source and reason and are selected one by one).
-**Export KiCad symbol** writes the `.kicad_sym` with the footprint link
-`KiCadGen:<name>`. The initial types are *passive*: verify them on the
+**Apply** also writes `<Name>.kicad_sym` in the project folder, with the
+footprint link `KiCadGen:<name>`: it is the file the KiCad tab checks and
+installs. **Export KiCad symbol** saves a copy of the applied symbol wherever
+you choose. The initial types are *passive*: verify them on the
 datasheet before relying on KiCad's ERC.
 
 ### STEP model
@@ -467,7 +470,7 @@ by a top photograph: they stay to be verified.
 <Name>/
 ├── <Name>.pretty/<Name>.kicad_mod
 ├── <Name>.3dshapes/<Name>.step, .wrl, .preview.json
-├── <Name>.kicad_sym                (after «Export KiCad symbol»)
+├── <Name>.kicad_sym                (written by «Apply» in the Electrical symbol tab)
 ├── project_config.json             (the project file: settings, tables, annotations)
 ├── docs/                           (your documents, .document-roles.json, .history/)
 ├── photo-cache/                    (AI answers, keyed by model, prompt and pixels; no keys)
@@ -486,58 +489,142 @@ Generated files stay local until you install them explicitly.
 
 ![KiCad tab: files ready, component metadata with KLC checks, review and installation](docs/images/en-kicad.png)
 
+The tab is a guided path in **three steps**, in the order they are done:
+**1 · Component check**, **2 · Look at it in KiCad (optional)** and
+**3 · Install in the library**; the component metadata follow below. The
+**Guide** button at the top right opens a three-page walkthrough: install,
+add the symbol to the schematic, update the PCB.
+
 ```mermaid
 flowchart TD
-    F["Files on disk:<br/>.kicad_mod · .kicad_sym · .step"] --> M{"Files match the parameters<br/>and metadata complete?"}
-    M -- no --> FIX["Remedy named in the tab<br/>Apply to files · Update the symbol file ·<br/>Regenerate STEP model"]
-    FIX --> M
-    M -- yes --> T["Test in KiCad...<br/>isolated project in .kicad-preview,<br/>no library table touched"]
-    T --> C{"Where should the<br/>component live?"}
-    C -- "one KiCad project<br/>(recommended)" --> PRJ["Install in KiCad project...<br/>KiCadGen.pretty + .3dshapes,<br/>project fp-lib-table with ${KIPRJMOD}"]
-    C -- "every project<br/>on this computer" --> GLB["Install as global library...<br/>stable folder, global fp-lib-table,<br/>absolute paths"]
-    PRJ & GLB --> SAFE["Backup of the table, scratch file,<br/>rollback if a step fails"]
+    F["Files on disk:<br/>.kicad_mod · .kicad_sym · .step"] --> G{"Files ready? No job running,<br/>no open footprint question,<br/>files matching the parameters"}
+    G -- no --> FIX["Remedy named in step 1<br/>Apply to files · Update the symbol file ·<br/>Regenerate or remove the STEP model"]
+    FIX --> G
+    G -- yes --> C["1 · Component check<br/>starts by itself, read-only"]
+    C -- "errors: DO NOT USE" --> ROWS["Fix the rows of step 1"]
+    ROWS --> G
+    C -- "stopped or could not start" --> AGAIN["Check again"]
+    AGAIN --> C
+    C -.->|optional| P["2 · Open in KiCad<br/>isolated project in .kicad-preview:<br/>Schematic Editor + PCB Editor,<br/>no library table of yours touched"]
+    C -- "warnings or all clear,<br/>required metadata filled" --> I{"3 · Install in the library"}
+    I -- "one KiCad project<br/>(recommended)" --> PRJ["KiCadGen.pretty + KiCadGen.3dshapes + KiCadGen.kicad_sym,<br/>project fp-lib-table + sym-lib-table<br/>with ${KIPRJMOD}"]
+    I -- "every project<br/>on this computer" --> GLB["the same files in a stable folder,<br/>global fp-lib-table + sym-lib-table,<br/>absolute paths"]
+    PRJ & GLB --> SAFE["Backup .kicadgen-backup, scratch file,<br/>rollback if a step fails"]
 ```
 
-**Files ready for KiCad** lists footprint, symbol and STEP with their state.
-Installation and the isolated test are **blocked until the files on disk
-match the parameters** and every block names its remedy, enabled while the
-block stands: *Apply to files* (metadata, footprint) and *Update the symbol
-file* in this tab; for a STEP that no longer matches (also after a change of
-colours or 3D annotations only) the regenerate button of the STEP model tab
-toolbar («Regenerate STEP model with these annotations»), or *Remove the
-obsolete STEP model* here (a stale STEP that cannot be rebuilt).
-Projects saved by older versions may need one «Apply to files». The commands
-are also blocked while a background job runs. They use the **applied** files:
-an unapplied footprint or symbol draft is not installed, is not a block, and
-is reported by «Check component for KiCad».
+**1 · Component check** starts by itself when the tab shows files that no
+check has read yet; it asks nothing and changes nothing in KiCad's
+configuration. It does not start before the component has a footprint, and
+it waits — the line at the top of the step says why and names the remedy,
+enabled while the block stands — while:
 
-**Component metadata** (collapsed by default): reference designator
-(letters only; the grey proposal counts as filled), description, keywords,
-datasheet (URL or file), footprint filters. Designator, description, keywords
-and datasheet are **required** before installation. The list **KiCad checks
-(KLC)** updates while you type (⛔ error, ⚠ warning) and «Apply to files»
-writes the values into the footprint and the symbol.
+- a job (generation, STEP model, analysis) is writing the files;
+- the pad positions were left blocked, or a footprint question is still open
+  (pad layout, side numbering, row spacing, contact type, terminal view);
+- the files on disk do not match the parameters: an applied footprint change
+  not yet written (*Apply to files*), a symbol file that differs from the
+  applied symbol (*Update the symbol file*, beside the symbol in step 3), a
+  STEP model built on other pads or annotations (the regenerate button of the
+  STEP model tab toolbar, «Regenerate STEP model with these annotations»), or
+  a stale STEP that cannot be rebuilt (*Remove the obsolete STEP model*).
 
-**Review before installation**:
+The commands use the **applied** files: an unapplied footprint or symbol
+draft is not installed, is not a block, and is reported by the check. The
+check reads the generated files and the pin–pad correspondence and, when
+`kicad-cli` is available, really opens footprint, symbol and STEP with KiCad
+CLI in a temporary folder (DRC and ERC included). Its outcome stays in the
+step: a verdict, one row per thing to do with its button, and the passed
+checks; **Check again**, **Stop** and **Copy report** act on it. It does not
+certify pinout, measures or visual 3D alignment; ERC and DRC stay on the
+final design.
 
-- **Test in KiCad...** creates a small temporary project in the component's
-  `.kicad-preview` folder, with the footprint embedded and a local copy of the
-  STEP referenced through `${KIPRJMOD}`, and opens it in the PCB Editor
-  (Alt+3 for the 3D view). **No library table is touched.**
-- **Check component for KiCad** runs read-only checks in a worker and
-  shows a copyable report: footprint on disk, pin–pad correspondence,
-  original 3D link, STEP integrity, the exported symbol compared with the
-  applied one, and — when `kicad-cli` is available — the real opening of
-  footprint, symbol and 3D import in a temporary folder. It does not certify
-  pinout, measures or visual alignment; ERC and DRC stay on the final design.
-- **Quick guide to using the component in KiCad** opens a three-page wizard: install, add the symbol to the schematic, update the PCB.
+The outcome decides step 3:
 
-**Library installation**:
+- **errors** (verdict *DO NOT USE*): installation stays blocked until they
+  are fixed;
+- **warnings**, or checks the tool could not run because KiCad CLI is not
+  installed: you can install, and step 3 says what to review before
+  production;
+- **KiCad did not read every file** the installation copies (the footprint
+  and, when it exists, the symbol file): KiCad CLI is there, but a read was
+  skipped or interrupted, for example it did not answer within 60 seconds.
+  Installation stays blocked until *Check again* gets every read through;
+- the **same KiCad CLI failure in two checks in a row**: every KiCad read
+  fails on the tool's side with the same cause in two consecutive checks —
+  KiCad CLI does not start, closes every time with the same exit code (a
+  crash code too), ends without producing any result, never answers in time,
+  refuses even a valid test file (see below), or the check's temporary folder
+  is unusable (antivirus, full disk, permissions); a fixed combination of
+  these causes counts too. It is a lasting cause, treated like KiCad CLI not
+  installed: you can install, and step 3 names the cause. No lasting cause is
+  ever assumed when KiCad CLI worked in the same check (a read that
+  succeeded, a DRC or an ERC that ran): the missing reads are then about the
+  files, and they must be repeated or are an error of the component (see
+  below). An internal error of the program never counts as a lasting cause;
+- a check that **stopped on an internal error**: you can install only if it
+  had already concluded every check that can block the component and applies
+  to it — with KiCad CLI, the KiCad version; the footprint file and its pads
+  (overlapping pads, links to the STEP model) and, when there are declared
+  terminals, whether they pass through the holes; the pin–pad match and the
+  building of the symbol; with KiCad CLI, KiCad's reads of the footprint, of
+  the applied symbol and of the installed symbol file, when it exists, and
+  the DRC of the preview; the document pinout, when there is a reading of the
+  document; the contact functions (NC, NO, common), when the symbol declares
+  contacts; when there is a STEP, the integrity of the STEP model and, with
+  KiCad CLI, its import into KiCad. In that case step 3 says the outcome is
+  incomplete; otherwise installation stays blocked until *Check again*
+  concludes them;
+- a check **stopped** with *Stop*, or one that could not start: it is not an
+  outcome, and installation stays blocked until *Check again* runs it;
+- **a file of the component is in use by another program**: the check ended,
+  but a check the installation needs could not be made because the file was
+  open elsewhere. Installation stays blocked: close the program that holds it
+  open and use *Check again*;
+- a **check ended without concluding every check the installation needs**
+  (the skipped rows of step 1 say which): installation stays blocked until
+  *Check again* concludes them;
+- **all clear**: *Install in the KiCad project (recommended)* is highlighted.
+
+Any write of the files an installation copies (a regeneration, *Apply to
+files*, the symbol's *Apply*) makes the outcome stale: the installation
+buttons switch off and the check runs again by itself. When KiCad fails on
+the component's file (refuses it twice, closes, even with a crash code, ends
+without producing anything or never finishes reading it), the check has it
+read a small valid test file of the same kind with the same command: if
+KiCad reads it, the defect is the component's (an error). One example is a
+name containing `%`, which KiCad handles as a format code and which makes it
+close on every read: this is why the character is not allowed in component
+names. If KiCad fails on the test file too, or the test cannot be made, the
+problem is the checking tool's or the computer's (the KiCad installation, an
+antivirus, the temporary folder), not the component's, and the read is
+reported as «not run».
+
+**2 · Look at it in KiCad (optional)**: **Open in KiCad** creates a small
+temporary project in the component's `.kicad-preview` folder with the
+footprint, the symbol and a local copy of the STEP, opens the schematic in
+the Schematic Editor and the board in the PCB Editor (Alt+3 for the 3D view)
+and shows a 3D image rendered by KiCad. It writes only its own one-row
+`${KIPRJMOD}` library tables inside `.kicad-preview`: **no library table of
+yours is touched** and nothing is installed.
+
+**3 · Install in the library**: a sentence says what you can do now, and
+**What gets installed:** lists footprint, electrical symbol and STEP model
+with their state.
 
 | Command | What it writes |
 |---|---|
-| **Install in KiCad project...** (recommended) | creates or updates `KiCadGen.pretty`, `KiCadGen.3dshapes` and `KiCadGen.kicad_sym` in the chosen KiCad project and registers the footprint and symbol libraries in that project's `fp-lib-table` and `sym-lib-table` with `${KIPRJMOD}` paths, so the project stays portable |
-| **Install as global library...** | copies the same files to a stable folder you choose and registers `KiCadGen.pretty` and `KiCadGen.kicad_sym` in the per-user global `fp-lib-table` and `sym-lib-table` of the installed KiCad (found through `kicad-cli version`), with absolute paths. It is refused while those tables do not exist yet: start KiCad once, complete its initial library setup, then retry |
+| **Install in the KiCad project (recommended)** | creates or updates `KiCadGen.pretty` (footprints), `KiCadGen.3dshapes` (STEP/WRL models) and `KiCadGen.kicad_sym` (symbols) in the chosen KiCad project and registers the footprint and symbol libraries in that project's `fp-lib-table` and `sym-lib-table` with `${KIPRJMOD}` paths, so the project stays portable |
+| **Install as a global library** | copies the same files to a stable folder you choose and registers `KiCadGen.pretty` and `KiCadGen.kicad_sym` in the per-user global `fp-lib-table` and `sym-lib-table` of the installed KiCad (found through `kicad-cli version`), with absolute paths. KiCad creates its global tables at its first start: until they exist the installation is refused — start KiCad once, complete its initial library setup, then retry |
+
+The **symbol** is installed too: it is added to the shared
+`KiCadGen.kicad_sym` (other symbols kept, one with the same name replaced
+after a confirmation) and already points to its footprint
+`KiCadGen:<name>`. Without a symbol file the installation brings footprint
+and STEP model only, and its report says to press *Apply* in the Electrical
+symbol tab. Without a STEP model (for example on a computer without FreeCAD)
+the preview and both installations still work after a confirmation: the
+footprint reaches KiCad without a 3D view and `KiCadGen.3dshapes` is not
+created.
 
 Only the current component's files are replaced, after explicit confirmation;
 other components and other library rows are preserved. Before changing a
@@ -566,14 +653,17 @@ day (or delete it yourself). An export history that can no longer be read
 `kicad_exports.json.corrupt-<date-time>` and a new one is started, so no
 record is lost silently.
 
-The **symbol** is installed too: it is added to the shared
-`KiCadGen.kicad_sym` (other symbols kept, one with the same name replaced
-after a confirmation) and already points to its footprint
-`KiCadGen:<name>`. Without a symbol file the installation brings footprint
-and STEP model only, and its report says how to add the symbol.
+**Component metadata** (below the steps, collapsed by default; the box opens
+by itself when it is what blocks): reference designator (letters only; the
+grey proposal counts as filled), description, keywords, datasheet (URL or
+file), footprint filters. Designator, description, keywords and datasheet are
+**required** before installation. The list **KiCad checks (KLC)** updates
+while you type (⛔ error, ⚠ warning) and **Apply to files** writes the values
+into the footprint and the symbol.
 
-The **Exports** tab keeps the history of every installation and symbol
-export made from this computer (component, kind, destination, date).
+**Open component folder** opens the folder with footprint, STEP model and
+documents. The **Exports** tab keeps the history of every installation and
+symbol export made from this computer (component, kind, destination, date).
 
 ## Logs, problems, updates
 

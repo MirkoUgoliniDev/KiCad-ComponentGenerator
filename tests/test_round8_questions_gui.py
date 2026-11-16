@@ -194,7 +194,7 @@ def test_an_unconfirmed_row_spacing_reading_is_never_the_default(window, monkeyp
     question = {
         "key": "row_spacing:21.80|22.86|estimate", "field": "row_spacing",
         "text": tx("Distanza fra le file di contatti {value} mm letta dall'analisi solo da come ha "
-                   "etichettato le quote stampate, senza un riscontro: quale quota stampata e' la "
+                   "etichettato le quote stampate, senza un riscontro: quale quota stampata è la "
                    "distanza fra i centri delle due file?", value="22.86"),
         "options": [
             {"label": tx("{value} mm (letta dall'analisi come distanza fra le file, su una sola "

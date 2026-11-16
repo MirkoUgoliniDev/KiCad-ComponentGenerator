@@ -79,8 +79,9 @@ def test_a_declared_description_is_kept_and_the_sentence_follows_it():
     params.description = "Scheda di sviluppo ESP32-S3, 2x22 contatti"
     fp = build_castellated_module(params)
     # CONTRACT CHANGED 2026-11-03 (second review, G1): the reference hole
-    # sizes this module assumes are recorded between the two («; lato ...
-    # assunti, non misurati (stima)»); the declared text still comes first,
+    # sizes this module assumes are recorded between the two («; left side:
+    # ... assumed, not measured (estimate)», in English since 2026-11-15,
+    # user decision); the declared text still comes first,
     # whole, and the SMD sentence still closes the description.
     assumed = params.assumed_sizes_description()
     assert assumed

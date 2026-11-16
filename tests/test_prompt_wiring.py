@@ -49,8 +49,10 @@ LIFTED_DIGESTS = {
         'c9c3266b0d6b598b560f2ffa506eeba8ef1228930e81d27eedfe3b12b20a9b8c',
     (photo_inventory, 'LEGACY_STRIP_PROMPT'):
         'ca745c00bd29f5109e8c38694ecdae849a1cc890e560901294134dcdcb4633c5',
+    # CONTRACT CHANGED 2026-11-15: `source` is an enum of the sent file names and
+    # the location has its own field (former digest 64cce1f3..., superseded).
     (pin_type_ai, 'PIN_TYPE_PROMPT'):
-        '64cce1f386941e9a583a1d5d76d0afe91369c6ada27400304ea631a52628da07',
+        'af221e8706bccc1ce03eedb34830b6eb821a840632af4f28e3f7cec585f37553',
 }
 
 

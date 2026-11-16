@@ -783,7 +783,7 @@ def test_a_rename_onto_an_existing_project_moves_nothing(window, monkeypatch):  
     assert window._rename_project_folder("Occupata") == "Origine"
     assert (source / "foto.jpg").read_bytes() == b"mia"
     assert (root / "Occupata" / "docs" / "foto.jpg").read_bytes() == b"altrui"
-    assert "Rinomina annullata: esiste gia' Occupata." in window.ai_progress_text.toPlainText()
+    assert "Rinomina annullata: esiste già Occupata." in window.ai_progress_text.toPlainText()
 
     assert window._rename_project_folder("Libera") == "Libera"
     assert (root / "Libera" / "docs" / "foto.jpg").read_bytes() == b"mia"

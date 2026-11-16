@@ -442,33 +442,46 @@ def test_component_file_without_version_is_unreadable(tmp_path):
     assert plan.symbol_skipped == "symbol_unreadable"
 
 
-def test_install_keeps_bom_and_crlf_of_the_shared_library(tmp_path):
-    """The real install path keeps a library's BOM and CRLF, other symbols byte for
-    byte (finding 3: the pure-function test did not cover the install's read)."""
+def test_install_drops_bom_keeps_crlf_of_the_shared_library(tmp_path):
+    """The real install path keeps a library's CRLF and other symbols byte for
+    byte (finding 3: the pure-function test did not cover the install's read),
+    and drops its BOM.
+
+    CONTRACT CHANGED 2026-11-15 (review L3): the BOM used to be written back.
+    KiCad 10 refuses a .kicad_sym starting with one (kicad-cli 10.0.8
+    `sym export svg`: «Impossibile caricare la libreria», "cannot load the
+    library"), so the install kept the whole library unusable while
+    reporting success; it now writes it without the BOM and says so.
+    """
     project = tmp_path / "project"
     project.mkdir()
     library = project / "KiCadGen.kicad_sym"
     other = _symbol_library("Other").replace("\n", "\r\n")
     library.write_bytes(b"\xef\xbb\xbf" + other.encode("utf-8"))
     other_block = other[other.index('(symbol "Other"'):other.rindex(")")].rstrip()
-    install_component_library(_artifacts(_component(tmp_path, "Demo")), project)
+    plan = plan_component_install(_artifacts(_component(tmp_path, "Demo")), project)
+    assert plan.bom_to_remove == (library,)
+    result = install_component_library(_artifacts(_component(tmp_path, "Demo")), project)
     data = library.read_bytes()
-    assert data.startswith(b"\xef\xbb\xbf")
-    text = data[3:].decode("utf-8")
+    assert not data.startswith(b"\xef\xbb\xbf")
+    text = data.decode("utf-8")
     assert "\n" not in text.replace("\r\n", "")
     assert other_block in text
     assert _symbol_names(library) == ["Other", "Demo"]
+    assert result.symbol_library_bom_removed is True
+    assert result.bom_removed == (library,)
 
 
 def test_install_keeps_lf_library_lf(tmp_path):
-    """Negative twin: an LF library without BOM stays LF without BOM."""
+    """Negative twin: an LF library without BOM stays LF without BOM, and no BOM is reported."""
     project = tmp_path / "project"
     project.mkdir()
     library = project / "KiCadGen.kicad_sym"
     library.write_text(_symbol_library("Other"), encoding="utf-8", newline="\n")
-    install_component_library(_artifacts(_component(tmp_path, "Demo")), project)
+    result = install_component_library(_artifacts(_component(tmp_path, "Demo")), project)
     data = library.read_bytes()
     assert not data.startswith(b"\xef\xbb\xbf") and b"\r\n" not in data
+    assert result.symbol_library_bom_removed is False and result.bom_removed == ()
 
 
 def test_folder_in_place_of_symbol_table_is_refused_before_writing(tmp_path):
@@ -526,16 +539,32 @@ def test_skipped_symbol_reports_an_older_one_left(tmp_path):
     assert fresh.symbol_left_stale is False
 
 
-def test_unchanged_reinstall_does_not_rewrite_library(tmp_path):
-    """Re-installing the same symbol leaves the shared library file untouched."""
+def test_unchanged_reinstall_does_not_rewrite_library(tmp_path, monkeypatch):
+    """Re-installing the same symbol leaves the shared library file untouched.
+
+    Observed through the writer and the file identity, never the mtime: an
+    immediate write + replace kept the same st_mtime_ns in 13 of 200 tries on
+    a Windows machine, so a timestamp could not tell a rewrite apart.
+    """
     project = tmp_path / "project"
     project.mkdir()
     component = _component(tmp_path)
     install_component_library(_artifacts(component), project)
     library = project / "KiCadGen.kicad_sym"
-    stamp = library.stat().st_mtime_ns
-    install_component_library(_artifacts(component), project, overwrite=True)
-    assert library.stat().st_mtime_ns == stamp
+    before = library.read_bytes()
+    identity = library.stat().st_ino
+    written: list[Path] = []
+    real_write = kicad_library._write_durably
+
+    def spy(path, payload):
+        written.append(Path(path))
+        return real_write(path, payload)
+
+    monkeypatch.setattr(kicad_library, "_write_durably", spy)
+    result = install_component_library(_artifacts(component), project, overwrite=True)
+    assert written == []
+    assert result.symbol_identical is True and result.symbol_replaced is False
+    assert library.read_bytes() == before and library.stat().st_ino == identity
 
 
 def test_symbol_shadowing_of_global_row_is_reported(tmp_path):

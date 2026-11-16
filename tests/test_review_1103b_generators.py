@@ -375,12 +375,16 @@ def test_assumed_castellated_sizes_are_noted_and_written_in_the_description():
     notes = assumed.geometry_notes()
     assert any("1.70mm" in note and "0.76" in note for note in notes)
     description = build_castellated_module(assumed).description
-    assert "assunti, non misurati (stima)" in description and "semi-foro 1.70mm" in description
+    # CONTRACT CHANGED 2026-11-15 (user decision: file notes in English): the
+    # note was «lato sinistro: semi-foro 1.70mm, ... assunti, non misurati
+    # (stima)»; the same estimate is now recorded in English.
+    assert "left side: " in description and "half-hole 1.70mm" in description
+    assert "assumed, not measured (estimate)" in description
     declared = CastellatedModuleParams(body_length=10, body_width=12, sides=[side],
                                        hole_diameter=1.0, hole_inset=0.3, pad_length=2.5,
                                        pad_width=1.2)
     assert declared.assumed_sizes(declared.sides[0]) == []
-    assert "assunti" not in build_castellated_module(declared).description
+    assert "assumed" not in build_castellated_module(declared).description
 
 
 def test_the_inset_ratio_is_reported_only_when_the_inset_is_not_declared():

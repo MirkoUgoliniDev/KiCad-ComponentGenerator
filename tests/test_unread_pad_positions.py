@@ -217,11 +217,11 @@ def test_overlapping_read_pads_beside_an_unread_one_are_named_in_the_block():
     # one reason and one pair of values are named together in ONE entry
     # («pad 1, 2: ...»), so the block does not grow with the pad count.
     for text in (params.pin_map_conflict, params.notes):
-        assert "pad 1, 2: a questo passo non c'e' posto" in text
+        assert "pad 1, 2: a questo passo non c'è posto" in text
     assert "pad 5 senza coordinate" in params.pin_map_conflict
     # Negative twin: without the overlap only pad 5 is unread and nothing names a lack of room.
     clean = _params_from_tool_arguments(single_answer_to_data(_answer(_pads(unread=("5",)))))
-    assert clean.unread_pads == ["5"] and "non c'e' posto" not in clean.pin_map_conflict
+    assert clean.unread_pads == ["5"] and "non c'è posto" not in clean.pin_map_conflict
 
 
 def _note(params, start):

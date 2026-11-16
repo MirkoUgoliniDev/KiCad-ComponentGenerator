@@ -143,7 +143,17 @@ def test_exit_zero_with_error_log_is_not_success(tmp_path, monkeypatch, message)
         return subprocess.CompletedProcess(args, 0, message, '')
     monkeypatch.setattr(check, '_run_cli', fake_run)
     results = check.verify_component(art.component_dir, 'Demo', [{'pin': '1', 'name': 'GPIO1'}])
-    assert any(r.title == 'Importazione 3D in KiCad' and r.status == 'ERROR' for r in results)
+    # CONTRACT CHANGED 2026-11-15 (review A2): words in KiCad's log are in
+    # KiCad's interface language and are never an ERROR (an ERROR now forbids
+    # the installation); KiCad declares a refused input by its exit code
+    # (tests/test_component_check_c1_cli_codes.py). An error-worded log on
+    # exit 0 is still not a success: a WARN that shows the log, on every read.
+    imports = [r for r in results if r.title == 'Importazione 3D in KiCad']
+    assert len(imports) == 1 and imports[0].status == 'WARN' and message in imports[0].detail
+    reads = [r for r in results if r.code in ('kicad_footprint_read', 'kicad_symbol_read',
+                                              'kicad_symbol_file_read', 'kicad_3d_import')]
+    assert reads and all(r.status == 'WARN' for r in reads), reads
+    assert not any(r.status == 'ERROR' for r in reads)
 
 
 @pytest.mark.parametrize('name', ['../Demo', '..\\Demo', 'C:Demo', ''])

@@ -68,7 +68,7 @@ def test_the_part_lead_derives_the_hole_of_pads_without_hole_or_terminal():
                                   "shape": "estimated", "lead": "estimated"}
     assert "terminale letto una sola volta" in params.notes
     assert "terminale dichiarato per il componente" in params.notes
-    assert "ne' foro stampato ne' terminale" not in params.notes
+    assert "né foro stampato né terminale" not in params.notes
     assert params.unread_pads is None
 
 
@@ -77,7 +77,7 @@ def test_without_hole_or_terminal_the_pads_are_unread_geometry_not_an_error():
     params = _params(_answer(_pad("1", 0.0), _pad("2", 2.54)))
     assert params.package_geometry is None
     assert params.unread_pads == ["1", "2"] and params.footprint_pads_dropped()
-    assert "foro non e' letto" in params.pin_map_conflict
+    assert "foro non è letto" in params.pin_map_conflict
     assert [pin.get("drill_mm") for pin in params.unread_pad_geometry["pins"]] == [None, None]
     # The note says the hole was not read; it does not claim positions were missing.
     assert "il disegno non stampa il foro" in params.notes
@@ -102,9 +102,9 @@ def test_the_part_lead_is_not_spread_over_pads_with_different_model_holes():
                             lead_diameter_mm=0.6, value_sources={"lead_diameter_mm": "read"}))
     assert [pin["drill_mm"] for pin in _pins(mixed).values()] == [1.0, 1.4]
     assert all(pin["sources"]["drill_mm"] == "estimated" for pin in _pins(mixed).values())
-    assert "non e' applicato perche' i pad hanno fori diversi" in mixed.notes
+    assert "non è applicato perché i pad hanno fori diversi" in mixed.notes
     # The note never claims that no terminal was declared when the part declares one.
-    assert "ne' foro stampato ne' terminale" not in mixed.notes
+    assert "né foro stampato né terminale" not in mixed.notes
 
 
 def test_a_chosen_layout_does_not_restore_pads_without_a_hole():

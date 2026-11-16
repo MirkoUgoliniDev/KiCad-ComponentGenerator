@@ -292,7 +292,7 @@ def test_a_dedicated_reading_siding_with_neither_keeps_the_block():
     from kicadgen.services.datasheet_extractor import single_answer_to_data
     data = single_answer_to_data(_single(SUMMED_WRONG, CHAINS))
     apply_dedicated_pads(data, _reading([MIRRORED_X, CHAINS[1]]))
-    assert "ne' con le coordinate" in unresolved(data) and _pins(data) == SUMMED_WRONG
+    assert "né con le coordinate" in unresolved(data) and _pins(data) == SUMMED_WRONG
 
 
 def test_a_pin_without_coordinates_takes_the_chain_sums_when_they_place_it():
@@ -330,7 +330,7 @@ def test_an_unclosed_dedicated_reading_cannot_outvote_closed_chains():
     open_wrong = [{"axis": "x", "stops": ["1", "2,3", "4"], "values": [3.5, 4.0]},
                   {"axis": "y", "stops": ["1,2", "3,4"], "values": [4.0]}]
     apply_dedicated_pads(data, _reading(open_wrong))
-    assert "non e' chiusa" in unresolved(data) and _pins(data) == SUMMED_WRONG
+    assert "non è chiusa" in unresolved(data) and _pins(data) == SUMMED_WRONG
     # Positive twin: the same agreeing reading, closed on the body, decides.
     data = single_answer_to_data(_single(SUMMED_WRONG, CHAINS))
     closed_wrong = [{"axis": "x", "stops": ["edge", "1", "2,3", "4", "edge"],
@@ -351,7 +351,7 @@ def test_a_closed_span_without_a_body_size_to_check_it_is_not_a_closure(dropped)
     closed_wrong = [{"axis": "x", "stops": ["edge", "1", "2,3", "4", "edge"],
                      "values": [2.0, 3.5, 4.0, 5.5]}, CHAINS[1]]
     apply_dedicated_pads(data, _reading(closed_wrong))
-    assert "non e' chiusa" in unresolved(data) and _pins(data) == SUMMED_WRONG
+    assert "non è chiusa" in unresolved(data) and _pins(data) == SUMMED_WRONG
 
 
 def test_an_incomplete_dedicated_reading_is_said_to_be_incomplete():

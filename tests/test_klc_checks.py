@@ -74,6 +74,103 @@ def test_letter_prefixes_pass(reference):
     assert k.check_metadata({**GOOD_METADATA, 'reference': reference}, 'FP') == []
 
 
+# ── Designator convention of a DECLARED kind (review 2026-11-15, relay «K») ──
+
+#: Declared pin functions of a SPDT relay (the closed set of the pinout schema).
+RELAY_FUNCTIONS = ['coil', 'coil', 'common', 'nc', 'no']
+
+
+@pytest.mark.parametrize('reference', ['U', 'RELE', 'RL'])
+def test_a_declared_relay_with_another_prefix_gets_a_warning_naming_k(reference):
+    """Positive: coil + contacts declared, prefix not «K» -> one WARNING, never an error."""
+    findings = k.check_metadata({**GOOD_METADATA, 'reference': reference}, 'FP',
+                                pin_functions=RELAY_FUNCTIONS)
+    assert [(f.code, f.severity) for f in findings] == [('reference_convention', 'warning')]
+    assert '«K»' in findings[0].message and f'«{reference}»' in findings[0].message
+    assert findings[0].hint == k.fix_hint('reference_convention') and findings[0].hint
+    # A warning is not a missing required field: installation is not blocked.
+    assert k.missing_required_fields(findings) == []
+    assert 'reference_convention' not in k.WRITE_BLOCKING_CODES
+
+
+def test_a_declared_relay_designated_k_has_no_finding():
+    """Negative of the same data: the conventional prefix is quiet."""
+    assert k.check_metadata({**GOOD_METADATA, 'reference': 'K'}, 'FP',
+                            pin_functions=RELAY_FUNCTIONS) == []
+
+
+# CONTRACT CHANGED 2026-11-15 (round 2): the message cites IEC 81346, whose
+# subclass code for a relay («KF») starts with the class letter «K»; it was
+# flagged because the prefix was compared with «K» as a whole.
+# CONTRACT CHANGED 2026-11-15 (round 3): round 2 accepted every prefix
+# starting with «K» («KEY», «KBD», and «KA»/«KM», which no cited standard
+# gives a relay); only the codes of `ACCEPTED_REFERENCES_BY_KIND` are quiet.
+@pytest.mark.parametrize('reference', ['K', 'KF', 'kf', 'k'])
+def test_a_relay_code_of_the_cited_standards_follows_the_convention(reference):
+    """Positive: «K» (IEEE 315, KiCad's Relay library) and «KF» (IEC 81346-2), letter case aside."""
+    assert k.check_metadata({**GOOD_METADATA, 'reference': reference}, 'FP',
+                            pin_functions=RELAY_FUNCTIONS) == []
+
+
+@pytest.mark.parametrize('reference', ['KEY', 'KBD', 'KA', 'KM', 'QA'])
+def test_a_prefix_that_merely_starts_with_k_is_warned(reference):
+    """Negative twin: starting with the class letter is not a cited code -- «KEY» and «KBD» are
+    other things, «KA»/«KM» are national practice, «QA» is IEC 81346-2's power switching class."""
+    findings = k.check_metadata({**GOOD_METADATA, 'reference': reference}, 'FP',
+                                pin_functions=RELAY_FUNCTIONS)
+    assert [(f.code, f.severity) for f in findings] == [('reference_convention', 'warning')]
+    assert '«K»' in findings[0].message
+
+
+@pytest.mark.parametrize('reference', ['AK', 'QK', 'SK'])
+def test_a_prefix_that_only_contains_the_class_letter_is_still_warned(reference):
+    """Negative twin: the class letter must LEAD the prefix (IEC 81346 puts the class first);
+    a «K» elsewhere names another class and keeps the advisory warning."""
+    findings = k.check_metadata({**GOOD_METADATA, 'reference': reference}, 'FP',
+                                pin_functions=RELAY_FUNCTIONS)
+    assert [(f.code, f.severity) for f in findings] == [('reference_convention', 'warning')]
+
+
+def test_every_accepted_relay_code_is_letters_only_and_the_proposal_is_among_them():
+    """The table holds valid designators (S6.1) and the proposed prefix satisfies its own check."""
+    accepted = k.ACCEPTED_REFERENCES_BY_KIND['relay']
+    assert all(code.isalpha() and code == code.upper() for code in accepted)
+    assert k.CONVENTIONAL_REFERENCE_BY_KIND['relay'] in accepted
+
+
+@pytest.mark.parametrize('functions', [
+    None,                               # functions not known: the rule cannot be evaluated
+    [],                                 # nothing declared
+    ['coil', 'coil'],                   # a coil alone: an inductor or a solenoid
+    ['common', 'nc', 'no'],             # contacts alone: a switch
+    ['other', 'other', 'other'],        # an IC: no relay function at all
+    ['COIL ', None, 7],                 # a coil and junk: still no contact declared
+])
+def test_without_a_declared_coil_and_contact_no_kind_and_no_convention(functions):
+    """Negative: structural, the U of an IC or of a solenoid is never questioned."""
+    assert k.declared_kind(functions) is None
+    assert k.check_metadata({**GOOD_METADATA, 'reference': 'U'}, 'FP', pin_functions=functions) == []
+
+
+def test_the_kind_reads_the_declared_function_not_the_pin_names():
+    """The closed attribute decides, case and blanks aside; a name never does."""
+    assert k.declared_kind([' Coil', 'NO']) == 'relay'
+    pins = [{'name': 'COIL+', 'function': 'other'}, {'name': 'NO', 'function': 'other'}]
+    assert k.declared_kind(row['function'] for row in pins) is None
+
+
+def test_an_invalid_designator_reports_its_error_not_the_convention():
+    """The letters-only error comes first: the convention needs a valid prefix to compare."""
+    findings = k.check_metadata({**GOOD_METADATA, 'reference': 'U1'}, 'FP', pin_functions=RELAY_FUNCTIONS)
+    assert _codes(findings) == ['reference_letters']
+
+
+def test_check_all_passes_the_declared_functions_to_the_metadata_rule():
+    findings = k.check_all({**GOOD_METADATA, 'reference': 'U'}, 'FP', pin_functions=RELAY_FUNCTIONS)
+    assert _codes(findings) == ['reference_convention']
+    assert k.check_all({**GOOD_METADATA, 'reference': 'U'}, 'FP') == []
+
+
 def test_description_empty_and_multiline_are_errors():
     # CONTRACT CHANGED 2026-10-15: an empty description was a warning; the
     # user made it a REQUIRED field that blocks the installation, so it is

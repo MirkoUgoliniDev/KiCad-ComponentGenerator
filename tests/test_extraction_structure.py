@@ -256,7 +256,7 @@ def test_an_inch_drawing_is_converted_everywhere():
     assert params.row_spacing_mm == pytest.approx(15.24)
     assert params.drill_mm == pytest.approx(1.016) and params.pad_diameter_mm == pytest.approx(1.7018)
     assert params.body_length_mm == pytest.approx(20.32) and params.body_offset_x_mm == pytest.approx(-1.27)
-    assert "convertite in millimetri" in params.notes and "DUBBIO unita'" not in params.notes
+    assert "convertite in millimetri" in params.notes and "DUBBIO unità" not in params.notes
 
 
 def test_an_mm_drawing_is_unchanged():
@@ -284,7 +284,7 @@ def test_inch_sides_holes_and_explicit_pads_are_converted():
 def test_a_pitch_below_any_package_read_as_mm_is_a_declared_doubt(pitch):
     params = _params_from_tool_arguments(_matrix(pitch_mm=pitch, row_spacing_mm=0.3,
                                                  pad_diameter_mm=0.06, drill_mm=0.03))
-    assert "DUBBIO unita' di misura" in params.notes
+    assert "DUBBIO unità di misura" in params.notes
     # Declared, never applied: the numbers stay as the model sent them.
     assert params.pitch_mm == pitch
 
@@ -293,7 +293,7 @@ def test_a_pitch_below_any_package_read_as_mm_is_a_declared_doubt(pitch):
 def test_real_fine_pitches_in_mm_raise_no_doubt(pitch):
     params = _params_from_tool_arguments(_matrix(pitch_mm=pitch, pad_diameter_mm=0.25,
                                                  drill_mm=0.15))
-    assert "DUBBIO unita'" not in params.notes
+    assert "DUBBIO unità" not in params.notes
 
 
 def test_explicit_pads_closer_than_any_package_are_a_doubt():
@@ -301,15 +301,15 @@ def test_explicit_pads_closer_than_any_package_are_a_doubt():
                               pad_width_mm=0.02) for i in range(4)])
     params = _params_from_tool_arguments(dict(layout="matrix", confidence="high",
                                               drawing_unit="mm", package_geometry=tight))
-    assert "DUBBIO unita'" in params.notes
+    assert "DUBBIO unità" in params.notes
     normal = _params_from_tool_arguments(dict(layout="matrix", confidence="high",
                                               drawing_unit="mm", package_geometry=_soic8()))
-    assert "DUBBIO unita'" not in normal.notes
+    assert "DUBBIO unità" not in normal.notes
 
 
 def test_an_unknown_unit_is_a_declared_doubt():
     params = _params_from_tool_arguments(_matrix(drawing_unit="cm"))
-    assert "DUBBIO unita' di misura 'cm'" in params.notes and params.pitch_mm == 2.54
+    assert "DUBBIO unità di misura 'cm'" in params.notes and params.pitch_mm == 2.54
 
 
 # ── Finding 3: castellated hole sizes are extracted per side ─────────────────
@@ -394,12 +394,12 @@ def test_a_missing_drawing_unit_is_a_doubt_and_an_undeclared_source():
     data.pop("drawing_unit")
     params = _params_from_tool_arguments(data)
     assert params.pitch_mm == pytest.approx(2.54)
-    assert "unita' di misura non dichiarata" in params.notes
+    assert "unità di misura non dichiarata" in params.notes
     assert params.value_sources.get("drawing_unit") == "undeclared"
 
 
 def test_a_declared_drawing_unit_is_no_doubt():
     """Negative: the same answer declaring mm has no unit doubt and no unit provenance entry."""
     params = _params_from_tool_arguments(_matrix())
-    assert "unita' di misura non dichiarata" not in params.notes
+    assert "unità di misura non dichiarata" not in params.notes
     assert "drawing_unit" not in (params.value_sources or {})

@@ -7,7 +7,8 @@ code, a severity and a message in the interface language; a rule that
 cannot be evaluated (no file text given) yields nothing instead of guessing.
 
 Rules covered (KLC 2024 numbering in parentheses where one exists):
-designator prefix (S6.1), description and keywords (S6.2), datasheet and
+designator prefix (S6.1) and its convention for a declared kind (relay:
+«K»), description and keywords (S6.2), datasheet and
 footprint filters (S6.3), symbol pins on the 100 mil grid with 2.54 mm
 length and 1.27 mm texts (S4.1, S4.2), body outline 0.254 mm with
 background fill (S3.3), unique pin numbers and positions (S4.3), footprint
@@ -108,6 +109,7 @@ WRITE_BLOCKING_CODES = frozenset({
 METADATA_FIELD_OF_CODE = {
     'reference_empty': 'reference',
     'reference_letters': 'reference',
+    'reference_convention': 'reference',
     'description_empty': 'description',
     'description_multiline': 'description',
     'keywords_empty': 'keywords',
@@ -175,12 +177,21 @@ _HINT_NAME_ILLEGAL = ('Rinomina il progetto con File › «Rinomina progetto...�
                       'indicati: il nome del progetto è il nome di footprint e simbolo.')
 _HINT_NAME_SPACES = ('Facoltativo: rinomina il progetto con File › «Rinomina progetto...» '
                      'sostituendo gli spazi con «_» o «-».')
+# The symbol remedies name commands that exist where the list is read (review
+# 2026-11-15): the KLC list sits in the KiCad tab, which no longer has
+# «Esporta simbolo KiCad…» (Export KiCad symbol). A file problem is repaired
+# by «Applica ai file» (Apply to files), which regenerates the footprint and
+# rewrites `<name>.kicad_sym` from the applied symbol even when nothing was
+# edited; a pin problem is edited in the Symbol tab, whose «Applica» (Apply)
+# rewrites the same file, so no second «re-export» step exists.
 _HINT_SYMBOL_FILE = ('Il file .kicad_sym nella cartella del componente è vuoto, danneggiato o non è un '
-                     'simbolo KiCad: riesportalo con «Esporta simbolo KiCad…» invece di modificarlo a mano.')
-_HINT_SYMBOL_GENERATED = ('Riesporta il simbolo con «Esporta simbolo KiCad…»: il programma lo scrive '
-                          'secondo le convenzioni KLC, quindi un file modificato a mano torna conforme.')
-_HINT_PIN_LAYOUT = ('Nella scheda «Simbolo elettrico» ridisponi il pin indicato sulla griglia di 2,54 mm, '
-                    'premi Applica e riesporta il simbolo con «Esporta simbolo KiCad…».')
+                     'simbolo KiCad: riscrivilo con «Applica ai file» in «Metadati del componente» invece '
+                     'di modificarlo a mano.')
+_HINT_SYMBOL_GENERATED = ('Riscrivi il simbolo con «Applica ai file» in «Metadati del componente»: il '
+                          'programma lo scrive secondo le convenzioni KLC, quindi un file modificato a mano '
+                          'torna conforme.')
+_HINT_PIN_LAYOUT = ('Nella scheda «Simbolo elettrico» ridisponi il pin indicato sulla griglia di 2,54 mm e '
+                    'premi Applica: il file del simbolo viene riscritto.')
 _HINT_FOOTPRINT_FILE = ('Il file .kicad_mod nella cartella del componente è vuoto, danneggiato o non è un '
                         'footprint: rigeneralo con «Applica ai file» in «Metadati del componente», invece '
                         'di modificarlo a mano.')
@@ -200,6 +211,8 @@ FIX_HINTS = {
                         'riferimento» di «Metadati del componente», in questa scheda.'),
     'reference_letters': ('Nel campo «Designatore di riferimento» di «Metadati del componente» lascia solo '
                           'lettere: togli cifre, spazi e «?», il numero lo aggiunge KiCad.'),
+    'reference_convention': ('Facoltativo: scrivi il prefisso indicato nel campo «Designatore di '
+                             'riferimento» di «Metadati del componente»; così com’è si installa lo stesso.'),
     'description_empty': ('Scrivi una riga che dica che cosa è il componente (funzione, package, dimensioni '
                           'principali) nel campo «Descrizione» di «Metadati del componente».'),
     'description_multiline': ('Nel campo «Descrizione» di «Metadati del componente» porta il testo su una '
@@ -228,26 +241,28 @@ FIX_HINTS = {
     'symbol_name_spaces': _HINT_NAME_SPACES,
     'symbol_unreadable': _HINT_SYMBOL_FILE,
     'symbol_format': _HINT_SYMBOL_FILE,
-    'symbol_version': ('Il simbolo è scritto in un formato vecchio o senza versione: riesportalo con '
-                       '«Esporta simbolo KiCad…», che usa il formato attuale.'),
+    'symbol_version': ('Il simbolo è scritto in un formato vecchio o senza versione: riscrivilo con '
+                       '«Applica ai file» in «Metadati del componente», che usa il formato attuale.'),
     'pin_names_offset': _HINT_SYMBOL_GENERATED,
     'body_stroke': _HINT_SYMBOL_GENERATED,
     'body_fill': _HINT_SYMBOL_GENERATED,
     'pin_position': _HINT_PIN_LAYOUT,
     'pin_grid': _HINT_PIN_LAYOUT,
     'pin_length': ('Nella scheda «Simbolo elettrico» porta la lunghezza del pin a 2,54 mm o a un multiplo '
-                   'di 1,27 mm, premi Applica e riesporta il simbolo con «Esporta simbolo KiCad…».'),
-    'pin_text_size': ('Nella scheda «Simbolo elettrico» porta i testi del pin a 1,27 mm, premi Applica e '
-                      'riesporta il simbolo con «Esporta simbolo KiCad…».'),
+                   'di 1,27 mm e premi Applica: il file del simbolo viene riscritto.'),
+    'pin_text_size': ('Nella scheda «Simbolo elettrico» porta i testi del pin a 1,27 mm e premi Applica: il '
+                      'file del simbolo viene riscritto.'),
     'pin_duplicate': ('Nella scheda «Simbolo elettrico» correggi la numerazione confrontandola con il '
-                      'pinout del documento: ogni pin ha un numero diverso. Poi Applica e riesporta il '
-                      'simbolo.'),
+                      'pinout del documento: ogni pin ha un numero diverso. Poi premi Applica: il file del '
+                      'simbolo viene riscritto.'),
     'pin_overlap': ('Nella scheda «Simbolo elettrico» separa i pin sovrapposti (o lascia visibile uno solo '
-                    'dei pin con lo stesso nome), premi Applica e riesporta il simbolo.'),
+                    'dei pin con lo stesso nome) e premi Applica: il file del simbolo viene riscritto.'),
     'pin_number_spaces': ('Nella scheda «Simbolo elettrico» togli gli spazi dal numero del pin (deve essere '
-                          'uguale al numero del pad del footprint), premi Applica e riesporta il simbolo.'),
+                          'uguale al numero del pad del footprint) e premi Applica: il file del simbolo '
+                          'viene riscritto.'),
     'pin_name_spaces': ('Facoltativo: nella scheda «Simbolo elettrico» sostituisci gli spazi del nome del pin '
-                        'con «_», come fa KiCad al caricamento; poi Applica e riesporta il simbolo.'),
+                        'con «_», come fa KiCad al caricamento, e premi Applica: il file del simbolo viene '
+                        'riscritto.'),
     'footprint_unreadable': _HINT_FOOTPRINT_FILE,
     'footprint_format': _HINT_FOOTPRINT_FILE,
     'footprint_version': _HINT_FOOTPRINT_FILE,
@@ -382,15 +397,87 @@ def proposed_name_without_spaces(name: str) -> str:
     return re.sub(r'_*\s[\s_]*', '_', str(name).strip())
 
 
-def check_metadata(metadata: dict, footprint_name: str) -> list[Finding]:
+#: Conventional designator prefix of a component kind the DATA declare
+#: (review 2026-11-15: generated relays carried «U» or «RELE» and nothing
+#: pointed to «K»). Sources: the class letter «K» (relay, contactor) of IEEE
+#: Std 315-1975 / ASME Y14.44, the class K of IEC 81346-2, and KiCad's own
+#: `Relay` symbol library, whose symbols all carry Reference «K». A kind is
+#: here only when the analysis DECLARES it (`declared_kind`), never from a
+#: part, package or file name; a new kind needs its own message in
+#: `check_metadata` too.
+CONVENTIONAL_REFERENCE_BY_KIND = {'relay': 'K'}
+
+#: Every designator prefix a cited standard assigns to a declared kind: the
+#: convention is met by ANY of them (the proposal above is the first one).
+#: Relay, sources cited code by code:
+#: - «K»: IEEE Std 315-1975 / ASME Y14.44 class letter for a relay (and the
+#:   class letter of IEC 81346-2), and the Reference of every symbol of
+#:   KiCad's `Relay` library;
+#: - «KF»: IEC 81346-2 (2009 and 2019 editions), class K «processing signals
+#:   or information», subclass KF «processing electrical signals», whose
+#:   examples include the auxiliary relay and the time relay.
+#: NOT accepted, on purpose: «QA» (IEC 81346-2 «switching electrical energy
+#: circuits»: contactors, circuit breakers) names another kind of object, a
+#: power switching device, not a signal relay; «KA», «KM», «KT» come from
+#: national practices (GB/T, older DIN 40719) not cited here; and any other
+#: prefix that merely starts with «K» («KEY», «KBD»). DECLARED LIMIT: the
+#: two IEC codes were taken from the standard's published tables as known
+#: when this was written, not re-read here; a code proved by the standard's
+#: text is added to this table, not matched by a prefix rule.
+ACCEPTED_REFERENCES_BY_KIND = {'relay': frozenset({'K', 'KF'})}
+
+#: Declared pin functions of a switched contact (the closed set of
+#: `generators.symbol_relay.RELAY_PIN_FUNCTIONS`, without `coil`/`other`).
+_CONTACT_FUNCTIONS = frozenset({'common', 'nc', 'no'})
+
+
+def declared_kind(pin_functions) -> str | None:
+    """@brief The component kind that the DECLARED pin functions establish, or None.
+
+    @param pin_functions Iterable of the `function` values the analysis
+        declared for the pins (closed set `coil`, `common`, `nc`, `no`,
+        `other`, compared case-insensitively; None and other values are
+        ignored), or None when the functions are not known.
+    @return 'relay' when at least one pin is declared `coil` AND at least
+        one is a switched contact (`common`, `nc` or `no`): a coil that
+        operates contacts is what a relay is, whatever the part is called.
+        None otherwise: a coil alone (inductor, solenoid) or contacts alone
+        (a switch) are not relays, and no declared function is no kind.
+    @note Structural on purpose: the free-text pin NAMES («COIL», «A1»...)
+        are never read, only the closed `function` attribute.
+    @note Known limit, hence an advisory WARN only (`check_metadata`): a
+        declared coil plus a declared contact does not prove that the coil
+        operates those contacts. A solenoid valve with a position switch, or
+        a circuit breaker with a shunt-trip coil and auxiliary contacts,
+        declares the same functions and is not a relay; the attributes say
+        nothing about which part actuates which. What would settle it is a
+        declared actuation link (coil -> contacts), which the analysis does
+        not ask for today.
+    """
+    if pin_functions is None:
+        return None
+    functions = {value.strip().lower() for value in pin_functions if isinstance(value, str)}
+    if 'coil' in functions and functions & _CONTACT_FUNCTIONS:
+        return 'relay'
+    return None
+
+
+def check_metadata(metadata: dict, footprint_name: str, *, pin_functions=None) -> list[Finding]:
     """@brief Check the library metadata of a component (KLC S6) and its footprint name.
 
     @param metadata Keys `reference`, `description`, `keywords`, `datasheet`,
         `fp_filters`; strings, each may be missing (treated as empty).
     @param footprint_name Footprint name the files will carry.
+    @param pin_functions The declared `function` of every pin (see
+        `declared_kind`), or None when unknown: then the designator is not
+        compared with a conventional prefix (a rule that cannot be evaluated
+        yields nothing).
     @return Findings in rule order; empty when everything complies.
     @note The designator prefix must be letters only (S6.1: `U`, `K`, `RV`,
         no digits, spaces or `?`): KiCad appends the number itself.
+    @note A valid prefix that is none of the codes the cited standards give
+        the declared kind (`ACCEPTED_REFERENCES_BY_KIND`) is a WARNING only: the
+        convention is advice, the component installs and works the same.
     @note An empty required field (see `REQUIRED_FIELD_CODES`; blanks only
         count as empty) is an ERROR since 2026-10-15: it blocks the
         installation. Footprint filters stay optional (warning).
@@ -405,6 +492,19 @@ def check_metadata(metadata: dict, footprint_name: str) -> list[Finding]:
     elif not reference.isalpha():
         findings.append(_error('reference_letters', tx(
             'Designatore «{reference}»: solo lettere, senza cifre, spazi o «?».', reference=reference)))
+    elif declared_kind(pin_functions) == 'relay':
+        expected = CONVENTIONAL_REFERENCE_BY_KIND['relay']
+        # CONTRACT CHANGED 2026-11-15 (round 2): the message cited IEC 81346
+        # yet flagged its own two-letter codes (`!= 'K'`).
+        # CONTRACT CHANGED 2026-11-15 (round 3): round 2 accepted ANY prefix
+        # starting with «K», so «KEY» or «KBD» passed as a relay designator;
+        # only the codes the cited standards assign are accepted now
+        # (`ACCEPTED_REFERENCES_BY_KIND`), letter case aside as before.
+        if reference.upper() not in ACCEPTED_REFERENCES_BY_KIND['relay']:
+            findings.append(_warning('reference_convention', tx(
+                'Designatore «{reference}»: i pin dichiarati (bobina e contatti) sono quelli di un relè, '
+                'che per convenzione (IEEE 315, IEC 81346, libreria Relay di KiCad) si indica con '
+                '«{expected}».', reference=reference, expected=expected)))
 
     description = _string(metadata, 'description')
     if _has_control(description):
@@ -799,17 +899,19 @@ def _check_footprint_text(text: str) -> list[Finding]:
 
 
 def check_all(metadata: dict, footprint_name: str, symbol_text: str | None = None,
-              footprint_text: str | None = None) -> list[Finding]:
+              footprint_text: str | None = None, *, pin_functions=None) -> list[Finding]:
     """@brief Run every available check and return the findings, errors first.
 
     @param metadata See `check_metadata`.
     @param footprint_name See `check_metadata`.
     @param symbol_text `.kicad_sym` text, or None when not generated yet.
     @param footprint_text `.kicad_mod` text, or None when not generated yet.
+    @param pin_functions See `check_metadata`; None skips the designator
+        convention of a declared kind.
     @return Errors first, then warnings; within a severity the rule order of
         the single checks is kept. Duplicate findings are removed.
     """
-    findings = list(check_metadata(metadata, footprint_name))
+    findings = list(check_metadata(metadata, footprint_name, pin_functions=pin_functions))
     if symbol_text is not None:
         findings.extend(check_symbol_text(symbol_text))
     if footprint_text is not None:

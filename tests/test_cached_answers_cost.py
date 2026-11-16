@@ -212,6 +212,9 @@ def test_the_account_line_writes_a_replay_apart_from_the_calls(qapp, tmp_path):
         qapp.processEvents()
         # A burst is grouped in the queue and written once (review M2), not now.
         assert [(item["model"], item["count"]) for _f, item in line._pending] == [(DEEPSEEK, 150)]
+        # CONTRACT CHANGED 2026-11-15: the timer is now only a long safety
+        # bound (CACHED_SAFETY_MS); the natural write is the run's end, see
+        # tests/test_costs_c4_fixes.py. Its firing still writes the group.
         assert line._cached_timer.isActive()
         assert load_project_costs(tmp_path).run_cached_by_model == {}
         # Never waiting paid calls, never the status bar's «in attesa».
@@ -261,16 +264,20 @@ def test_replays_are_not_grouped_across_a_queued_analysis_start(qapp, tmp_path, 
 
         def busy(*_args):
             raise OSError("file in uso")
-        monkeypatch.setattr(account_module, "start_run", busy)
-        line.start_analysis(tmp_path)        # writes the first replay, the start stays queued
-        line._retry_timer.stop()
-        openrouter.record_cached_answer(DEEPSEEK)
-        qapp.processEvents()
-        kinds = [("start" if item.get("_start_run") else item["count"]) for _f, item in line._pending]
-        assert kinds == ["start", 1]
-        assert load_project_costs(tmp_path).run_cached_by_model == {DEEPSEEK: 1}
+        # Only this patch is undone before detach: `monkeypatch.undo()` would
+        # also undo every autouse guard of conftest (no network, isolated
+        # profile paths, no real API key) for the rest of the test.
+        with monkeypatch.context() as local:
+            local.setattr(account_module, "start_run", busy)
+            line.start_analysis(tmp_path)        # writes the first replay, the start stays queued
+            line._retry_timer.stop()
+            openrouter.record_cached_answer(DEEPSEEK)
+            qapp.processEvents()
+            kinds = [("start" if item.get("_start_run") else item["count"])
+                     for _f, item in line._pending]
+            assert kinds == ["start", 1]
+            assert load_project_costs(tmp_path).run_cached_by_model == {DEEPSEEK: 1}
     finally:
-        monkeypatch.undo()
         line.detach()
         line.close()
         line.deleteLater()

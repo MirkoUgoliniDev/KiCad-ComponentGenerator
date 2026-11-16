@@ -114,13 +114,20 @@ def test_a_handoff_closes_the_dialog_and_names_what_to_do(qapp, monkeypatch):
     handed = []
     dialog.handoff_requested.connect(handed.append)
     dialog.action_buttons[check.ACTION_OPEN_KICAD_TAB].click()
-    assert dialog.handoff == check.ACTION_OPEN_KICAD_TAB and not dialog.ai_review_requested
+    # CONTRACT CHANGED 2026-11-15: the hand-off is observed only through the
+    # signal the window connects to; the attributes `handoff` and
+    # `ai_review_requested` were written but read by no code (dead code).
     assert handed == [check.ACTION_OPEN_KICAD_TAB]
     types = [Check('WARN', 'Revisione simbolo', 'Tipo elettrico da verificare: 1', 'final', 3, '', None,
                    'electrical_type', ('1',))]
     dialog = _dialog(qapp, monkeypatch, types)
+    handed = []
+    dialog.handoff_requested.connect(handed.append)
     dialog.action_buttons[ccd.ACTION_SUGGEST_PIN_TYPES].click()
-    assert dialog.handoff == ccd.ACTION_SUGGEST_PIN_TYPES and dialog.ai_review_requested
+    assert handed == [ccd.ACTION_SUGGEST_PIN_TYPES]
+    # Negative: the other hand-off of the same row is a different request.
+    dialog.action_buttons[check.ACTION_OPEN_SYMBOL_TAB].click()
+    assert handed == [ccd.ACTION_SUGGEST_PIN_TYPES, check.ACTION_OPEN_SYMBOL_TAB]
 
 
 def test_stop_is_shown_only_while_running_and_details_list_each_check_once(qapp, monkeypatch):
@@ -184,7 +191,10 @@ def test_the_level_is_named_for_screen_readers_and_in_the_copy(qapp, monkeypatch
     assert [icon.accessibleName() for icon in icons] == ['Errore', 'Da fare in KiCad']
     assert icons[0].toolTip() == 'Errore'
     copied = dialog._copy_text()
-    assert '✖ [Errore] Sposta uno dei due pad (pin 1–2)' in copied
+    # CONTRACT CHANGED 2026-11-15 (round 2): the overlap row's numbers are
+    # PADS (`PAD_NUMBER_CODES`), so the range reads «pad», not «pin».
+    assert '✖ [Errore] Sposta uno dei due pad (pad 1–2)' in copied
+    assert '(pin 1–2)' not in copied
     assert '☐ [Da fare in KiCad]' in copied
     dialog.close()
 
