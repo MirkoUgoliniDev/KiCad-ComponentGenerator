@@ -233,7 +233,7 @@ checkbox, one review window in two stages with the detector's reading kept besid
 three-section «Parametri» modal, phantom sides excluded by the photo, pulsing running mark,
 unread row spacing ignored, pad width at the pitch downgraded, lands measured on the photo)
 is 16306 passed,
-13 skipped and 19 subtests (2026-11-16 evening, branch `FOOTPRINT-ADVANCE`, NOT merged into `main`, halves 9881/9/19
+13 skipped and 19 subtests (2026-11-16 evening, branch `FOOTPRINT-ADVANCE`, commit `18c2be6`, NOT merged into `main`, halves 9881/9/19
 and 6425/4 with four red tests -- contracts changed by this round, updated and re-run alone, not a second full run:
 full-codebase «super check» by twelve read-only reviewers on race conditions, blocking work and grey zones, every
 finding fixed by ten fixers on disjoint files and re-reviewed in five adversarial rounds -- .env in UTF-16, symbol
