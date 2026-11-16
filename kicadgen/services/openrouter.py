@@ -1106,7 +1106,9 @@ def _record_usage(payload: Any, *, sent_at: Optional[datetime] = None,
         # The model the program asked for, as the run tally and the cached
         # answers name it; the answer's own name only without one (review
         # 2026-11-15, L3: one model must not show under two names).
-        record = {"cost_usd": cost, "model": str(model or answered or ""),
+        # Transitional limit: entries written before 8ea6323 hold only the
+        # answered name and cannot be mapped back; see project_costs._model_of.
+        record ={"cost_usd": cost, "model": str(model or answered or ""),
                   # None, not 0, when not reported or unusable (B5).
                   "prompt_tokens": _token_count(usage, "prompt_tokens"),
                   "completion_tokens": _token_count(usage, "completion_tokens"),

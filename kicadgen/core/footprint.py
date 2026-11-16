@@ -43,10 +43,16 @@ GENERATOR_VERSION = "10.0"
 #: `descr`, fixed notes). Deliberately fixed and independent of the interface
 #: language: a library is shared and versioned, so its content must not change
 #: with the GUI language of whoever regenerated it, and the pinned footprint
-#: digests of the regression tests stay reproducible. Italian because every
-#: default description and note of the generators was written in it. These
-#: strings never go through `tx()`; messages shown to the user do.
-FOOTPRINT_TEXT_LANGUAGE = "it"
+#: digests of the regression tests stay reproducible. These strings never go
+#: through `tx()`; messages shown to the user do.
+#: CONTRACT CHANGED 2026-11-15 (user decision): English, like the rest of a
+#: KiCad library (KLC writes descriptions in English, and the analysis asks
+#: the project's own description in English), for every generator family --
+#: pin header, castellated module, package, symbol and the VRML comment.
+#: Italian («it») before: an Italian note appended to an English description
+#: reached the installed library. Nothing parses these notes back from a file
+#: (checked 2026-11-15), so files generated before need no reader.
+FOOTPRINT_TEXT_LANGUAGE = "en"
 
 Point = Tuple[float, float]
 

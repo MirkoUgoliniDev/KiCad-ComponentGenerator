@@ -206,6 +206,30 @@ def test_a_remedy_says_where_to_act():
     assert "«Rinomina progetto...»" in hints['footprint_name_illegal']
 
 
+def test_the_symbol_remedies_name_commands_that_rewrite_the_symbol_file():
+    """Review 2026-11-15: the KLC list is read in the KiCad tab, which has no
+    «Esporta simbolo KiCad…» any more, and the Symbol tab's «Applica» already
+    rewrites `<name>.kicad_sym`. A damaged or hand-edited file (nothing to
+    edit, so the Symbol tab's «Applica» is off) names «Applica ai file», which
+    rewrites the symbol with the footprint; a pin to change names the Symbol
+    tab and its «Applica», with no second «re-export» step."""
+    hints = klc_checks.FIX_HINTS
+    for code, source in hints.items():
+        assert "Esporta simbolo KiCad" not in source, code
+        assert "riesport" not in source.lower(), code
+    for code in ('symbol_unreadable', 'symbol_format', 'symbol_version', 'pin_names_offset',
+                 'body_stroke', 'body_fill'):
+        assert "«Applica ai file» in «Metadati del componente»" in hints[code], code
+    for code in ('pin_position', 'pin_grid', 'pin_length', 'pin_text_size', 'pin_duplicate',
+                 'pin_overlap', 'pin_number_spaces', 'pin_name_spaces'):
+        assert "«Simbolo elettrico»" in hints[code] and "premi Applica" in hints[code], code
+        # Negative: an edit in the Symbol tab is not sent to the metadata command.
+        assert "Applica ai file" not in hints[code], code
+    # The old wordings left the catalogue with their sources.
+    assert not [key for key in DEFAULT_TRANSLATIONS
+                if "Esporta simbolo KiCad…»" in key and ("riesport" in key or "Riesport" in key)]
+
+
 # ── GUI: label, empty state, tooltips ───────────────────────────────────
 
 def _rows(window):

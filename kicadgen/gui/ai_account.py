@@ -39,13 +39,28 @@ from ..services.project_costs import (ProjectCostsError, add_cached_answer, add_
 #: retries plus lock timeout), so the attempts are spaced out, never looped.
 FLUSH_RETRY_FIRST_MS = 2000
 FLUSH_RETRY_MAX_MS = 60000
-#: Wait (ms) before answers replayed from a local cache are written. They
-#: arrive in bursts (a replayed analysis serves a hundred or more) and each
-#: write rewrites the whole cost file on the GUI thread (3.3 s for 150 of them
-#: one by one, review 2026-11-15, M2): grouped in the queue, they are written
-#: once per burst, or with the next paid call. A bound on how late the free
-#: «from the cache» line may be, not a tuned value.
-CACHED_FLUSH_MS = 1000
+#: Safety bound (ms) on how long answers replayed from a local cache may stay
+#: queued. They are grouped in the queue and written only at natural points:
+#: with the next paid call or analysis start, at the end of the run
+#: (`release_run_project`, before the finished card reads the file) and at
+#: detach/close. Each write rewrites and re-prices the whole cost file on the
+#: GUI thread (a 10000-entry ledger: about 0.26 s, review 2026-11-15), so a
+#: one-second timer stalled the GUI once per second during a cached replay.
+#: This timer remains only for readings that no run end will write: one made
+#: outside a bound run, or a run that is still replaying after this long. A
+#: bound on how stale the free «from the cache» note may get, not a tuned
+#: value: one write per 30 s costs well under 1 % of the GUI thread.
+#: Declared limit (review 2026-11-15, round 2): the cost of ONE write grows
+#: linearly with the ledger, because `project_costs` rewrites the whole file
+#: (atomic replace under its lock, every entry re-priced) instead of
+#: appending. The share of the GUI thread is (write time) / 30 s: about
+#: 0.9 % at 10000 entries, about 4 % at an unusual 50000 entries, and a
+#: write happens at most once per 30 s whatever the number of cached
+#: readings queued meanwhile. Not made incremental here: the file format and
+#: its atomic rewrite belong to `services.project_costs` (an append-only log
+#: would need its own crash-safety design), and the run end, which writes
+#: anyway, is the common case.
+CACHED_SAFETY_MS = 30000
 
 
 def format_usd(amount: float) -> str:
@@ -209,10 +224,11 @@ class AiAccountLine(QLabel):
         self._retry_timer.setSingleShot(True)
         self._retry_timer.timeout.connect(self._retry_flush)
         self._retry_ms = FLUSH_RETRY_FIRST_MS
-        #: Writes the grouped cached answers once per burst (CACHED_FLUSH_MS).
+        #: Safety write of grouped cached answers (CACHED_SAFETY_MS); it defers
+        #: to `_retry_timer` while that one is pending (`_flush_cached`).
         self._cached_timer = QTimer(self)
         self._cached_timer.setSingleShot(True)
-        self._cached_timer.timeout.connect(self._retry_flush)
+        self._cached_timer.timeout.connect(self._flush_cached)
         #: Analyses started by this instance: key -> run number in the file
         #: (None until the start is written); folder -> key of its last one.
         self._analysis_seq = 0
@@ -303,11 +319,15 @@ class AiAccountLine(QLabel):
 
         @note Records already stamped keep their run project even when their
             queued signal is delivered after this call.
+        @note The end of a run is the natural point to write the cached
+            answers it grouped (`_flush_cached`): the finished card, shown
+            right after, reads them from the cost file. Safe as a Qt slot.
         """
         with self._run_lock:
             self._run_bound = False
             self._run_project = None
             self._run_analysis = None
+        self._flush_cached()
 
     def _stamp_and_forward(self, record: dict) -> None:
         """Worker-thread listener: stamp the bound run project, then hop to the GUI thread."""
@@ -442,8 +462,15 @@ class AiAccountLine(QLabel):
             self._flush_pending()
             self.refresh()
         except Exception as exc:  # noqa: BLE001 - a slot that raises closes the app
-            self._log(tx("Costo di una chiamata AI non registrato nel progetto ({cost} USD): "
-                         "{exc}", cost=self._cost_text(record), exc=exc))
+            if isinstance(record, dict) and record.get("_cached_answer"):
+                # A free reading has no cost to call unrecorded («? USD»):
+                # its own line, once per distinct problem (review 2026-11-15).
+                self._report(tx("Lettura dalla cache non registrata nel file dei costi "
+                                "({model}): {exc}", model=record.get("model") or "?",
+                                exc=exc))
+            else:
+                self._log(tx("Costo di una chiamata AI non registrato nel progetto ({cost} USD): "
+                             "{exc}", cost=self._cost_text(record), exc=exc))
 
     def _queue_cached_answer(self, folder: Path, record: dict) -> None:
         """Group a cached answer with the queued ones of its project, analysis and model; write later.
@@ -470,7 +497,27 @@ class AiAccountLine(QLabel):
         if getattr(self, "_detached", False):
             return
         if not self._retry_timer.isActive() and not self._cached_timer.isActive():
-            self._cached_timer.start(CACHED_FLUSH_MS)
+            self._cached_timer.start(CACHED_SAFETY_MS)
+
+    def _flush_cached(self) -> None:
+        """Write the grouped cached answers now, unless a busy-file retry owns the next attempt.
+
+        Timer slot (CACHED_SAFETY_MS) and end of a run (`release_run_project`).
+        While `_retry_timer` is pending the file was found busy: the retry,
+        with its doubling wait, is the single path that tries again, and it
+        writes the cached groups with the paid calls. An extra attempt here
+        would block the GUI thread outside that backoff. Never raises.
+        """
+        try:
+            if getattr(self, "_detached", False) or self._retry_timer.isActive():
+                return
+            if not self._pending:
+                self._cached_timer.stop()
+                return
+        except Exception as exc:  # noqa: BLE001 - also a slot: it must never raise
+            self._report(tx("Riga del credito AI non aggiornata: {exc}", exc=exc))
+            return
+        self._retry_flush()
 
     @staticmethod
     def _cost_text(record) -> str:
@@ -529,6 +576,9 @@ class AiAccountLine(QLabel):
                         and not self._retry_timer.isActive()):
                     self._retry_timer.start(self._retry_ms)
                     self._retry_ms = min(self._retry_ms * 2, FLUSH_RETRY_MAX_MS)
+                # One retry path: the busy-file retry writes the cached groups
+                # too, so the safety timer must not try in between.
+                self._cached_timer.stop()
                 break
             except Exception as exc:  # noqa: BLE001 - damaged file or unexpected error
                 # Never overwritten, so the item cannot go in: one line per
@@ -551,6 +601,7 @@ class AiAccountLine(QLabel):
             wrote = True
         if not self._pending:
             self._retry_timer.stop()
+            self._cached_timer.stop()
             self._retry_ms = FLUSH_RETRY_FIRST_MS
         if wrote:
             self.costs_changed.emit()
@@ -694,6 +745,12 @@ class AiAccountLine(QLabel):
             parts.append(tx("Costo dell'analisi: non leggibile"))
             details.append(tx("File dei costi non leggibile, lasciato com’è: {exc}", exc=exc))
             return
+        if costs.cached_answers_damaged:
+            # Read as absent so the paid totals stay usable; said once per
+            # project, the file left for a person to look at (review 2026-11-15).
+            self._report(tx("Elenco delle letture dalla cache non valido nel file dei costi di "
+                            "{folder}: ignorato e lasciato com'è; le chiamate a pagamento "
+                            "sono registrate.", folder=folder))
         start_queued, waiting = self._queued_for(folder)
         if start_queued:
             # The new analysis is not in the file yet: nothing of it is

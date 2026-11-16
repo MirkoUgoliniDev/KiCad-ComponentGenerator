@@ -117,7 +117,10 @@ def test_the_klc_list_shows_errors_then_warnings_with_their_marks(window, tmp_pa
     _ready(window, tmp_path)
     seen = {}
 
-    def fake_check_all(metadata, footprint_name, symbol_text=None, footprint_text=None):
+    # CONTRACT CHANGED 2026-11-15: check_all also receives the declared pin
+    # functions (relay designator convention); the fake accepts and records them.
+    def fake_check_all(metadata, footprint_name, symbol_text=None, footprint_text=None, **kwargs):
+        seen.update(pin_functions=kwargs.get("pin_functions"))
         seen.update(metadata=dict(metadata), name=footprint_name,
                     symbol=symbol_text, footprint=footprint_text)
         return [_finding("reference_letters", "error", "Designatore errato"),

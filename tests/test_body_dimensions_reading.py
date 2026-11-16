@@ -172,7 +172,7 @@ def test_an_undeclared_main_unit_compares_nothing():
     logs = []
     apply_dedicated_body(data, {"values": {"body_height": 16.9}, "notes": ""}, logs.append)
     assert "body_height_mm" not in data
-    assert any("non dichiara l'unita'" in line for line in logs)
+    assert any("non dichiara l'unità" in line for line in logs)
 
 
 def test_failed_discarded_or_empty_readings_change_nothing():
@@ -201,7 +201,7 @@ def test_a_main_height_listed_by_neither_reading_loses_to_the_quote_both_list():
     assert data["package_geometry"]["body_height_mm"] == pytest.approx(16.9)
     assert data["pin_length_3d_mm"] == pytest.approx(3.5)
     assert "_body_conflict" not in data and "printed_vertical_quotes" not in data
-    assert any("19.30 mm) non e' una quota stampata letta da entrambe" in line for line in logs)
+    assert any("19.30 mm) non è una quota stampata letta da entrambe" in line for line in logs)
     assert any("Lettura dedicata: altezza dalla vista frontale" in line for line in logs)
     assert any("Distanziale stampato" in line and "0.40 mm" in line for line in logs)
 
@@ -226,7 +226,7 @@ def test_a_main_height_both_lists_print_beats_a_dedicated_one_listed_once():
     logs = []
     apply_dedicated_body(data, _printed({"body_height": 17.3}, [16.9, 0.4, 3.5, 17.3]), logs.append)
     assert data["body_height_mm"] == 16.9
-    assert any("17.30 mm) non e' una quota stampata letta da entrambe" in line for line in logs)
+    assert any("17.30 mm) non è una quota stampata letta da entrambe" in line for line in logs)
 
 
 def test_a_listed_value_equal_to_a_plan_size_or_the_lead_never_supports_a_height():

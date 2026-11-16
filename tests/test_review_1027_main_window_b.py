@@ -220,7 +220,10 @@ def test_k_the_report_names_replaced_and_removed_files(window, monkeypatch, tmp_
         identifier="KiCadGen:" + NAME, footprint_path="fp", table_path="t",
         replaced=(replaced,), removed=(removed,)))
     window._install_kicad_library(tmp_path / "dest", project_library=True, artifacts=_artifacts(window))
-    report = window.label_kicad_status.text()
+    # CONTRACT CHANGED 2026-11-15 (review P4): the install report moved from the
+    # top of step 1 to step 3, with its full paths in the «Mostra percorsi
+    # completi» detail label.
+    report = window.label_install_report_detail.text()
     assert str(replaced) in report and str(removed) in report
 
 
@@ -337,7 +340,8 @@ def test_b7_the_wizard_has_no_manual_symbol_step(window, monkeypatch):
                       "3. Aggiorna e verifica il PCB"]
     buttons = [button.text() for button in wizard.findChildren(QPushButton)
                if button.text().startswith(("Installa", "Esporta"))]
-    assert buttons == ["Installa nel progetto KiCad…", "Installa come libreria globale…"]
+    # CONTRACT CHANGED 2026-11-15: the wizard uses the KiCad tab's own labels.
+    assert buttons == ["Installa nel progetto KiCad (consigliato)", "Installa come libreria globale"]
     assert not hasattr(window, "_export_symbol_from_wizard")
 
 

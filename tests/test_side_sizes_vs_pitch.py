@@ -32,7 +32,7 @@ def test_a_pad_width_as_wide_as_the_pitch_becomes_an_estimate(source):
     """@brief Positive: 2.54 on a 2.54 pitch is impossible as a measure, whatever the model says."""
     params = _params_from_tool_arguments(_answer(2.54, source))
     assert params.value_sources["castellated_sides.right.pad_width_mm"] == "estimated"
-    [note] = [line for line in params.notes.splitlines() if "non e' una misura" in line]
+    [note] = [line for line in params.notes.splitlines() if "non è una misura" in line]
     assert "pad_width_mm" in note and "2.54" in note and "destro" in note
 
 
@@ -53,7 +53,7 @@ def test_a_size_that_fits_the_pitch_keeps_its_provenance(width):
     decides (a refusal to show, never a silent change)."""
     params = _params_from_tool_arguments(_answer(width, "read"))
     assert params.value_sources["castellated_sides.right.pad_width_mm"] == "read"
-    assert "non e' una misura" not in params.notes
+    assert "non è una misura" not in params.notes
 
 
 def test_a_single_contact_has_no_pitch_to_contradict():

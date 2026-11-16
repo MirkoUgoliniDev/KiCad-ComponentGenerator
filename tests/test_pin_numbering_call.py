@@ -156,7 +156,7 @@ def test_the_dedicated_view_fills_an_unknown_view_only():
     data = {"pin_map": list(U_NUMBERING), "contacts_view": "top"}
     apply_dedicated_numbering(data, _reading(U_NUMBERING, view="bottom"))
     assert data["contacts_view"] == "bottom"
-    assert "(top)" in data["_pin_map_conflict"] and "(bottom, usata)" in data["_pin_map_conflict"]
+    assert "(vista dall'alto)" in data["_pin_map_conflict"] and "(vista dal basso, usata)" in data["_pin_map_conflict"]
 
 
 def test_a_subset_that_agrees_is_only_a_partial_confirmation():
@@ -256,7 +256,7 @@ def test_anchors_fitting_several_conventions_block_instead_of_guessing():
     """Negative: «1» alone fits the column and the U convention: no completion."""
     from kicadgen.services.datasheet_extractor import _params_from_tool_arguments
     params = _params_from_tool_arguments(_matrix(pin_map=[{"pin": 1, "row": 0, "col": 0}]))
-    assert params.pin_map is None and "piu' convenzioni" in params.pin_map_conflict
+    assert params.pin_map is None and "più convenzioni" in params.pin_map_conflict
 
 
 def test_anchors_fitting_no_convention_block():

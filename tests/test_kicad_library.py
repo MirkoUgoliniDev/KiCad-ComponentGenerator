@@ -105,13 +105,35 @@ def test_global_install_uses_absolute_paths_and_requested_table(tmp_path):
 
 
 def test_install_refuses_existing_component_without_overwrite(tmp_path):
+    """A component whose footprint CHANGED is refused without overwrite.
+
+    CONTRACT CHANGED 2026-11-15 (review P3): the second install used to be
+    the identical component, which is now «already installed and identical»
+    (nothing to replace, so nothing to ask); the refusal is kept for the case
+    that really replaces a file, a footprint with a different pad.
+    """
     artifacts = _artifacts(tmp_path)
     destination = tmp_path / "Project"
     install_component_library(artifacts, destination)
-    with pytest.raises(KiCadLibraryError, match="already exist"):
+    artifacts.footprint_path.write_text(FOOTPRINT.replace("(size 1 1)", "(size 1.2 1)"),
+                                        encoding="utf-8")
+    with pytest.raises(KiCadLibraryError, match="already exist") as raised:
         install_component_library(artifacts, destination)
+    assert raised.value.context["files"].splitlines() == [
+        str(destination / "KiCadGen.pretty" / "Demo.kicad_mod")]
     result = install_component_library(artifacts, destination, overwrite=True)
     assert result.footprint_path.is_file()
+    assert "(size 1.2 1)" in result.footprint_path.read_text(encoding="utf-8")
+
+
+def test_identical_reinstall_is_not_refused_and_lists_unchanged(tmp_path):
+    """Negative twin: the same component again replaces nothing, so it is not refused."""
+    artifacts = _artifacts(tmp_path)
+    destination = tmp_path / "Project"
+    first = install_component_library(artifacts, destination)
+    again = install_component_library(artifacts, destination)
+    assert again.replaced == ()
+    assert set(again.unchanged) == {first.footprint_path, first.step_path, first.wrl_path}
 
 
 def test_library_table_update_preserves_entries_and_does_not_duplicate(tmp_path):

@@ -165,7 +165,11 @@ def test_hard_linked_installed_model_is_overwritten_in_place_and_rolled_back(
 
     monkeypatch.undo()
     result = install_component_library(artifacts, project, overwrite=True)
-    assert result.replaced == (first.footprint_path, first.step_path, first.wrl_path)
+    # CONTRACT CHANGED 2026-11-15 (P3): only the STEP differs from the source
+    # (the footprint and WRL are byte-identical), so only it is replaced; the
+    # other two are reported unchanged and not rewritten.
+    assert result.replaced == (first.step_path,)
+    assert result.unchanged == (first.footprint_path, first.wrl_path)
     assert other_name.read_bytes() == STEP_BYTES, "the other name sees the new model"
     assert _inode(first.step_path) == before
 
@@ -361,7 +365,10 @@ def test_a_wrl_the_source_lost_is_reported_as_removed_not_replaced(tmp_path, mon
     without_wrl = _artifacts(tmp_path / "src2", wrl=False)
     plan = plan_component_install(without_wrl, project)
     assert plan.removed == (first.wrl_path,)
-    assert plan.replaced == (first.footprint_path, first.step_path)
+    # CONTRACT CHANGED 2026-11-15 (P3): the footprint and STEP of the second
+    # source are byte-identical to the installed ones: unchanged, not replaced.
+    assert plan.replaced == ()
+    assert plan.unchanged == (first.footprint_path, first.step_path)
 
     def table_fails(*_args, **_kwargs):
         raise OSError("simulated table failure")
@@ -373,7 +380,9 @@ def test_a_wrl_the_source_lost_is_reported_as_removed_not_replaced(tmp_path, mon
     monkeypatch.undo()
     result = install_component_library(without_wrl, project, overwrite=True)
     assert result.removed == (first.wrl_path,) and result.wrl_path is None
-    assert result.replaced == (first.footprint_path, first.step_path)
+    # CONTRACT CHANGED 2026-11-15 (P3): as in the plan above.
+    assert result.replaced == ()
+    assert result.unchanged == (first.footprint_path, first.step_path)
     assert not first.wrl_path.exists()
 
 
@@ -383,9 +392,15 @@ def test_a_source_with_a_wrl_replaces_it_and_removes_nothing(tmp_path):
     project = tmp_path / "project"
     first = install_component_library(artifacts, project)
     assert first.replaced == () and first.removed == ()
+    # CONTRACT CHANGED 2026-11-15 (P3): only a file whose bytes differ is
+    # replaced; the second install used the identical source, which now
+    # replaces nothing. Older installed copies make every file a replacement.
+    for installed in (first.footprint_path, first.step_path, first.wrl_path):
+        installed.write_bytes(b"older copy")
     second = install_component_library(artifacts, project, overwrite=True)
     assert second.removed == ()
     assert second.replaced == (first.footprint_path, first.step_path, first.wrl_path)
+    assert second.unchanged == ()
 
 
 # ------------------------------------------- D1 global table named before the write

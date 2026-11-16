@@ -4,6 +4,8 @@ The window asks the symbol table's own conflict with the symbol wording,
 never repoints it on the footprint row's answer, and reports the installed
 symbol library, or why no symbol was installed.
 """
+from types import SimpleNamespace
+
 from kicadgen.gui import main_window as gui
 
 from test_photo_inventory_gui import _write_complete_kicad_output
@@ -90,8 +92,13 @@ def test_answering_no_to_the_symbol_row_writes_nothing(window, tmp_path, monkeyp
     _symbol_file(window)
     project = _project(tmp_path, symbol_row="C:/Altro/KiCadGen.kicad_sym")
     before = (project / "sym-lib-table").read_text(encoding="utf-8")
-    _answer(monkeypatch, project, gui.QMessageBox.StandardButton.No)
+    seen = _answer(monkeypatch, project, gui.QMessageBox.StandardButton.No)
     window._install_project_library()
+    # Review 2026-11-15, M13: the «No» was the answer to the SYMBOL row's own
+    # question -- exactly one question names that row, and it was the last
+    # one asked -- not to some earlier question that stopped the install.
+    naming = [text for text in seen["asked"] if "C:/Altro/KiCadGen.kicad_sym" in text]
+    assert len(naming) == 1 and seen["asked"][-1] == naming[0]
     assert (project / "sym-lib-table").read_text(encoding="utf-8") == before
     assert not (project / "KiCadGen.pretty").exists()
     assert not (project / "KiCadGen.kicad_sym").exists()
@@ -132,6 +139,53 @@ def test_global_install_without_symbol_table_is_refused_before_asking(window, tm
     assert seen["reports"] and str(table.with_name("sym-lib-table")) in seen["reports"][-1]
     assert not (tmp_path / "libs").exists()
     assert table.read_text(encoding="utf-8") == "(fp_lib_table\n  (version 7)\n)\n"
+
+
+def _fake_kicad_with_global_table(monkeypatch, tmp_path, *, row_uri):
+    """Fake kicad-cli and its GLOBAL fp-lib-table (review 2026-11-15, M12: never the real one).
+
+    @param row_uri The location of a «KiCadGen» row in that table, or None for no row.
+    @return The fake global fp-lib-table.
+    """
+    from kicadgen.services.system_dependencies import ExternalApplications
+    config = tmp_path / "fake-kicad" / "10.0"
+    config.mkdir(parents=True)
+    row = (f'  (lib (name "KiCadGen")(type "KiCad")(uri "{row_uri}")(options "")(descr ""))\n'
+           if row_uri else "")
+    table = config / "fp-lib-table"
+    table.write_text(f"(fp_lib_table\n  (version 7)\n{row})\n", encoding="utf-8")
+    monkeypatch.setattr(gui, "detect_external_applications", lambda: ExternalApplications(
+        kicad_cli="fake-kicad-cli", freecadcmd=None, pcbnew=None))
+    monkeypatch.setattr(gui, "resolve_global_fp_lib_table", lambda *_a, **_k: SimpleNamespace(
+        path=table, version="10.0", version_source="test"))
+    monkeypatch.setattr(gui, "check_kicad_version", lambda *_a, **_k: SimpleNamespace(
+        version="10.0", minimum="9.0", supported=True, newer_cli=None, newer_version=None))
+    return table
+
+
+def test_a_global_row_of_the_same_name_is_asked_before_a_project_install(window, tmp_path, monkeypatch):  # noqa: F811
+    """Positive (M12): a «KiCadGen» row in the (fake) global table elsewhere -> one question names that table."""
+    _write_complete_kicad_output(window)
+    _symbol_file(window)
+    table = _fake_kicad_with_global_table(monkeypatch, tmp_path, row_uri="C:/Globale/KiCadGen.pretty")
+    project = _project(tmp_path)
+    seen = _answer(monkeypatch, project, gui.QMessageBox.StandardButton.No)
+    window._install_project_library()
+    shadowing = [text for text in seen["asked"] if str(table) in text]
+    assert len(shadowing) == 1 and "C:/Globale/KiCadGen.pretty" in shadowing[0]
+    assert not (project / "KiCadGen.pretty").exists()            # «No»: nothing written
+
+
+def test_no_global_row_no_shadowing_question(window, tmp_path, monkeypatch):  # noqa: F811
+    """Negative twin: the fake global table has no «KiCadGen» row -> no question names it."""
+    _write_complete_kicad_output(window)
+    _symbol_file(window)
+    table = _fake_kicad_with_global_table(monkeypatch, tmp_path, row_uri=None)
+    project = _project(tmp_path)
+    seen = _answer(monkeypatch, project, gui.QMessageBox.StandardButton.Yes)
+    window._install_project_library()
+    assert not any(str(table) in text for text in seen["asked"])
+    assert (project / "KiCadGen.pretty").is_dir()
 
 
 def test_symbol_table_errors_use_the_symbol_wording(window):  # noqa: F811

@@ -21,12 +21,37 @@ from ..core.silk import (PIN_ONE_UNMARKED_NOTE, clip_segment, keepout_box, marke
 from ..core.tht_estimates import unverified_values
 from ..services.messages import tx
 
-#: Note recorded in the footprint description (fixed file language, see
-#: `core.footprint.FOOTPRINT_TEXT_LANGUAGE`) when the hole, size or shape of
-#: some pads is not a reading of the drawing but derived or estimated by the
-#: program (`PinSpec.sources`): an estimate, never a measure. `{numbers}` is
-#: the list of those pads as `estimated_pad_list` writes it.
-ESTIMATED_PADS_NOTE = "foro o piazzola stimati sui pad {numbers}: da verificare sul disegno"
+#: The fixed notes this generator appends to a footprint description are in
+#: the file language of every generator, `core.footprint.FOOTPRINT_TEXT_LANGUAGE`
+#: (English since 2026-11-15, user decision). They are appended to the
+#: project's own description, which the analysis asks in English
+#: (`datasheet_extractor`, «Short description of the component, in English»)
+#: and which KLC wants in English; an Italian tail on an English description
+#: reached the installed library (real trial 2026-11-15, T5). A KiCad
+#: `descr` is never translated at run time, so it must be one language. This
+#: module had its own `PACKAGE_NOTE_LANGUAGE = "en"` for one round, while the
+#: other generators were still Italian; one constant now holds for all.
+
+#: Note recorded in the footprint description (FOOTPRINT_TEXT_LANGUAGE) when
+#: the hole, size or shape of some pads is not a reading of the drawing but
+#: derived or estimated by the program (`PinSpec.sources`): an estimate,
+#: never a measure. `{numbers}` is the list of those pads as
+#: `estimated_pad_list` writes it. Italian before 2026-11-15, round 2:
+#: «foro o piazzola stimati sui pad {numbers}: da verificare sul disegno».
+#: No reader parses either wording back (checked 2026-11-15): the estimates
+#: travel as `PinSpec.sources`, the note is for the library user, so files
+#: generated before the change need no compatibility reader.
+ESTIMATED_PADS_NOTE = "hole or land estimated on pads {numbers}: verify against the drawing"
+
+#: Note appended when the footprint origin is a body centre estimated from
+#: the pad field (FOOTPRINT_TEXT_LANGUAGE; Italian before 2026-11-15, round 2:
+#: «centro del corpo stimato dal campo dei pad»).
+ESTIMATED_BODY_CENTRE_NOTE = "body centre estimated from the pad field"
+
+#: Description written when the project gives none (FOOTPRINT_TEXT_LANGUAGE;
+#: Italian before 2026-11-15, round 2: «{family} package generico»), so the
+#: default text and the notes appended to it are one language.
+GENERIC_PACKAGE_DESCRIPTION = "{family} generic package"
 
 #: Most entries (single numbers or ranges) the note lists by name; beyond
 #: them it gives a count (review 2026-11-11, K7: a large part with every pad
@@ -35,34 +60,44 @@ ESTIMATED_PADS_NOTE = "foro o piazzola stimati sui pad {numbers}: da verificare 
 #: footprint preview's tooltips and in the checks.
 ESTIMATED_PADS_LISTED = 8
 
-#: Tail of the note when entries were left out (fixed file language).
-ESTIMATED_PADS_MORE = "e altri {count}"
+#: Tail of the note when entries were left out (FOOTPRINT_TEXT_LANGUAGE;
+#: Italian «e altri {count}» before 2026-11-15, round 2).
+ESTIMATED_PADS_MORE = "and {count} more"
 
 #: Count of estimated pads that have no number (mechanical holes): they
-#: cannot be named, but the note must not hide them (fixed file language).
-ESTIMATED_PADS_UNNAMED = "{count} senza numero"
+#: cannot be named, but the note must not hide them (FOOTPRINT_TEXT_LANGUAGE;
+#: Italian «{count} senza numero» before 2026-11-15, round 2).
+ESTIMATED_PADS_UNNAMED = "{count} unnumbered"
 
 
-def estimated_pad_list(numbers) -> str:
+def estimated_pad_list(numbers, *, more: str = ESTIMATED_PADS_MORE,
+                       unnamed_text: str = ESTIMATED_PADS_UNNAMED) -> str:
     """@brief The pad numbers of ESTIMATED_PADS_NOTE: unique, ranges compressed, bounded.
 
     @param numbers Pad numbers in footprint order (text; several pads may
         share one number).
+    @param more Template of the tail naming the pads left out, with
+        `{count}`; the file wording (ESTIMATED_PADS_MORE) by default. A
+        message shown in the interface passes its translated template, so
+        the file language never leaks into the interface.
+    @param unnamed_text Template of the count of unnumbered pads, with
+        `{count}`; the file wording (ESTIMATED_PADS_UNNAMED) by default,
+        replaceable for the same reason as `more`.
     @return "" when no pad is given; otherwise the comma-separated
         entries of `pad_number_entries`: blank numbers are not listed as
         empty entries (a mechanical hole without a number has no name to
-        cite) but counted at the end (ESTIMATED_PADS_UNNAMED). At most
+        cite) but counted at the end (`unnamed_text`). At most
         ESTIMATED_PADS_LISTED entries are written; the remaining pads are
-        counted (ESTIMATED_PADS_MORE).
+        counted (`more`).
     """
     entries, unnamed = pad_number_entries(numbers)
     listed = entries[:ESTIMATED_PADS_LISTED]
     words = ", ".join(text for text, _count in listed)
     left = sum(count for _text, count in entries[ESTIMATED_PADS_LISTED:])
     if left:
-        words += " " + ESTIMATED_PADS_MORE.format(count=left)
+        words += " " + more.format(count=left)
     if unnamed:
-        tail = ESTIMATED_PADS_UNNAMED.format(count=unnamed)
+        tail = unnamed_text.format(count=unnamed)
         words = f"{words}, {tail}" if words else tail
     return words
 
@@ -229,11 +264,11 @@ def build_package(geometry: PackageGeometry, name: str | None = None, *,
     # (review 2026-10-29, G4).
     pins = geometry.pins_seen_from_top()
     footprint_name = name or geometry.name
-    description = description.strip() or f"{geometry.family} package generico"
+    description = description.strip() or GENERIC_PACKAGE_DESCRIPTION.format(family=geometry.family)
     if geometry.origin != "body_center":
-        # Fixed file language (see FOOTPRINT_TEXT_LANGUAGE): the estimate is
-        # recorded in the library itself, not only in the session log.
-        description += "; centro del corpo stimato dal campo dei pad"
+        # FOOTPRINT_TEXT_LANGUAGE: the estimate is recorded in the library
+        # itself, not only in the session log.
+        description += "; " + ESTIMATED_BODY_CENTRE_NOTE
     # A mechanical hole is not a pin: it does not get the pin 1 marker.
     electrical = [pin for pin in pins if pin.pad_type != "np_thru_hole"]
     first = pin_one(pin.number for pin in electrical)
@@ -244,7 +279,7 @@ def build_package(geometry: PackageGeometry, name: str | None = None, *,
     unverified = estimated_pad_list(pin.number for pin in pins if unverified_values(pin.sources))
     if unverified:
         # Recorded in the library itself like the estimated body centre
-        # (fixed file language): a hole, pad size or pad shape the program
+        # (FOOTPRINT_TEXT_LANGUAGE): a hole, pad size or pad shape the program
         # derived or estimated is never passed for a measure. Absent for a
         # geometry without provenance, whose file stays byte-identical.
         description += "; " + ESTIMATED_PADS_NOTE.format(numbers=unverified)

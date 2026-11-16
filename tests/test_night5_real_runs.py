@@ -160,7 +160,7 @@ def test_the_adopted_reading_gives_its_terminals_with_a_note():
     resolved, _problems = ext._resolve_pad_terminals(geometry, data, notes)
     leads = {pin["number"]: pin["lead"]["shape"] for pin in resolved["pins"]}
     assert leads == {"1": "flat", "2": "round"}
-    assert any("lettura dedicata, di cui e' stata adottata la disposizione" in n for n in notes)
+    assert any("lettura dedicata, di cui è stata adottata la disposizione" in n for n in notes)
     assert all(pin["sources"]["lead"] == "estimated" for pin in resolved["pins"])
 
 
@@ -171,7 +171,7 @@ def test_with_the_main_layout_the_main_terminals_stay():
     resolved, _problems = ext._resolve_pad_terminals(geometry, data, notes)
     leads = {pin["number"]: pin["lead"]["shape"] for pin in resolved["pins"]}
     assert leads == {"1": "round", "2": "flat"}
-    assert not any("di cui e' stata adottata la disposizione" in n for n in notes)
+    assert not any("di cui è stata adottata la disposizione" in n for n in notes)
 
 
 def test_a_layout_chosen_later_brings_its_reading_s_terminals():

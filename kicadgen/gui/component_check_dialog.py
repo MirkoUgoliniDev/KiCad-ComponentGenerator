@@ -9,6 +9,7 @@ from PyQt6.QtWidgets import (QApplication, QLabel,
                              QToolButton, QHBoxLayout, QWidget)
 from PyQt6 import sip
 from .theme import GREEN
+from ..services import component_check
 from ..services.component_check import (verify_component, Check, CliStopped, pin_ranges,
                                         stop_cli_commands,
                                         IMPORTANCE_BLOCKS_USE, IMPORTANCE_BEFORE_PRODUCTION,
@@ -61,12 +62,60 @@ PIN_GROUPS = {
                      'Sposta i testi dei pin {pins} nella scheda Simbolo.'),
 }
 
+#: Codes whose `Check.pins` are PAD numbers of the footprint, not pin
+#: numbers of the symbol: their range is labelled «pad» in the row (user,
+#: 2026-11-15: the «Pad stimati» row read «(pin 1–5)»). The two kinds of
+#: number coincide on most parts, but a pad shared by two pins, an
+#: unnumbered hole or a pad numbered differently from its pin does not.
+#: DECLARED STOPGAP: `Check` carries one `pins` field for both kinds
+#: («Pin or pad numbers»), so the kind is read from the code here. A field on
+#: `Check` saying which kind its numbers are would make this table
+#: unnecessary; a new pad-numbered check must be added here until then.
+PAD_NUMBER_CODES = frozenset({'estimated_pads', 'footprint_pads_overlap'})
+
 #: Longest wait, at application exit, for the verification to leave after a
 #: stop request, in milliseconds. `verify_component` has no cancellation
 #: channel: the stop is seen only between two KiCad commands, and one command
 #: may run for its whole 60 s limit. Same bound and reasoning as
 #: photo_review_dialog.MATCH_QUIT_WAIT_MS: a quit must never look like a hang.
 CHECK_QUIT_WAIT_MS = 5000
+
+#: Code of the row written when the verification failed BEFORE emitting any
+#: check: nothing was verified (the window reads it as «failed»).
+CODE_CHECK_FAILED = 'check_failed'
+#: Code of the row written when the verification stopped on an internal
+#: error AFTER emitting checks: those checks stand, the rest was not run
+#: (the window reads it as inconclusive, not «failed»; review 2026-11-15, I3).
+CODE_CHECK_CRASHED = 'check_crashed'
+#: Italian sources of the panel's own rows about the verification itself.
+CHECK_SELF_TITLE = 'Controllo del componente'
+CHECK_SELF_REMEDY = 'Usa «Controlla di nuovo».'
+CHECK_CRASHED_DETAIL = ('Il controllo si è fermato per un errore interno «{error}»; '
+                        'controlli già eseguiti: {count}.')
+#: Longest error text kept in the crash row, in characters: the exception's
+#: type and the first line of its message, never a traceback.
+CHECK_ERROR_TEXT_MAX = 200
+
+
+def _self_check(code, detail):
+    """One SKIP row about the verification itself (never about the component).
+
+    Title, remedy and a templated detail go through `component_check.tx`, so
+    `component_check.localized` recomposes them on a language switch like
+    every other check; a raw `detail` (an exception message) stays as written.
+
+    @param code `CODE_CHECK_FAILED` or `CODE_CHECK_CRASHED`.
+    @param detail The detail: raw text or a `component_check.tx` result.
+    """
+    return Check('SKIP', component_check.tx(CHECK_SELF_TITLE), detail,
+                 remedy=component_check.tx(CHECK_SELF_REMEDY), code=code)
+
+
+def _error_text(exc):
+    """The exception's type and the first line of its message, capped (never a traceback)."""
+    lines = str(exc).strip().splitlines()
+    text = f'{type(exc).__name__}: {lines[0]}' if lines else type(exc).__name__
+    return text if len(text) <= CHECK_ERROR_TEXT_MAX else text[:CHECK_ERROR_TEXT_MAX - 1] + '…'
 
 
 class _CheckAborted(BaseException):
@@ -97,7 +146,8 @@ class _CheckWorker(QThread):
         """@brief Prepare one verification run owned by QApplication.
 
         @param error An exception raised while building `args`: the run emits
-            it as one ERROR row and ends normally (the panel never stays stuck).
+            it as one SKIP row «check_failed» and ends normally (the panel
+            never stays stuck).
 
         @param args Keyword arguments of `verify_component`.
         @param parent Ignored for ownership: QApplication.instance() is the
@@ -114,6 +164,9 @@ class _CheckWorker(QThread):
         self.cancel = threading.Event()
         #: True when the run ended because of `cancel`, not by completion.
         self.aborted = False
+        #: Checks emitted so far: tells a verification that never started
+        #: (`check_failed`) from one that stopped half-way (`check_crashed`).
+        self.emitted = 0
         if application is not None:
             # Quitting while a KiCad command is in flight would destroy the
             # running thread: stop it after the current command and wait at
@@ -150,6 +203,7 @@ class _CheckWorker(QThread):
     def _emit(self, result):
         """Forward one check, then leave the verification if a stop was asked."""
         self.result.emit(result)
+        self.emitted += 1
         if self.cancel.is_set():
             raise _CheckAborted()
 
@@ -162,13 +216,17 @@ class _CheckWorker(QThread):
             must not forbid its installation (review 2026-11-15, H1). A stop
             asked with `stop()` ends the run and sets `aborted`; the checks
             already emitted stay.
+        @note `check_failed` only when the verification emitted NOTHING
+            before failing (it did not really start); after some checks it
+            is `check_crashed`, with the count and the exception's type, and
+            the checks already emitted stay (review 2026-11-15, M2/I3: one
+            late internal error must not void the checks that ran).
         """
         try:
             if self.cancel.is_set():
                 raise _CheckAborted()
             if self.error is not None:
-                self.result.emit(Check('SKIP', 'Controllo del componente', str(self.error),
-                                       remedy='Usa «Controlla di nuovo».', code='check_failed'))
+                self.result.emit(_self_check(CODE_CHECK_FAILED, str(self.error)))
                 return
             verify_component(**self.args, emit=self._emit)
         except (_CheckAborted, CliStopped):
@@ -177,8 +235,11 @@ class _CheckWorker(QThread):
             if self.cancel.is_set():
                 self.aborted = True
                 return
-            self.result.emit(Check('SKIP', 'Controllo del componente', str(exc),
-                                   remedy='Usa «Controlla di nuovo».', code='check_failed'))
+            if self.emitted == 0:
+                self.result.emit(_self_check(CODE_CHECK_FAILED, str(exc)))
+                return
+            self.result.emit(_self_check(CODE_CHECK_CRASHED, component_check.tx(
+                CHECK_CRASHED_DETAIL, error=_error_text(exc), count=self.emitted)))
 
     def _release(self):
         """Drop the exit-time wait and delete the thread once finished.
@@ -330,9 +391,6 @@ class ComponentCheckPanel(QWidget):
         self.action_buttons = {}
         #: The rows of the last finished run (`CheckItem`), in display order.
         self.items = []
-        #: The last hand-off asked (`HANDOFF_ACTIONS`), or None.
-        self.handoff = None
-        self.ai_review_requested = False
         self.results = []
         self.worker = None
         self._running = False
@@ -356,7 +414,8 @@ class ComponentCheckPanel(QWidget):
         self._forgetting = False
         #: True between «Interrompi» and the end of the run.
         self._stop_pending = False
-        #: Re-composes the line under the rows in the current language, or None.
+        #: Re-composes the line under the rows in the current language, or
+        #: None; an empty text hides the line (`_show_action_status`).
         self._action_status_source = None
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -467,7 +526,9 @@ class ComponentCheckPanel(QWidget):
             succeeds runs the verification again by itself; a VIEW
             (`VIEW_ACTIONS`) does not. A hand-off (`HANDOFF_ACTIONS`) needs no
             callable: the panel emits `handoff_requested` and the window
-            routes it.
+            routes it. An action returns its outcome line: a text shown as
+            written, or a callable returning it in the CURRENT language,
+            called again on a language switch (review 2026-11-15, L5).
         @param keep_status True keeps the line under the rows (the outcome of
             the fix that asked for this run).
         @return True when a run started, False when one was already running.
@@ -587,20 +648,29 @@ class ComponentCheckPanel(QWidget):
     def retranslate(self):
         """@brief Recompose every visible text in the current language (language switch).
 
-        @note The verdict, the rows and the details are built from the checks'
-            Italian sources, so they are composed again; an idle panel keeps
-            the reason its window gives it again.
+        @note The verdict, the rows and the details are composed again: the
+            panel's own labels from their Italian sources through `tx`, each
+            check's title, detail and remedy through `_shown` (the service's
+            `component_check.localized`, which recomposes them from the
+            sources and values the check carries -- a check's texts are
+            translated when it is made, so `tx` alone would leave them in
+            the language of the run; review 2026-11-15, M3). An idle panel
+            keeps the reason its window gives it again.
         """
         self._label_rerun()
         self.stop_button.setText(self.tx('Interrompi'))
         self.copy_button.setText(self.tx('Copia rapporto'))
         self._toggle_details(self.details_toggle.isChecked())
-        if self._action_status_source is not None:
-            self.action_status.setText(self._action_status_source())
+        if self._action_status_source is not None and not self.action_status.isHidden():
+            # Only a line on screen is composed again: a hidden one (an idle
+            # panel) must not reappear because the language changed.
+            self._show_action_status(self._action_status_source)
         if self._running:
             self.verdict.setText(self.tx('Sto controllando il componente…'))
             self.status.setText(self._stop_text() if self._stop_pending else self.tx(
                 'Verifica in corso: ogni comando KiCad ha un limite di 60 secondi.'))
+            # The details stream in during the run: they follow the language too.
+            self.report.setPlainText(self._format_report())
             return
         if self.verdict_key is None:
             return
@@ -608,6 +678,16 @@ class ComponentCheckPanel(QWidget):
         if self.aborted:
             self._set_aborted_verdict()
         self.report.setPlainText(self._format_report())
+
+    def _shown(self, result):
+        """One check as it is shown NOW: its title, detail and remedy in the current language.
+
+        `component_check.localized` recomposes every text that came from
+        `component_check.tx` (the service's checks and the panel's own rows
+        about the verification, `_self_check`); raw logs stay as written.
+        Called at display time only: `self.results` keeps the checks as emitted.
+        """
+        return component_check.localized(result)
 
     @staticmethod
     def _pin_ranges(values):
@@ -646,19 +726,20 @@ class ComponentCheckPanel(QWidget):
         ordered = ([r for r in self.results if r.status != 'OK']
                    + [r for r in self.results if r.status == 'OK'])
         for result in ordered:
+            shown = self._shown(result)
             if result.status == 'WARN' and result.code in PIN_GROUPS:
                 # One line per group (below), not one per pin.
-                merged.setdefault(result.code, result.title)
+                merged.setdefault(result.code, shown.title)
                 continue
-            line = (f'[{self.tx(labels.get(result.status, result.status))}] {self.tx(result.title)}\n'
-                    f'{self.tx(result.detail)}\n')
-            if result.remedy and result.status != 'OK':
-                line += self.tx('Rimedio: {remedy}').format(remedy=self.tx(result.remedy)) + '\n'
+            line = (f'[{self.tx(labels.get(result.status, result.status))}] {shown.title}\n'
+                    f'{shown.detail}\n')
+            if shown.remedy and result.status != 'OK':
+                line += self.tx('Rimedio: {remedy}').format(remedy=shown.remedy) + '\n'
             lines.append(line)
         groups = self._pin_groups()
         problems = sum(r.status != 'OK' for r in self.results if not (
             r.status == 'WARN' and r.code in PIN_GROUPS))
-        merged_lines = [f'[{self.tx(labels["WARN"])}] {self.tx(title)}\n'
+        merged_lines = [f'[{self.tx(labels["WARN"])}] {title}\n'
                         f'{self._pin_group_line(code, groups[code])}\n' for code, title in merged.items()]
         # The merged per-pin groups are problems: listed with the problems.
         lines[problems:problems] = merged_lines
@@ -695,20 +776,25 @@ class ComponentCheckPanel(QWidget):
 
     def _item_text(self, result):
         """The short sentence of one check's row (pin ranges added by `_build_items`)."""
-        detail = str(self.tx(result.detail)).strip().splitlines()
+        shown = self._shown(result)
+        detail = str(shown.detail).strip().splitlines()
         first = detail[0] if detail else ''
         if result.category == 'manual':
-            return str(self.tx(result.detail)).strip()
+            return str(shown.detail).strip()
         if result.status == 'SKIP':
             return self.tx('Non eseguito: {item} ({reason}).').format(
-                item=self.tx(result.title), reason=first.rstrip('.'))
+                item=shown.title, reason=first.rstrip('.'))
         if result.code.startswith(('drc_', 'erc_')) or result.code == 'kicad_library':
             # The detail says which pads/pins or which library (its scope):
             # rows of two different libraries must not merge into one.
             return first
-        if result.remedy:
-            return str(self.tx(result.remedy))
-        return f'{self.tx(result.title)}: {first}' if first else str(self.tx(result.title))
+        if shown.remedy:
+            return str(shown.remedy)
+        # CONTRACT CHANGED 2026-11-15 (round 2): «title: detail» through the
+        # catalogue, so French writes its space before the colon.
+        if not first:
+            return str(shown.title)
+        return self.tx('{title}: {detail}').format(title=shown.title, detail=first)
 
     def _build_items(self):
         """@brief The rows of the finished run, in display order.
@@ -752,13 +838,21 @@ class ComponentCheckPanel(QWidget):
                     item.tooltip = self.tx(remedy).format(count=len(set(item.pins)),
                                                           pins=self._pin_ranges(item.pins))
             elif item.pins and not any(r.code.startswith(('drc_', 'erc_')) for r in item.results):
-                item.text = self.tx('{text} (pin {pins})').format(
-                    text=item.text.rstrip('.'), pins=self._pin_ranges(item.pins))
+                # CONTRACT CHANGED 2026-11-15 (round 2): the range is worded by
+                # the kind of number its checks carry (pads for
+                # `PAD_NUMBER_CODES`), never «pin» for pad numbers. A row
+                # merging both kinds keeps «pin»: no single word fits it.
+                template = ('{text} (pad {pads})'
+                            if all(r.code in PAD_NUMBER_CODES for r in item.results)
+                            else '{text} (pin {pins})')
+                ranges = self._pin_ranges(item.pins)
+                item.text = self.tx(template).format(text=item.text.rstrip('.'), pins=ranges,
+                                                     pads=ranges)
         checks = [r for r in folded if r.code != 'kicad_cli']
         if folded:
             items.append(CheckItem(RANK_NOT_RUN, self.tx(
                 'KiCad non trovato: {count} controlli non eseguiti.').format(count=len(checks)),
-                results=list(folded), tooltip='\n'.join(self.tx(r.title) for r in checks)))
+                results=list(folded), tooltip='\n'.join(self._shown(r).title for r in checks)))
         # What WAS verified, in one line: a code counts only when every check
         # of it passed (one stale library makes «libreria KiCad» not passed).
         failed = {r.code for r in self.results if r.status != 'OK'}
@@ -945,7 +1039,10 @@ class ComponentCheckPanel(QWidget):
             line.addWidget(icon, alignment=Qt.AlignmentFlag.AlignVCenter)
             # The manual row names itself («Da fare in KiCad: …»): it is a
             # to-do in KiCad, not a problem found in the component.
-            shown = f'{level}: {item.text}' if item.rank == RANK_MANUAL else item.text
+            # CONTRACT CHANGED 2026-11-15 (round 2): composed through the
+            # catalogue, French «À faire dans KiCad : …» (space before «:»).
+            shown = (self.tx('{level}: {text}').format(level=level, text=item.text)
+                     if item.rank == RANK_MANUAL else item.text)
             text = QLabel(shown)
             text.setWordWrap(True)
             text.setProperty('i18n_skip', True)
@@ -956,10 +1053,11 @@ class ComponentCheckPanel(QWidget):
                 text.setStyleSheet(f'QLabel {{ color: {GREEN}; }}')
                 icon.setPixmap(QIcon(str(Path(__file__).parent / 'assets' / 'check-status-green.svg'))
                                .pixmap(QSize(14, 14)))
-            tips = [f'{self.tx(r.title)}: {self.tx(r.detail)}'
-                    + (('\n' + self.tx('Rimedio: {remedy}').format(remedy=self.tx(r.remedy)))
-                       if r.remedy else '')
-                    for r in item.results if not getattr(r, 'needs_cli', False)]
+            tips = [self.tx('{title}: {detail}').format(title=shown.title, detail=shown.detail)
+                    + (('\n' + self.tx('Rimedio: {remedy}').format(remedy=shown.remedy))
+                       if shown.remedy else '')
+                    for shown in (self._shown(r) for r in item.results
+                                  if not getattr(r, 'needs_cli', False))]
             if item.tooltip:
                 tips.append(item.tooltip)
             text.setToolTip('\n'.join(tips))
@@ -984,10 +1082,22 @@ class ComponentCheckPanel(QWidget):
     def highlighted_button(self):
         """@brief The highlighted button of the rows.
 
-        @return The button named «primary» (the next thing to do), or None.
+        @return The button named «primary» (the next thing to do) among the
+            rows on screen now, or None.
+        @note Searched in the rows' layout, not with `findChildren`: the rows
+            of the previous outcome are only scheduled for deletion
+            (`deleteLater`) and stay children until the event loop runs, so
+            a stale «primary» button could be returned (review 2026-11-15).
         """
-        return next((button for button in self.items_box.findChildren(QPushButton)
-                     if button.objectName() == 'primary'), None)
+        layout = self.items_layout
+        for index in range(layout.count()):
+            row = layout.itemAt(index).widget()
+            if row is None:
+                continue
+            for button in row.findChildren(QPushButton):
+                if button.objectName() == 'primary':
+                    return button
+        return None
 
     def _run_action(self, action):
         """Run one action of a row.
@@ -1000,13 +1110,13 @@ class ComponentCheckPanel(QWidget):
         """
         if self._running:
             return
-        reason = self.action_guard() if callable(self.action_guard) else ''
-        if reason:
-            self._show_action_status(lambda: reason)
+        if self._guard_reason():
+            # The guard is asked again at each language switch: the line
+            # follows the language, and goes away once the work is over
+            # (review 2026-11-15, L5: a captured text stayed Italian).
+            self._show_action_status(self._guard_reason)
             return
         if action in HANDOFF_ACTIONS:
-            self.handoff = action
-            self.ai_review_requested = action == ACTION_SUGGEST_PIN_TYPES
             self.handoff_requested.emit(action)
             return
         try:
@@ -1016,24 +1126,41 @@ class ComponentCheckPanel(QWidget):
                         else 'Correzione non riuscita: {error}')
             self._show_action_status(lambda: self.tx(template).format(error=exc))
             return
-        message = outcome.strip() if isinstance(outcome, str) and outcome.strip() else ''
+
+        def message():
+            """The action's outcome line now: a callable outcome is composed again in the current language."""
+            try:
+                text = outcome() if callable(outcome) else outcome
+            except Exception:  # noqa: BLE001 - a line that cannot be composed again is left out
+                return ''
+            return text.strip() if isinstance(text, str) else ''
         if action in FIX_ACTIONS:
-            self._show_action_status(lambda: (message + '\n' if message else '')
+            self._show_action_status(lambda: (message() + '\n' if message() else '')
                                      + self.tx('Verifica ripetuta automaticamente.'))
             started = self.rerun_handler() if callable(self.rerun_handler) else self._rerun(keep_status=True)
             if started is False:
                 # The window refused the re-run (it said why): the line must
                 # not claim one (final verification 2026-11-15, 9).
-                self._show_action_status(lambda: message or self.tx('Correzione eseguita.'))
+                self._show_action_status(lambda: message() or self.tx('Correzione eseguita.'))
             return
-        if message:
-            self._show_action_status(lambda: message)
+        if message():
+            self._show_action_status(message)
+
+    def _guard_reason(self):
+        """Why the rows' actions must wait now, asked of the window ('' when they may run)."""
+        reason = self.action_guard() if callable(self.action_guard) else ''
+        return reason if isinstance(reason, str) else ''
 
     def _show_action_status(self, compose):
-        """Show the line under the rows, composed again on a language switch."""
+        """Show the line under the rows, composed again on a language switch.
+
+        @param compose Callable returning the line in the current language;
+            an empty line hides it (a wait whose work is over says nothing).
+        """
         self._action_status_source = compose
-        self.action_status.setText(compose())
-        self.action_status.show()
+        text = compose()
+        self.action_status.setText(text)
+        self.action_status.setVisible(bool(text))
 
     def _set_aborted_verdict(self):
         """Verdict of a run stopped by «Interrompi»: never a readiness claim.

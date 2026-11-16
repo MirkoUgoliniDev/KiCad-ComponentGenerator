@@ -516,7 +516,7 @@ def _warn_if_too_coarse(crop_px, body_length, warn, smallest_part_mm=None, *,
         return None
     needed = math.ceil(MIN_PACKAGE_PIXELS / smallest_part_mm * body_length)
     warn(tx("Risoluzione della foto usata per l'inventario lungo l'asse {axis}: {scale:.1f} px/mm. "
-            "Un corpo con il lato corto di {smallest:.2f} mm (il piu' piccolo che si "
+            "Un corpo con il lato corto di {smallest:.2f} mm (il più piccolo che si "
             "assume presente, non una misura di questa scheda) occupa {readable:.2f} px, "
             "sotto la soglia indicativa di {MIN_PACKAGE_PIXELS} px. Alcuni dettagli "
             "potrebbero non essere distinguibili; l'inventario potrebbe essere incompleto, ma questo non dimostra che manchino componenti. "
@@ -824,7 +824,7 @@ def prepare_photo(path, length, width, metadata=None, *, frame_callback=None):
             # distortion.
             metadata["board_warning"] = tx(
                 "{name}: quote dei documenti applicate ({length:.2f} x {width:.2f} mm); la scheda "
-                "nella foto ha proporzioni diverse (deformazione {deform:+.1f}%), quindi la foto e' "
+                "nella foto ha proporzioni diverse (deformazione {deform:+.1f}%), quindi la foto è "
                 "corretta asse per asse (scala X {sx:.2f} px/mm, Y {sy:.2f} px/mm): misure e "
                 "posizioni seguono le quote, i ritagli inviati all'AI restano deformati.",
                 name=Path(path).name, length=length, width=width,
@@ -1083,7 +1083,7 @@ def measure_proposal_edges(photo, proposals, positions, length_mm, width_mm, log
     oblique = sum(1 for row in measured if float(row.get('rotation_deg') or 0.0) % 90 != 0)
     log(tx("Bordi con OpenCV: {measured} proposte su {n_measured} misurate sul "
            "gradiente ({changed} con geometria diversa da quella del rilevatore, "
-           "{oblique} non cardinali); {n_skipped} lasciate come proposte perche' "
+           "{oblique} non cardinali); {n_skipped} lasciate come proposte perché "
            "il contorno non era chiaro o non era compatibile.",
            measured=report.measured,
            n_measured=len(measured),
@@ -1188,7 +1188,7 @@ def flag_ai_bodies_on_edge_contacts(photo, components, declared, length, width,
         body = ai_only[index]
         body.update(_uncertain=True, presence_confidence='low', class_confidence='low',
                     _review_reason=tx("Aggiunto dal modello senza proposte del rilevatore, lungo "
-                                      "una fila di contatti di bordo dichiarati: puo' essere un "
+                                      "una fila di contatti di bordo dichiarati: può essere un "
                                       "connettore vero o le piazzole stesse. Verificare nella "
                                       "foto."))
         log(tx("Contatti dichiarati: {name} aggiunto dal modello sopra una fila di contatti di "
@@ -1818,10 +1818,10 @@ def settle_edge_holes(reading: dict, px_per_mm: float, outline: Optional[str] = 
         settled = dict(reading, style="through_hole", measured_style=measured,
                        chord_mm=0.0, reason=tx(
                            "contorno della scheda senza tacche: l'apertura vista sulle piazzole "
-                           "non e' un taglio del bordo, resta il foro chiuso"))
+                           "non è un taglio del bordo, resta il foro chiuso"))
         return settled, None
     if outline != OUTLINE_NOTCHED:
-        reason = (tx("contorno della scheda senza tacche: l'apertura vista sulle piazzole non e' "
+        reason = (tx("contorno della scheda senza tacche: l'apertura vista sulle piazzole non è "
                      "un taglio del bordo") if outline == OUTLINE_SMOOTH else
                   tx("il contorno della scheda non conferma tacche ai contatti dichiarati"))
         return None, tx("Fori sul bordo {edge}: {measured} non confermato ({reason}); tipo di "
@@ -1867,10 +1867,10 @@ def short_row_contradiction(settled, declared_style) -> Optional[str]:
     if style == "half_hole":
         return tx("Fori sul bordo {edge}: la foto vede solo semi-fori su {agreeing} piazzole di "
                   "{contacts}, nessun foro chiuso dietro le piazzole (un foro riempito o coperto "
-                  "apparirebbe uguale), ma il tipo dichiarato e' «{declared}»; con {contacts} "
+                  "apparirebbe uguale), ma il tipo dichiarato è «{declared}»; con {contacts} "
                   "contatti la foto da sola non basta: tipo di contatto da confermare.", **values)
     return tx("Fori sul bordo {edge}: la foto vede {measured} su {agreeing} piazzole di {contacts}, "
-              "ma il tipo dichiarato e' «{declared}»; con {contacts} contatti la foto da sola non "
+              "ma il tipo dichiarato è «{declared}»; con {contacts} contatti la foto da sola non "
               "basta: tipo di contatto da confermare.", measured=style, **values)
 
 
@@ -2416,7 +2416,7 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
             # which modify them: the GUI no longer matched the detector. The
             # calibration (needed for the millimetres) and the body colour
             # remain.
-            log(tx("Solo YOLO: riquadri del rilevatore senza filtro dei contatti ne' misura "
+            log(tx("Solo YOLO: riquadri del rilevatore senza filtro dei contatti né misura "
                    "dei bordi."))
             detector_png = draw_detector_proposals(photo, proposals, [])
             save_inventory_evidence(cache_dir, None, detector_png, proposals, log,
@@ -3207,7 +3207,7 @@ def reconcile_saved_proposals(photo, proposals, length, width, model, call, log,
     manual = sum(1 for row in proposals if row.get('_yolo_manual_box') is True)
     log(tx("Rilancio dell'inventario: {n_proposals} proposte riviste",
            n_proposals=len(proposals))
-        + (tx(", di cui {manual} disegnate a mano e inoltrate senza misura ne' filtro",
+        + (tx(", di cui {manual} disegnate a mano e inoltrate senza misura né filtro",
               manual=manual) if manual else '')
         + tx("; nessun rilevatore locale e nessun documento vengono rieseguiti."))
     if detector == 'yolo_smd':
@@ -3239,7 +3239,7 @@ def reconcile_saved_proposals(photo, proposals, length, width, model, call, log,
     replayed = any(kind_of(message) == CACHE_HIT for message in seen)
     if replayed:
         log(tx("Rilancio dell'inventario: proposte e foto identiche a una richiesta "
-               "gia' pagata; risposta rigiocata dalla cache, nessun nuovo addebito."))
+               "già pagata; risposta rigiocata dalla cache, nessun nuovo addebito."))
     # Same tail as the normal path, at the same point (HANDOFF 146 V2):
     # without the per-crop reading the rerun lost the corrections of the
     # agreeing readings.

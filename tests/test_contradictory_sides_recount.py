@@ -86,7 +86,7 @@ def test_a_contradictory_answer_is_recounted_once_and_the_recount_is_used():
     assert [len(s["pin_names"]) for s in params.castellated_sides] == [22, 22]
     assert params.value_sources["castellated_sides.top.pitch_mm"] == "read"
     assert "ricontati" in params.notes
-    assert any("una chiamata in piu'" in m for m in messages)
+    assert any("una chiamata in più" in m for m in messages)
 
 
 def test_a_coherent_answer_costs_no_extra_call():

@@ -16,14 +16,14 @@ from PyQt6.QtWidgets import (QDialog, QDialogButtonBox, QLabel, QLineEdit, QList
                              QButtonGroup, QHBoxLayout, QPushButton, QStackedWidget,
                              QWidget)
 
+from ..core.output_names import (is_valid_output_name, kicad_unsafe_characters,
+                                 validate_output_name)
+
 #: What makes a folder of the library root a project: the analysis creates the
 #: documents folder, the log or the review bundle, the generation creates
 #: `<name>.pretty`. A folder with none of them (a leftover cache, a copy made
 #: by hand) is not listed, so it cannot be opened as if it were a project.
 PROJECT_MARKERS = ("docs", "analisi-ai.log", "photo-review", "photo-cache")
-
-#: Characters Windows refuses in a file or folder name.
-_FORBIDDEN = set('<>:"/\\|?*')
 
 #: Names Windows reserves for devices, with or without an extension.
 _RESERVED = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)),
@@ -97,23 +97,55 @@ def name_problem(root, name: str, current: str = "", taken=None) -> str:
         rename that only changes letter case is allowed.
     @param taken The casefolded folder names of `root` already read
         (`taken_project_names`), or None to read the folder now.
-    @return Italian message (source text for i18n), or "" when the name is usable.
+    @return Italian message (source text for i18n), or "" when the name is usable;
+        the refusal of a character KiCad mis-handles is returned already
+        translated (it names the character, so it is no catalog key and the
+        caller's catalog lookup returns it unchanged).
     @note Existing folders are compared ignoring letter case: on Windows
         «Test» and «TEST» are the same folder, so they are the same project.
+    @note CONTRACT CHANGED 2026-11-15 (round 5): which characters a name may
+        hold is decided by the ONE rule of the generated files,
+        `output_names.validate_output_name` -- the project name becomes the
+        component name -- not by a copy of it here. The copy accepted «50%»,
+        which the generation then refused (kicad-cli 10 reads «%» in a
+        footprint or symbol name as a printf format and crashes,
+        `output_names.KICAD_UNSAFE_NAME_CHARACTERS`).
     """
     name = name.strip()
     if not name:
         return "Scrivi il nome del progetto."
-    if any(char in _FORBIDDEN or ord(char) < 32 for char in name):
-        return "Il nome non puo' contenere questi caratteri: < > : \" / \\ | ? *"
-    if name.endswith((".", " ")) or name in (".", ".."):
-        return "Il nome non puo' finire con un punto o uno spazio."
+    problem = _file_name_problem(name)
+    if problem:
+        return problem
     if name.split(".")[0].upper() in _RESERVED:
         return "Questo nome e' riservato da Windows."
     if taken is None:
         taken = taken_project_names(root)
     if name.casefold() in taken and name.casefold() != current.strip().casefold():
         return "Esiste gia' un progetto con questo nome: aprilo da «Apri progetto…»."
+    return ""
+
+
+def _file_name_problem(name: str) -> str:
+    """Why the shared output-name rule refuses the stripped `name`, or "".
+
+    The verdict is `output_names.validate_output_name`'s alone; this only
+    picks the dialog's most specific message for it.
+    """
+    try:
+        validate_output_name(name)
+    except ValueError as exc:
+        unsafe = kicad_unsafe_characters(name)
+        cleaned = "".join("_" if char in unsafe else char for char in name)
+        if unsafe and is_valid_output_name(cleaned):
+            # Only characters KiCad mis-handles: the shared rule's own
+            # message, which names them (the generation's very words).
+            return str(exc)
+        trimmed = cleaned.rstrip(".")
+        if not trimmed or is_valid_output_name(trimmed):
+            # Only trailing dots (or a name made of dots) are wrong.
+            return "Il nome non puo' finire con un punto o uno spazio."
+        return "Il nome non puo' contenere questi caratteri: < > : \" / \\ | ? *"
     return ""
 
 

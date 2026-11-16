@@ -332,8 +332,8 @@ def test_a_coincidence_of_the_drawn_holes_removes_the_recommendation():
     (question,) = _questions(_agreed(_witness("unverifiable", "unanchored", misplaced="3")),
                              "pad_layout")
     assert len(question["options"]) == 1 and not question["options"][0].get("recommended")
-    assert "puo' essere una coincidenza" in question["text"]
-    assert "il pad 3 e' il piu' lontano dai fori" in question["text"]
+    assert "può essere una coincidenza" in question["text"]
+    assert "il pad 3 è il più lontano dai fori" in question["text"]
     assert "scarto massimo 0.21 mm" in question["text"]
 
 

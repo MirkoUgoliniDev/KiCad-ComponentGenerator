@@ -87,7 +87,7 @@ def test_a_malformed_pin_is_still_refused(pin):
 
 def test_a_label_repeated_as_number_and_text_is_one_pin_twice():
     """Negative: 1 and «1» name the same pin, so the map repeats it."""
-    with pytest.raises(ExtractionError, match="piu' volte"):
+    with pytest.raises(ExtractionError, match="più volte"):
         ext._pin_map_seen_from_top(
             [{"pin": 1, "row": 0, "col": 0}, {"pin": " 1 ", "row": 0, "col": 1}], 2, "top", 1)
 
@@ -229,7 +229,7 @@ def test_a_pad_reading_without_a_declared_unit_is_discarded(tmp_path, unit):
     if unit is not None:
         answer["drawing_unit"] = unit
     reading = read_pad_positions([_drawing(tmp_path)], model="m", call=Mock(return_value=answer))
-    assert reading["pads"] == {} and reading["discarded"] == "unita' non dichiarata"
+    assert reading["pads"] == {} and reading["discarded"] == "unità non dichiarata"
 
 
 @pytest.mark.parametrize("unit", ["mm", "inch", "mil"])
@@ -250,21 +250,21 @@ def _main(unit):
 def test_main_pads_without_a_declared_unit_block_with_the_reason():
     data = _main(None)
     apply_dedicated_pads(data, None)
-    assert "unita' non dichiarata" in data["_pin_map_conflict"]
+    assert "unità non dichiarata" in data["_pin_map_conflict"]
 
 
 def test_main_pads_with_a_declared_unit_are_judged_on_the_readings():
     """Negative: with «mm» the block, if any, names the readings, not the unit."""
     data = _main("mm")
     apply_dedicated_pads(data, None)
-    assert "unita' non dichiarata" not in data.get("_pin_map_conflict", "")
+    assert "unità non dichiarata" not in data.get("_pin_map_conflict", "")
 
 
 def test_model_chains_without_a_declared_unit_leave_the_model_coordinates():
     answer = dict(_single("1"), pad_chains=CHAINS)
     answer.pop("drawing_unit")
     data = single_answer_to_data(answer)
-    assert "unita' non dichiarata" in data["notes"]
+    assert "unità non dichiarata" in data["notes"]
     assert [(p["x_mm"], p["y_mm"]) for p in data["package_geometry"]["pins"]] == [
         (0.0, 0.0), (2.54, 0.0)]
 

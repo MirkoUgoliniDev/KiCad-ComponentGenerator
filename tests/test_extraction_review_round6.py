@@ -209,7 +209,7 @@ def test_two_agreeing_readings_the_holes_contradict_are_not_confirmed():
     question, options = _question(data)
     assert set(options) == {"main+dedicated"}
     assert "non confermano questa disposizione" in question["text"]
-    assert "il pad 5 e' il piu' lontano dai fori" in question["text"]
+    assert "il pad 5 è il più lontano dai fori" in question["text"]
     assert "in scala" not in question["text"] and "le smentiscono" not in question["text"]
 
 
@@ -281,7 +281,7 @@ def test_the_rule_is_the_same_when_the_dedicated_reading_sides_with_the_answers_
     apply_dedicated_pads(data, _reading(), check_layout=_page())
     # CONTRACT CHANGED (round 7): the measured wording, never «in scala».
     assert "non confermano questa disposizione" in data["_numbering_note"]
-    assert "il pad 5 e' il piu' lontano dai fori" in data["_numbering_note"]
+    assert "il pad 5 è il più lontano dai fori" in data["_numbering_note"]
     assert "in scala" not in data["_numbering_note"]
     assert "lettura dedicata concorda con esse" not in data["_numbering_note"]
     # Negative twin: the same three readings on a page that confirms the chains.

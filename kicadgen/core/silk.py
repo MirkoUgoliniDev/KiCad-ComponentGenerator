@@ -117,8 +117,9 @@ def silk_rectangle(start, end, keepouts: Sequence[Box], layer: str = "F.SilkS",
 
 #: Note appended to a footprint description (fixed file language, see
 #: `core.footprint.FOOTPRINT_TEXT_LANGUAGE`) when no pad can carry the pin-1
-#: marker: the library user learns why the footprint has none.
-PIN_ONE_UNMARKED_NOTE = "pin 1 non marcato: nessun pad 1"
+#: marker: the library user learns why the footprint has none. Italian
+#: before 2026-11-15 («pin 1 non marcato: nessun pad 1»).
+PIN_ONE_UNMARKED_NOTE = "pin 1 not marked: no pad 1"
 
 #: A grid-array pad number: row letters followed by a column number written
 #: without leading zeros (A1, B12, AA3).

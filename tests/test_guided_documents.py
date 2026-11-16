@@ -173,7 +173,7 @@ def test_guided_migration_conflict_leaves_both_sets_untouched(window, tmp_path):
     conflict = destination / 'top.png'
     conflict.write_bytes(b'existing destination')
     assert window._rename_project_folder('NewName') == window._component_name()
-    assert "Rinomina annullata: esiste gia' NewName." in window.ai_progress_text.toPlainText()
+    assert "Rinomina annullata: esiste già NewName." in window.ai_progress_text.toPlainText()
     assert original.exists() and store.path.exists()
     assert conflict.read_bytes() == b'existing destination'
 

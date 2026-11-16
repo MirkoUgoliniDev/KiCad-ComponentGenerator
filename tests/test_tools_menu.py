@@ -22,7 +22,9 @@ def test_the_menu_bar_order_and_the_tools_entries(window):  # noqa: F811
     titles = [action.text() for action in window.menuBar().actions()]
     assert titles == ["File", "Configurazione", "Strumenti", "?"]
     texts = [a.text() for a in window.menu_tools.actions() if not a.isSeparator()]
-    assert texts == ["Apri cartella componente", "Prova in KiCad...",
+    # CONTRACT CHANGED 2026-11-15: one name for the preview command, the KiCad
+    # tab's «Apri in KiCad» (review of the guided tab), no longer «Prova in KiCad...».
+    assert texts == ["Apri cartella componente", "Apri in KiCad...",
                      "Installa nel progetto KiCad...", "Installa come libreria globale...",
                      "Apri cartella progetto tool", "Apri config.json",
                      # Recorded answers of the analysis questions (2026-11-04, H7)
@@ -84,6 +86,7 @@ def test_the_tools_menu_follows_the_language(window, monkeypatch):  # noqa: F811
         assert window.menu_tools.title() == "Tools"
         assert window.menu_help.title() == "Help"
         assert window.action_open_config.text() == "Open config.json"
-        assert window.action_test_kicad.text() == "Test in KiCad..."
+        # CONTRACT CHANGED 2026-11-15: the menu entry is «Apri in KiCad...».
+        assert window.action_test_kicad.text() == "Open in KiCad..."
     finally:
         combo.setCurrentIndex(combo.findData("it"))

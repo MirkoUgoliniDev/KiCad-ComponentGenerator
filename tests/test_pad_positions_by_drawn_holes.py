@@ -106,7 +106,7 @@ def test_an_unconfirmed_main_answer_blocks(reading):
     data = _main(TRUE)
     apply_dedicated_pads(data, reading)
     assert "NON confermate" in data["_pin_map_conflict"]
-    assert "Nessuna domanda puo' chiudere il caso" in data["_pin_map_conflict"]
+    assert "Nessuna domanda può chiudere il caso" in data["_pin_map_conflict"]
     assert "Rigenera footprint" not in data["_pin_map_conflict"] and not data.get("_questions")
 
 
@@ -177,7 +177,7 @@ def test_the_adopted_reading_brings_its_view_to_the_pads():
     data["package_geometry"]["source_view"] = "top"     # what single_answer_to_data writes
     apply_dedicated_pads(data, _reading(view="bottom"), check_layout=FakeHoles(TRUE))
     assert data["package_geometry"]["source_view"] == "bottom"
-    assert "(bottom)" in data["_numbering_note"]
+    assert "(vista dal basso)" in data["_numbering_note"]
 
 
 def test_two_agreeing_readings_take_the_only_declared_view():

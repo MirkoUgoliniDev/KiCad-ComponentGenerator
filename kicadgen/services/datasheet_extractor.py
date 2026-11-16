@@ -44,7 +44,7 @@ from ..generators.castellated_module import (
 )
 # Free copper a derived land keeps from its neighbours (review G1): the
 # minimum of the pin header generator, one value for both.
-from ..generators.package import ESTIMATED_PADS_LISTED, ESTIMATED_PADS_MORE, estimated_pad_list
+from ..generators.package import ESTIMATED_PADS_LISTED, estimated_pad_list
 from ..generators.pin_header import MIN_PAD_GAP_MM
 from .ai_diagnostics import CallCancelled
 from .openrouter import (DEFAULT_MODEL, OpenRouterError, ToolArgumentsError, api_key, call_tool,
@@ -2548,7 +2548,7 @@ def _reread_missing_terminals(data: dict, documents, model: str, call, prompt=No
     if announce:
         announce("llm", model)
     if progress:
-        progress(tx("Pad {pads}: ne' foro ne' terminale nella lettura; una sola rilettura a "
+        progress(tx("Pad {pads}: né foro né terminale nella lettura; una sola rilettura a "
                     "pagamento del disegno per le sezioni dei terminali e le quote dei fori, con "
                     "{model}.", pads=", ".join(missing), model=model))
     reading = read_pad_terminals(documents, missing, model=model, call=call, prompt=prompt,
@@ -3548,7 +3548,7 @@ def _side_numbering_choice(sides, pinout, value, payload) -> dict:
     changed = tx("lati o pinout cambiati dopo la domanda")
     if value == SIDE_NUMBERING_RENUMBER:
         if not report["renumberable"]:
-            return {"ok": False, "reason": tx("i lati non hanno piu' una sola collocazione "
+            return {"ok": False, "reason": tx("i lati non hanno più una sola collocazione "
                                               "coerente nel pinout")}
         renumbered = pinout_coherence.renumbered_sides(sides, report["alignment"])
         if expected is not None and pinout_coherence.pad_label_pairs(renumbered) != expected:
@@ -3587,11 +3587,11 @@ def _side_numbering_choice(sides, pinout, value, payload) -> dict:
             return {"ok": False, "reason": changed}
         declared = set(report["off_side_entries"])
         shifted = [pin for pin in report["dropped"] if pin not in declared]
-        note = (tx("Numerazione dei lati tenuta per scelta dell'utente: il pinout e' quello delle "
+        note = (tx("Numerazione dei lati tenuta per scelta dell'utente: il pinout è quello delle "
                    "etichette dei lati; voci del documento senza pad: {pins}.",
                    pins=pinout_coherence.pin_ranges_text(shifted))
                 if shifted and report["contradicted"] else
-                tx("Numerazione dei lati tenuta per scelta dell'utente: il pinout e' quello delle "
+                tx("Numerazione dei lati tenuta per scelta dell'utente: il pinout è quello delle "
                    "etichette dei lati."))
         return {"ok": True, "sides": [dict(side) for side in sides],
                 "pinout": pinout_coherence.kept_sides_pinout(sides, pinout), "note": note}
@@ -4038,7 +4038,7 @@ def apply_dedicated_body(data: dict, reading: Optional[dict], progress=None, tie
     factor = _declared_unit_factor(data)
     if factor is None:
         note = tx("Lettura dedicata delle quote del corpo non confrontabile: la risposta "
-                  "principale non dichiara l'unita' delle quote.")
+                  "principale non dichiara l'unità delle quote.")
         data["notes"] = (str(data.get("notes") or "") + "\n" + note).strip()
         if progress:
             progress(note)
@@ -4151,7 +4151,7 @@ def apply_dedicated_body(data: dict, reading: Optional[dict], progress=None, tie
         text = tx(
             "{label}: le due letture non coincidono ({main:.2f} mm per la risposta "
             "principale, {dedicated:.2f} mm per la lettura dedicata) e le quote stampate "
-            "non decidono ({lists}): nessuna delle due viene usata finche' non e' "
+            "non decidono ({lists}): nessuna delle due viene usata finché non è "
             "chiarito sul disegno.", label=tx(label).capitalize(), main=main_mm,
             dedicated=value_mm, lists=lists)
         if field == "body_height_mm":
@@ -4196,7 +4196,7 @@ def apply_dedicated_body(data: dict, reading: Optional[dict], progress=None, tie
                     continue
                 # No list supports the value the reading chose (a plan size
                 # listed as such, an overall extent): never written (H1).
-                text = tx("{label}: la lettura dedicata ({dedicated:.2f} mm) non e' sostenuta da "
+                text = tx("{label}: la lettura dedicata ({dedicated:.2f} mm) non è sostenuta da "
                           "nessuna quota stampata con quel ruolo ({lists}): non usata, da "
                           "chiarire sul disegno.", label=tx(label).capitalize(),
                           dedicated=value_mm, lists=lists_text)
@@ -4220,18 +4220,18 @@ def apply_dedicated_body(data: dict, reading: Optional[dict], progress=None, tie
                     choice = _ask(data, "height_equals_plan", tx(
                         "Altezza del corpo: entrambe le letture danno {value:.2f} mm, uguale a "
                         "una quota in pianta{rotated}. Il corpo ha sezione quadrata (l'altezza "
-                        "e' davvero {value:.2f} mm) oppure la vista di profilo e' ruotata e la "
-                        "quota e' una misura in pianta?", value=value_mm,
+                        "è davvero {value:.2f} mm) oppure la vista di profilo è ruotata e la "
+                        "quota è una misura in pianta?", value=value_mm,
                         rotated=tx(" (terminali disegnati di lato: vista ruotata)") if rotated else ""),
                         [{"label": tx("Sezione quadrata: altezza {value:.2f} mm", value=value_mm),
                           "value": "keep"},
-                         {"label": tx("Vista ruotata: {value:.2f} mm e' in pianta, altezza da leggere",
+                         {"label": tx("Vista ruotata: {value:.2f} mm è in pianta, altezza da leggere",
                                       value=value_mm), "value": "clear"}],
                         _question_evidence(data), key_values=[round(value_mm, 2)])
                     if choice == "clear":
                         drop(field)
                         warnings.append(tx(
-                            "{label}: {value:.2f} mm e' una misura in pianta (vista ruotata, scelta "
+                            "{label}: {value:.2f} mm è una misura in pianta (vista ruotata, scelta "
                             "dell'utente): altezza non usata.", label=tx(label).capitalize(),
                             value=value_mm))
                         continue
@@ -4260,20 +4260,20 @@ def apply_dedicated_body(data: dict, reading: Optional[dict], progress=None, tie
                         main_points += support(main_mm, extra, field)
                         dedicated_points += support(value_mm, extra, field)
                 elif progress:
-                    progress(tx("Spareggio non richiesto per {label}: nessuna delle due quote e' "
+                    progress(tx("Spareggio non richiesto per {label}: nessuna delle due quote è "
                                 "sostenuta da una lista stampata, una terza lista non potrebbe "
                                 "portarne una a due punti.", label=tx(label)))
             if dedicated_points > main_points and dedicated_points >= 2:
                 write(field, value_mm)
                 warnings.append(tx(
-                    "{label}: il valore della risposta principale ({main:.2f} mm) non e' una "
+                    "{label}: il valore della risposta principale ({main:.2f} mm) non è una "
                     "quota stampata letta da entrambe le letture ({lists}): scartato; usata la "
                     "quota stampata {dedicated:.2f} mm, letta due volte.",
                     label=tx(label).capitalize(), main=main_mm, lists=lists_text,
                     dedicated=value_mm))
             elif main_points > dedicated_points and main_points >= 2:
                 warnings.append(tx(
-                    "{label}: la lettura dedicata ({dedicated:.2f} mm) non e' una quota stampata "
+                    "{label}: la lettura dedicata ({dedicated:.2f} mm) non è una quota stampata "
                     "letta da entrambe le letture ({lists}): scartata; resta {main:.2f} mm, "
                     "letta due volte.", label=tx(label).capitalize(), dedicated=value_mm,
                     lists=lists_text, main=main_mm))
@@ -4441,7 +4441,7 @@ def _write_chain_pads(data: dict, pins: list, candidate: dict, factor: float) ->
             axes=", ".join(drawn))).strip()
     if placed and estimated:
         data["notes"] = (str(data.get("notes") or "") + "\n" + tx(
-            "Lungo {axes} nessuna quota dal bordo ne' contorno disegnato misurabile: corpo "
+            "Lungo {axes} nessuna quota dal bordo né contorno disegnato misurabile: corpo "
             "centrato sui pad, STIMA da verificare sul disegno.",
             axes=", ".join(estimated))).strip()
 
@@ -4958,7 +4958,7 @@ def _hole_text(verdict, pads: Optional[dict] = None) -> str:
         if verified is True:
             text += "; " + tx("scala verificata dal contorno del corpo disegnato")
         elif verified is False:
-            text += "; " + tx("conferma della sola forma: la scala non e' verificata dal contorno "
+            text += "; " + tx("conferma della sola forma: la scala non è verificata dal contorno "
                               "del corpo")
         return text
     if reason == "distorted":
@@ -4969,12 +4969,12 @@ def _hole_text(verdict, pads: Optional[dict] = None) -> str:
     if verdict.status == "not_confirmed":
         return tx("i fori disegnati in {image} non coincidono con queste posizioni", image=image)
     if reason == "not_a_drawing":
-        return tx("nessuna immagine e' un disegno a linee: i fori non si possono controllare")
+        return tx("nessuna immagine è un disegno a linee: i fori non si possono controllare")
     if reason == "no_round_holes":
         # Said without claiming the drawing has no holes (2026-11-13): marks
         # on the centre lines may confirm a layout but never refute one.
-        return tx("nessun foro disegnato puo' smentire queste posizioni (solo piazzole, asole o "
-                  "segni sugli assi): ne' confermate ne' smentite")
+        return tx("nessun foro disegnato può smentire queste posizioni (solo piazzole, asole o "
+                  "segni sugli assi): né confermate né smentite")
     if reason == "no_match_unobservable":
         return tx("i fori disegnati in {image} non coincidono, ma con questi pad il controllo non "
                   "distingue una lettura sbagliata da una pagina non in scala", image=image)
@@ -4987,7 +4987,7 @@ def _hole_text(verdict, pads: Optional[dict] = None) -> str:
                   "limite del controllo: raddrizzare la pagina e ripetere", image=image)
     if reason == "unanchored":
         return tx("i fori disegnati in {image} coincidono con cerchi non tutti disegnati come fori: "
-                  "puo' essere una coincidenza, non una conferma", image=image)
+                  "può essere una coincidenza, non una conferma", image=image)
     if reason == "too_many_pads":
         return tx("troppi pad per il controllo dei fori disegnati")
     if reason == "too_few_pads":
@@ -4996,16 +4996,16 @@ def _hole_text(verdict, pads: Optional[dict] = None) -> str:
         return tx("nessuna immagine leggibile per il controllo dei fori")
     if reason == "low_resolution":
         return tx("il disegno ha una risoluzione troppo bassa per controllare queste posizioni: "
-                  "ne' confermate ne' smentite")
+                  "né confermate né smentite")
     if reason == "search_limit":
-        return tx("la ricerca dei fori disegnati si e' fermata al suo limite: posizioni ne' "
-                  "confermate ne' smentite")
+        return tx("la ricerca dei fori disegnati si è fermata al suo limite: posizioni né "
+                  "confermate né smentite")
     if verdict.status == "unverifiable" and not isinstance(verdict, _HoleFailure):
         # Any other «cannot tell» reason (e.g. a plan view that cannot show
         # the pads): never a refutation, said as such, without the machine
         # code (third re-audit: codes leaked into the user's text).
-        return tx("i fori disegnati non permettono di controllare queste posizioni: ne' "
-                  "confermate ne' smentite")
+        return tx("i fori disegnati non permettono di controllare queste posizioni: né "
+                  "confermate né smentite")
     return tx("controllo dei fori disegnati non riuscito ({reason})", reason=reason)
 
 
@@ -5019,10 +5019,10 @@ def _pad_block_remedy(pins) -> str:
     if pins and all(isinstance(pin, dict) and pin.get("pad_type", "thru_hole") == "thru_hole"
                     for pin in pins):
         return tx("Inserisci le posizioni a mano in «Piazzole del componente THT» e usa «Rigenera "
-                  "footprint», oppure ripeti l'analisi con un modello piu' capace per la lettura "
+                  "footprint», oppure ripeti l'analisi con un modello più capace per la lettura "
                   "delle posizioni dei pad.")
     return tx("Aggiungi il disegno quotato delle piazzole come immagine con ruolo pinout o vista "
-              "dall'alto, oppure ripeti l'analisi con un modello piu' capace per la lettura delle "
+              "dall'alto, oppure ripeti l'analisi con un modello più capace per la lettura delle "
               "posizioni dei pad.")
 
 
@@ -5053,6 +5053,23 @@ def _reading_source(key: str) -> str:
             # Not a reading either: each axis taken from the reading whose
             # chain on that axis passes (`_axis_recombinations`).
             RECOMBINED_SOURCE: tx("ricombinazione per assi delle due letture")}[key]
+
+
+def _view_label(view) -> str:
+    """The side a contact drawing is seen from, as the messages show it.
+
+    @param view A `contacts_view` token: "top", "bottom", "unknown", None or
+        anything else a reading declared.
+    @return The translated name of the side; «vista non dichiarata» for every
+        value that is not "top" or "bottom", so the internal token (e.g.
+        «unknown», seen raw in a pad-layout question on 2026-11-15) never
+        reaches the user.
+    """
+    if view == "top":
+        return tx("vista dall'alto")
+    if view == "bottom":
+        return tx("vista dal basso")
+    return tx("vista non dichiarata")
 
 
 def _hole_verdicts(readings, holes) -> str:
@@ -5268,7 +5285,7 @@ def _block(data: dict, message: str, progress) -> None:
     its helper), never repeated here (review 2026-11-04, B3).
     """
     data["_pin_map_conflict"] = (message + " " + tx(
-        "Nessuna domanda puo' chiudere il caso: non c'e' una seconda disposizione completa "
+        "Nessuna domanda può chiudere il caso: non c'è una seconda disposizione completa "
         "fra cui scegliere."))
     data["_numbering_note"] = data["_pin_map_conflict"]
     if progress:
@@ -5548,7 +5565,7 @@ def _weakening_text(verdict, pads: dict) -> str:
               holes=_hole_text(verdict, pads))
     misplaced = getattr(verdict, "misplaced_pad", None)
     if misplaced is not None and str(misplaced) in {str(n) for n in pads}:
-        text += "; " + tx("il pad {pad} e' il piu' lontano dai fori", pad=misplaced)
+        text += "; " + tx("il pad {pad} è il più lontano dai fori", pad=misplaced)
     error, tolerance = getattr(verdict, "max_error_mm", None), getattr(verdict, "tolerance_mm", None)
     if isinstance(error, (int, float)) and isinstance(tolerance, (int, float)):
         text += "; " + tx("scarto massimo {error:.2f} mm, tolleranza {tolerance:.2f} mm",
@@ -5678,7 +5695,7 @@ def _block_or_ask(data: dict, pins: list, readings: list, holes, factor: float, 
         distinct.append([[extra.get("source", HOLES_SOURCE)], extra["pads"], extra["spans"],
                          extra["centred"]])
     if impossible:
-        excluded = tx("Disposizioni escluse dalla domanda perche' mettono due pad nello stesso "
+        excluded = tx("Disposizioni escluse dalla domanda perché mettono due pad nello stesso "
                       "punto: {sources}.", sources="; ".join(
                           f"{_reading_source(key)} ({', '.join(f'{a}-{b}' for a, b in pairs)})"
                           for key, pairs in impossible))
@@ -5687,7 +5704,7 @@ def _block_or_ask(data: dict, pins: list, readings: list, holes, factor: float, 
     if len(distinct) < (1 if contradicted or impossible or agreed or last_resort is not None
                         else 2):
         if refuted:
-            remark = remark + " " + tx("Disposizioni escluse dalla domanda perche' smentite dai fori "
+            remark = remark + " " + tx("Disposizioni escluse dalla domanda perché smentite dai fori "
                                        "disegnati: {sources}.",
                                        sources=", ".join(_reading_source(k) for k in refuted))
         withheld = []
@@ -5802,7 +5819,7 @@ def _block_or_ask(data: dict, pins: list, readings: list, holes, factor: float, 
         options.append({"label": tx("Lascia bloccato: inserisco le posizioni a mano in «Piazzole "
                                     "del componente THT»"), "value": block_value})
         candidates[block_value] = {"kind": LAYOUT_BLOCK_KIND}
-        text = tx("{message} Nessuna lettura e' confermata: quale disposizione corrisponde al "
+        text = tx("{message} Nessuna lettura è confermata: quale disposizione corrisponde al "
                   "disegno, oppure lasciarla bloccata?", message=message)
     elif len(distinct) == 1:
         # With `contradicted`, `agreed`, or once impossible layouts were
@@ -5838,10 +5855,10 @@ def _block_or_ask(data: dict, pins: list, readings: list, holes, factor: float, 
     data.pop("_pin_map_conflict", None)
     data["package_geometry"]["needs_review"] = True
     if len(distinct) == 1:
-        asked = tx("La conferma della disposizione letta e' chiesta all'utente; fino alla "
+        asked = tx("La conferma della disposizione letta è chiesta all'utente; fino alla "
                    "risposta restano le coordinate della risposta principale, da verificare.")
     else:
-        asked = tx("La scelta fra le {count} disposizioni lette e' chiesta all'utente; fino alla "
+        asked = tx("La scelta fra le {count} disposizioni lette è chiesta all'utente; fino alla "
                    "risposta restano le coordinate della risposta principale, da verificare.",
                    count=len(distinct))
     confirmed = [keys for keys, pads, _spans, _centred in distinct
@@ -5909,7 +5926,7 @@ def _settle_by_holes(data: dict, pins: list, readings: list, holes, factor: floa
         if ratio is not None:
             _block(data, tx("I fori disegnati confermano la forma di una lettura ({source}), ma "
                             "un'altra lettura ha la stessa forma in scala {ratio:.3f}: i fori non "
-                            "dicono quale scala e' giusta (unita' di misura o quote lette male).",
+                            "dicono quale scala è giusta (unità di misura o quote lette male).",
                             source=_reading_source(key), ratio=ratio) + remark, progress)
             return "blocked"
     spans, centred = next((s, c) for k, _p, s, c in readings if k == key)
@@ -5936,10 +5953,10 @@ def _settle_by_holes(data: dict, pins: list, readings: list, holes, factor: floa
         return key
     _settle(data, tx("Posizioni dei pad scelte dal controllo dei fori disegnati. Lettura "
                      "usata: {source} ({holes}); nessun'altra lettura coincide con i fori "
-                     "({why}). I fori verificano le posizioni, non i numeri dei pad ne' la vista "
+                     "({why}). I fori verificano le posizioni, non i numeri dei pad né la vista "
                      "dichiarata ({view}): controllarli sul disegno.",
                      source=_reading_source(key), holes=_hole_text(verdict), why=why,
-                     view=view) + remark, progress)
+                     view=_view_label(view)) + remark, progress)
     return key
 
 
@@ -6009,8 +6026,8 @@ def _settle_by_measure(data: dict, pins: list, readings: list, holes, factor: fl
                      "({why}).", image=result.image, error=result.max_error_mm,
                      tolerance=result.tolerance_mm, source=_reading_source(key), why=why)
             + _moved_pad_text(result, positions)
-            + " " + tx("I fori danno le posizioni, non i numeri dei pad ne' la vista "
-                       "dichiarata ({view}): controllarli sul disegno.", view=view)
+            + " " + tx("I fori danno le posizioni, non i numeri dei pad né la vista "
+                       "dichiarata ({view}): controllarli sul disegno.", view=_view_label(view))
             + remark, progress)
     return key
 
@@ -6018,7 +6035,7 @@ def _settle_by_measure(data: dict, pins: list, readings: list, holes, factor: fl
 def _moved_pad_text(result, positions: dict) -> str:
     """The sentence naming the pad a measure moved onto the only free hole, where it was read and where it went."""
     return tx(" Il pad {pad} letto in ({x:.2f}, {y:.2f}) mm non cadeva su un foro: spostato "
-              "sull'unico foro libero, in ({nx:.2f}, {ny:.2f}) mm; la coordinata corretta e' "
+              "sull'unico foro libero, in ({nx:.2f}, {ny:.2f}) mm; la coordinata corretta è "
               "STIMATA dai pixel del disegno, da verificare.", pad=result.moved,
               x=result.moved_from_mm[0], y=result.moved_from_mm[1],
               nx=positions[str(result.moved)][0], ny=positions[str(result.moved)][1])
@@ -6285,7 +6302,7 @@ def _contradiction_text(contradiction: dict, alternatives: bool = False) -> str:
               "disposizione ({holes})", holes=_hole_text(verdict))
     misplaced = contradiction.get("misplaced")
     if misplaced is not None:
-        text += "; " + tx("il pad {pad} e' il piu' lontano dai fori", pad=misplaced)
+        text += "; " + tx("il pad {pad} è il più lontano dai fori", pad=misplaced)
     return text
 
 
@@ -6552,8 +6569,8 @@ def _resolve_chain_candidate(data: dict, pins: list, main: dict, reading: dict,
             # summed. Only a closed dedicated reading, or the drawn holes,
             # may side with the model's own sums.
             extra = tx("Lettura dedicata ({view}): {dedicated}. Concorda con le coordinate "
-                       "calcolate dal modello, ma non e' chiusa sul contorno del corpo: non "
-                       "basta a preferirle alle catene di quote.", view=reading["view"],
+                       "calcolate dal modello, ma non è chiusa sul contorno del corpo: non "
+                       "basta a preferirle alle catene di quote.", view=_view_label(reading["view"]),
                        dedicated=summary)
             return _block_chain_conflict(data, pins, readings, holes, factor, extra, remark,
                                          progress)
@@ -6563,12 +6580,14 @@ def _resolve_chain_candidate(data: dict, pins: list, main: dict, reading: dict,
                   tolerance=tolerance)
     elif not complete:
         extra = tx("Lettura dedicata ({view}): {dedicated}. Incompleta o con vista diversa "
-                   "dalla risposta principale: non basta a decidere.", view=reading["view"],
+                   "dalla risposta principale: non basta a decidere.",
+                   view=_view_label(reading["view"]),
                    dedicated=summary)
         return _block_chain_conflict(data, pins, readings, holes, factor, extra, remark, progress)
     else:
-        extra = tx("Lettura dedicata ({view}): {dedicated}. Non concorda ne' con le coordinate "
-                   "del modello ne' con le sue catene di quote.", view=reading["view"],
+        extra = tx("Lettura dedicata ({view}): {dedicated}. Non concorda né con le coordinate "
+                   "del modello né con le sue catene di quote.",
+                   view=_view_label(reading["view"]),
                    dedicated=summary)
         return _block_chain_conflict(data, pins, readings, holes, factor, extra, remark, progress)
     _settle(data, note + remark, progress)
@@ -7076,9 +7095,9 @@ def apply_dedicated_pads(data: dict, reading: Optional[dict], progress=None,
                                 x_source=_reading_source(axis_from["x"]),
                                 y_source=_reading_source(axis_from["y"]),
                                 holes=_hole_text(verdict, pads)) + ". " + tx(
-                        "I fori danno le posizioni, non i numeri dei pad ne' la vista "
+                        "I fori danno le posizioni, non i numeri dei pad né la vista "
                         "dichiarata ({view}): controllarli sul disegno.",
-                        view=declared_view or "unknown")})
+                        view=_view_label(declared_view))})
         # A reading the drawn holes already confirm settles the pads by the
         # usual rule (`_settle_by_holes`): no re-read is paid for then.
         settled = any(_holes_confirm(holes(pads)) for pads in at_hand[:-1] if pads)
@@ -7118,7 +7137,8 @@ def apply_dedicated_pads(data: dict, reading: Optional[dict], progress=None,
         _withdraw_dedicated_holes(data)
         why = tx("le quote del disegno non tornano: {problems}. Lettura per catene di quote "
                  "({dedicated_view}): {dedicated}", problems="; ".join(problems[:6]),
-                 dedicated_view=reading["view"], dedicated=_pad_summary(dedicated) or tx("nessuno"))
+                 dedicated_view=_view_label(reading["view"]),
+                 dedicated=_pad_summary(dedicated) or tx("nessuno"))
         # A recombination is offered beside the readings, never adopted:
         # recommended only when the drawn holes confirm it
         # (`_flag_sole_confirmed`). Without one, the last resort offers the
@@ -7131,7 +7151,7 @@ def apply_dedicated_pads(data: dict, reading: Optional[dict], progress=None,
         return
     remarks = []
     if repeated:
-        remarks.append(tx("catene non verificate: piu' pad con lo stesso numero ({numbers})",
+        remarks.append(tx("catene non verificate: più pad con lo stesso numero ({numbers})",
                           numbers=", ".join(sorted(repeated))))
     if exchanged:
         remarks.append(_exchanged_body_remark(reading))
@@ -7172,7 +7192,7 @@ def apply_dedicated_pads(data: dict, reading: Optional[dict], progress=None,
     if views_differ:
         offer["refused"] = tx("le due letture dichiarano viste diverse")
     elif repeated:
-        offer["refused"] = tx("piu' pad con lo stesso numero")
+        offer["refused"] = tx("più pad con lo stesso numero")
     elif reading.get("unplaced"):
         offer["refused"] = tx("la lettura dedicata non ha posizionato i pad {pads}",
                               pads=", ".join(sorted(reading["unplaced"], key=_pad_number_key)))
@@ -7269,7 +7289,7 @@ def apply_dedicated_pads(data: dict, reading: Optional[dict], progress=None,
                 # silent, not two agreeing).
                 _adopt_view(data, reading["view"], tx("lettura dedicata, sola a dichiararla"))
                 note += " " + tx("Vista dei terminali ({view}) dichiarata dalla sola lettura "
-                                 "dedicata.", view=reading["view"])
+                                 "dedicata.", view=_view_label(reading["view"]))
             spans = reading.get("spans") or {}
             if geometry.get("origin") == "body_center":
                 # A frame the main answer declared is kept; the reading's edge
@@ -7296,8 +7316,8 @@ def apply_dedicated_pads(data: dict, reading: Optional[dict], progress=None,
              "{pairs}. Risposta principale ({main_view}): {main}. Lettura dedicata "
              "({dedicated_view}): {dedicated}",
              views=tx(" (e dichiarano viste diverse)") if views_differ else "",
-             pairs=_offset_pairs(disagreements) or tx("nessuna"), main_view=main_view or "unknown",
-             dedicated_view=reading["view"], main=_pad_summary(main),
+             pairs=_offset_pairs(disagreements) or tx("nessuna"), main_view=_view_label(main_view),
+             dedicated_view=_view_label(reading["view"]), main=_pad_summary(main),
              dedicated=_pad_summary(dedicated))
     if _settle_by_holes(data, pins, readings, holes, factor, progress, why, remark):
         return
@@ -7308,7 +7328,7 @@ def apply_dedicated_pads(data: dict, reading: Optional[dict], progress=None,
     _block_or_ask(data, pins, offered, holes, factor,
                   why + ". " + tx("Controllo dei fori disegnati: {verdicts}.",
                                   verdicts=_hole_verdicts(readings, holes))
-                  + " " + tx("Nessuna delle due e' stata scelta."), progress, remark, offer=offer)
+                  + " " + tx("Nessuna delle due è stata scelta."), progress, remark, offer=offer)
 
 
 def _keep_blocked(data: dict, message: str, progress) -> None:
@@ -7361,7 +7381,7 @@ def _ask_last_resort(data, pins, readings, holes, factor, message, progress, las
     options.append({"label": tx("Lascia bloccato: inserisco le posizioni a mano in «Piazzole del "
                                 "componente THT»"), "value": block_value})
     candidates[block_value] = {"kind": LAYOUT_BLOCK_KIND}
-    text = tx("{message} Nessuna lettura e' confermata: quale disposizione corrisponde al disegno, "
+    text = tx("{message} Nessuna lettura è confermata: quale disposizione corrisponde al disegno, "
               "oppure lasciarla bloccata?", message=message)
     chosen = _ask(data, "pad_layout", text, options, _question_evidence(data), candidates)
     if chosen is None:
@@ -7665,7 +7685,7 @@ def _offer_pad_set_change(data: dict, pins: list, offer: dict, holes, factor: fl
     numbers = set(listed)
     pads = offer.get("pads") or {}
     if len(listed) != len(numbers):
-        why.append(tx("piu' pad con lo stesso numero"))
+        why.append(tx("più pad con lo stesso numero"))
         return False
     if holes.views_differ:
         why.append(tx("le due letture dichiarano viste diverse"))
@@ -7800,7 +7820,7 @@ def _offer_pad_set_change(data: dict, pins: list, offer: dict, holes, factor: fl
             # re-audit, H3): no unmatched hole NEAR the read layout -- a row
             # farther away is not covered, so «every hole checked» is never said.
             changes.append(tx("nessun foro disegnato non abbinato vicino alla disposizione letta; "
-                              "le file piu' lontane non sono controllate"))
+                              "le file più lontane non sono controllate"))
             # Named even when the holes confirm the reading (C3).
             changes.append(tx("{count} delle {total} posizioni della risposta principale non hanno "
                               "un pad nella lettura dedicata e spariscono, con i loro pin di pinout "
@@ -7816,13 +7836,13 @@ def _offer_pad_set_change(data: dict, pins: list, offer: dict, holes, factor: fl
         changes.append(tx("aggiunge i pad {pads}, che la risposta principale non ha",
                           pads=", ".join(added)))
     if placed:
-        changes.append(tx("da' una posizione ai pad {pads}, che la risposta principale non ha "
+        changes.append(tx("dà una posizione ai pad {pads}, che la risposta principale non ha "
                           "letto", pads=", ".join(placed)))
     summary = "; ".join(changes)
     text = tx("Posizioni dei pad: {message} Solo la lettura dedicata descrive tutti i pad in modo "
               "coerente con le quote stampate (fori disegnati: {holes}). Usarla {changes}. Il "
-              "controllo dei fori non puo' provare che un pad manchi o non esista, quindi la "
-              "disposizione non e' adottata da sola: usare questa disposizione?",
+              "controllo dei fori non può provare che un pad manchi o non esista, quindi la "
+              "disposizione non è adottata da sola: usare questa disposizione?",
               message=message + remark, holes=_hole_text(verdict), changes=summary)
     options = [{"label": tx("Usa la lettura dedicata ({count} pad, fori disegnati: {holes}): {pads}",
                             count=len(pads), holes=_hole_text(verdict, pads),
@@ -7874,8 +7894,8 @@ def _offer_pad_set_change(data: dict, pins: list, offer: dict, holes, factor: fl
     data.pop("_pin_map_conflict", None)
     data["package_geometry"]["needs_review"] = True
     data["_numbering_note"] = message + remark + " " + tx(
-        "La disposizione della lettura dedicata e' proposta all'utente; fino alla risposta nessun "
-        "pad e' aggiunto o tolto e restano le coordinate della risposta principale, da verificare.")
+        "La disposizione della lettura dedicata è proposta all'utente; fino alla risposta nessun "
+        "pad è aggiunto o tolto e restano le coordinate della risposta principale, da verificare.")
     if progress:
         progress(data["_numbering_note"])
     return True
@@ -8148,7 +8168,7 @@ def _ask_hole_or_terminal(data: dict, found: dict, derived: dict, notes: list) -
                                                    "shape", "sources")}
         hole_value = f"{HOLE_OR_TERMINAL_KIND}:{group}@{drill:g}/{lead:g}=hole"
         lead_value = f"{HOLE_OR_TERMINAL_KIND}:{group}@{drill:g}/{lead:g}=terminal"
-        options = [{"label": tx("Il foro: Ø{drill:.2f} mm e' il foro dei pad {pads}",
+        options = [{"label": tx("Il foro: Ø{drill:.2f} mm è il foro dei pad {pads}",
                                 drill=drill, pads=", ".join(pads)), "value": hole_value},
                    {"label": tx("Il terminale: il foro dei pad {pads} si ricava dal terminale "
                                 "(Ø{hole:.2f} mm, stimato)", pads=", ".join(pads),
@@ -8159,12 +8179,12 @@ def _ask_hole_or_terminal(data: dict, found: dict, derived: dict, notes: list) -
                       lead_value: {"kind": HOLE_OR_TERMINAL_KIND, "pads": pads,
                                    "choice": "terminal", "changes": changes,
                                    "supersedes": [conflict]}}
-        text = (tx("Pad {pads}: Ø{drill:.2f} mm del disegno e' il foro o il terminale? Letto come "
+        text = (tx("Pad {pads}: Ø{drill:.2f} mm del disegno è il foro o il terminale? Letto come "
                    "foro non lascia passare il terminale letto per gli stessi pad: le due letture "
                    "possono riguardare la stessa quota.", pads=", ".join(pads), drill=drill)
                 if abs(drill - lead) < 1e-9 else
                 tx("Pad {pads}: Ø{drill:.2f} mm letto come foro e Ø{lead:.2f} mm letto come "
-                   "terminale sono la stessa quota letta due volte? E' il foro o il terminale?",
+                   "terminale sono la stessa quota letta due volte? È il foro o il terminale?",
                    pads=", ".join(pads), drill=drill, lead=lead))
         # An answer saved under the first key (grouped by the hole only,
         # night4) is about the same printed value: it still applies.
@@ -8185,8 +8205,8 @@ def _ask_hole_or_terminal(data: dict, found: dict, derived: dict, notes: list) -
                 if isinstance(pin.get("lead"), dict):
                     sources["lead"] = "contradicted"
                 pin["sources"] = sources
-            notes.append(tx("Pad {pads}: Ø{drill:.2f} mm e' il foro, scelto dall'utente; il "
-                            "terminale letto e' da verificare sul disegno.",
+            notes.append(tx("Pad {pads}: Ø{drill:.2f} mm è il foro, scelto dall'utente; il "
+                            "terminale letto è da verificare sul disegno.",
                             pads=", ".join(pads), drill=drill))
             continue
         for pin, lifted in members:
@@ -8280,7 +8300,7 @@ def _apply_reading_leads(geometry: dict, leads: dict, notes: list, holes=None) -
         elif terminal is not None and sources.get("drill_mm") != "read":
             _lift_pad_hole(pin, estimated_round_pad(terminal).drill_mm, {})
     if changed:
-        notes.append(tx("Terminali presi dalla lettura dedicata, di cui e' stata adottata la "
+        notes.append(tx("Terminali presi dalla lettura dedicata, di cui è stata adottata la "
                         "disposizione: la risposta principale assegnava ai pad terminali diversi "
                         "({details}). Valori STIMATI da verificare sul disegno.",
                         details="; ".join(changed)))
@@ -8309,11 +8329,11 @@ def _apply_hole_or_terminal_choice(geometry: dict, payload: dict, notes: list) -
                 pin[key] = copy.deepcopy(value)
         pin.pop("drill_length_mm", None)
     if payload.get("choice") == "hole":
-        notes.append(tx("Pad {pads}: il diametro stampato e' il foro, scelto dall'utente; il "
-                        "terminale letto e' da verificare sul disegno.",
+        notes.append(tx("Pad {pads}: il diametro stampato è il foro, scelto dall'utente; il "
+                        "terminale letto è da verificare sul disegno.",
                         pads=", ".join(sorted(pads, key=_pad_number_key))))
         return None
-    notes.append(tx("Pad {pads}: il diametro stampato e' il terminale, scelto dall'utente: foro e "
+    notes.append(tx("Pad {pads}: il diametro stampato è il terminale, scelto dall'utente: foro e "
                     "piazzola ricavati dal terminale, valori STIMATI da verificare.",
                     pads=", ".join(sorted(pads, key=_pad_number_key))))
     return _cross_pad_problem(geometry)
@@ -8423,9 +8443,9 @@ def _ask_pad_holes(data: dict, geometry, notes: list, donors=None):
     block = f"{PAD_HOLE_KIND}:{group}=block"
     options.append({"label": tx("Lascia bloccato: il foro va letto sul disegno"), "value": block})
     candidates[block] = {"kind": PAD_HOLE_KIND, "pads": asked, "block": True}
-    text = (tx("Pad {pads}: il disegno non stampa il foro e nessun terminale e' dichiarato, quindi "
-               "il programma non puo' ricavarlo. Che cosa fare?", pads=", ".join(asked))
-            + (" " + tx("Nessun altro pad del componente ha un foro stampato: nessun valore e' "
+    text = (tx("Pad {pads}: il disegno non stampa il foro e nessun terminale è dichiarato, quindi "
+               "il programma non può ricavarlo. Che cosa fare?", pads=", ".join(asked))
+            + (" " + tx("Nessun altro pad del componente ha un foro stampato: nessun valore è "
                         "proposto.") if not printed else ""))
     chosen = _ask(data, "pad_layout", text, options, _question_evidence(data), candidates)
     if chosen is None:
@@ -8522,7 +8542,7 @@ def _hold_holeless_pads(result, target: dict, payload: dict, dropped, notes: lis
     result.unread_pad_geometry = target
     result.unread_pads = list(holeless)
     block = tx("Foro dei pad {pads} non stampato e terminale non dichiarato: nessun footprint "
-               "finche' il foro non e' letto dal disegno o scelto nella domanda sui pad senza "
+               "finché il foro non è letto dal disegno o scelto nella domanda sui pad senza "
                "foro.", pads=", ".join(holeless))
     result.pin_map_conflict = block
     _drop_pinout_pads(result, dropped, renumbered=bool(payload.get("convention")))
@@ -8532,7 +8552,7 @@ def _hold_holeless_pads(result, target: dict, payload: dict, dropped, notes: lis
                     source=_reading_source(payload.get("source") or "main")))
     if not keep:
         notes.append(tx("Pad {pads} aggiunti dalla disposizione scelta senza un foro stampato per "
-                        "loro: nessun foro preso dagli altri pad, il foro e' chiesto a parte.",
+                        "loro: nessun foro preso dagli altri pad, il foro è chiesto a parte.",
                         pads=", ".join(holeless)))
     return True
 
@@ -8702,7 +8722,7 @@ def _replace_by_confirmed_reading(data, pins, main, reading, holes, factor, prog
         return False
     verdict = chosen[2]
     why = (tx("era una convenzione, non letta dal disegno") if convention else
-           tx("ha meno pad della lettura confermata: le manca un terminale, se il pad in piu' e' "
+           tx("ha meno pad della lettura confermata: le manca un terminale, se il pad in più è "
               "davvero un terminale (il riscontro verifica le posizioni, non la natura di ogni foro)")
            if incomplete else
            tx("non ha almeno due numeri in comune con quella letta"))
@@ -8786,7 +8806,7 @@ def _replace_by_confirmed_reading(data, pins, main, reading, holes, factor, prog
     if not convention:
         _settle(data, tx("Elenco dei pad sostituito dalla lettura dedicata ({new}): posizioni "
                          "confermate da un riscontro geometrico indipendente ({holes}); la "
-                         "numerazione della risposta principale ({old}) {why}. I pad gia' letti "
+                         "numerazione della risposta principale ({old}) {why}. I pad già letti "
                          "tengono i loro valori; i pad aggiunti ({added}) non prendono il foro "
                          "dagli altri pad. Il riscontro verifica le posizioni, non i numeri: "
                          "controllare i numeri dei pad sul disegno.", new=new,
@@ -8916,17 +8936,17 @@ def _require_declared_view(data: dict, progress=None) -> None:
     # shortcut, the view is asked (L11).
     if factor is not None and _mirror_equivalent(pads, PAD_READING_TOLERANCE_MM):
         data["notes"] = (str(data.get("notes") or "") + "\n" + tx(
-            "Vista dei terminali non dichiarata: la disposizione numerata dei pad e' uguale alla "
-            "sua immagine speculare, il footprint e' lo stesso da sopra e da sotto.")).strip()
+            "Vista dei terminali non dichiarata: la disposizione numerata dei pad è uguale alla "
+            "sua immagine speculare, il footprint è lo stesso da sopra e da sotto.")).strip()
         return
     chosen = _ask(data, "contacts_view", tx(
         "Le due letture dichiarano viste diverse (dall'alto e dal basso) per la stessa "
-        "disposizione dei pad, che non e' simmetrica: se il disegno e' una vista dal basso il "
-        "footprint risulta SPECCHIATO. Da quale lato e' disegnata la disposizione dei pad?")
+        "disposizione dei pad, che non è simmetrica: se il disegno è una vista dal basso il "
+        "footprint risulta SPECCHIATO. Da quale lato è disegnata la disposizione dei pad?")
         if data.get("_views_withdrawn") else tx(
         "Il documento non dice se i pad sono visti dall'alto o dal basso e la loro disposizione "
-        "numerata non e' simmetrica: se il disegno e' una vista dal basso il footprint risulta "
-        "SPECCHIATO. Da quale lato e' disegnata la disposizione dei pad?"),
+        "numerata non è simmetrica: se il disegno è una vista dal basso il footprint risulta "
+        "SPECCHIATO. Da quale lato è disegnata la disposizione dei pad?"),
         [{"label": tx("Dall'alto (lato componente)"), "value": "top"},
          {"label": tx("Dal basso (lato saldature, bottom view)"), "value": "bottom"}],
         # Keyed on the numbered LAYOUT (signed offsets), not the numbers
@@ -8967,7 +8987,7 @@ def _require_declared_view(data: dict, progress=None) -> None:
         if progress:
             progress(message)
         return
-    message = tx("Vista dei terminali non dichiarata e disposizione non simmetrica: il lato e' "
+    message = tx("Vista dei terminali non dichiarata e disposizione non simmetrica: il lato è "
                  "chiesto all'utente; fino alla risposta i pad restano come letti.")
     data["notes"] = (str(data.get("notes") or "") + "\n" + message).strip()
     if progress:
@@ -8992,7 +9012,7 @@ def _candidate_view_outcome(data: dict, payload: dict) -> None:
     if scratch.get("contacts_view") in ("top", "bottom"):
         payload["view"] = scratch["contacts_view"]
         notes.append(tx("Vista dei terminali ({view}) scelta dall'utente.",
-                        view=scratch["contacts_view"]))
+                        view=_view_label(scratch["contacts_view"])))
     questions = [q for q in scratch.get("_questions") or () if q.get("field") == "contacts_view"]
     if questions:
         payload["view_question"] = questions[0]
@@ -9369,7 +9389,7 @@ def apply_dedicated_numbering(data: dict, reading: Optional[dict], progress=None
             "{main}. Lettura dedicata del disegno ({dedicated_view}, usata): {dedicated}. "
             "Controlla il footprint sul disegno: accettala rigenerando footprint e modello STEP, "
             "oppure ripeti l'analisi.",
-            main_view=main_view or "unknown", dedicated_view=reading["view"],
+            main_view=_view_label(main_view), dedicated_view=_view_label(reading["view"]),
             main=_numbering_summary([{"pin": p, "row": r, "col": c} for p, (r, c) in main.items()])
             or tx("nessuna"),
             dedicated=_numbering_summary(reading["pins"]))
@@ -9831,7 +9851,7 @@ def _contradicting_grid_fallback(grid: dict, answer: dict, reason: str) -> Optio
     rebuilt["pads"] = pads
     rebuilt["pads_origin"] = answer.get("pads_origin") or "custom"
     data = single_answer_to_data(rebuilt)
-    note = tx("Griglia della risposta principale scartata perche' si contraddice ({reason}): "
+    note = tx("Griglia della risposta principale scartata perché si contraddice ({reason}): "
               "tenuti i numeri stampati dei pad ({numbers}) senza le posizioni della griglia; le "
               "posizioni vengono dalle catene di quote o dalla lettura dedicata.",
               reason=reason, numbers=", ".join(numbers))
@@ -9984,7 +10004,7 @@ def _place_pins_from_chains(data: dict, chains, midpoints=None) -> None:
     problems, exchanged = _chain_contradictions(geometry, solved, factor)
     reasons = problems + list(solved["malformed"])
     if len(set(numbers)) != len(numbers):
-        reasons.append(tx("piu' pad con lo stesso numero"))
+        reasons.append(tx("più pad con lo stesso numero"))
     if missing:
         reasons.append(tx("terminali non raggiunti dalle catene: {numbers}",
                           numbers=", ".join(missing)))
@@ -10024,7 +10044,7 @@ def _place_pins_from_chains(data: dict, chains, midpoints=None) -> None:
     data["_pin_map_conflict"] = tx(
         "Le coordinate dei pad calcolate dal modello non coincidono con le sue catene di quote "
         "sommate dal programma. Scostamenti diversi: {pairs}. Coordinate del modello: {main}. "
-        "Somme delle catene: {chains}. Nessuna delle due e' stata scelta: decide la lettura "
+        "Somme delle catene: {chains}. Nessuna delle due è stata scelta: decide la lettura "
         "dedicata, se concorda con una delle due; altrimenti controlla il disegno.",
         pairs=_offset_pairs(disagreements) or tx("nessuna"), main=_pad_summary(before),
         chains=_pad_summary(solved["pads"]))
@@ -10048,7 +10068,8 @@ def _deferred_view_question(result, payload: dict, answers: dict, remaining: lis
     answer = answers.get(question["key"]) if isinstance(answers, dict) else None
     if geometry is not None and answer is not None and str(answer) in allowed:
         geometry["source_view"] = allowed[str(answer)]
-        notes.append(tx("Vista dei terminali ({view}) scelta dall'utente.", view=allowed[str(answer)]))
+        notes.append(tx("Vista dei terminali ({view}) scelta dall'utente.",
+                        view=_view_label(allowed[str(answer)])))
         return
     if not any(q.get("key") == question["key"] for q in remaining):
         remaining.append(dict(question))
@@ -10128,7 +10149,8 @@ def apply_answers(params: ExtractedParams, answers: dict) -> ExtractedParams:
         geometry = result.package_geometry if isinstance(result.package_geometry, dict) else None
         if field_name == "contacts_view" and geometry is not None:
             geometry["source_view"] = value
-            notes.append(tx("Vista dei terminali ({view}) scelta dall'utente.", view=value))
+            notes.append(tx("Vista dei terminali ({view}) scelta dall'utente.",
+                            view=_view_label(value)))
         elif field_name == "body_height_mm":
             height = _optional_number(value, positive=True)
             if height is None:
@@ -10637,7 +10659,7 @@ def reread_body_height(stored: dict, documents, *, model: str, call, progress=No
         data["_pin_map_conflict"] = tx(
             "Rilettura delle sole quote verticali del corpo: le posizioni dei pad di questo "
             "risultato sono quelle della risposta principale, non riconfrontate. Valgono le "
-            "posizioni gia' stabilite dall'analisi.")
+            "posizioni già stabilite dall'analisi.")
         data["_numbering_note"] = data["_pin_map_conflict"]
     _canonicalize_answer(data)
     params = _params_from_tool_arguments(data)
@@ -10746,7 +10768,7 @@ def reread_pad_positions(stored: dict, documents, *, model: str, call, progress=
         # `merge_reread` keeps the settled body quotes instead.
         data["_body_conflict"] = tx(
             "Rilettura delle sole posizioni dei pad: le quote del corpo di questo risultato sono "
-            "quelle della risposta principale, non riconfrontate. Valgono le quote gia' stabilite "
+            "quelle della risposta principale, non riconfrontate. Valgono le quote già stabilite "
             "dall'analisi.")
     _canonicalize_answer(data)
     params = _params_from_tool_arguments(data)
@@ -11396,7 +11418,7 @@ def _note_pinout_name_problems(data: dict, progress=None) -> None:
     if not problems:
         return
     line = tx("Pinout da rivedere: {summary}. Nomi lasciati come li ha dati l'analisi: nella scheda "
-              "«Simbolo elettrico» lascia nel nome solo il segnale come e' stampato.",
+              "«Simbolo elettrico» lascia nel nome solo il segnale come è stampato.",
               summary=_pinout_name_summary(problems))
     data["notes"] = (str(data.get("notes") or "") + "\n" + line).strip()
     if progress:
@@ -12109,7 +12131,7 @@ def _file_to_content_block(path: Path, model: Optional[str] = None) -> dict:
                     name=path.name)) from exc
             raise ExtractionError(tx(
                 "{name}: immagine che il programma non riesce a leggere; non viene inviata "
-                "all'AI perche' i suoi metadati (posizione GPS, dispositivo) non si possono "
+                "all'AI perché i suoi metadati (posizione GPS, dispositivo) non si possono "
                 "rimuovere. Salvala come JPEG o PNG e riprova.", name=path.name)) from exc
     elif media_type == "application/pdf":
         try:
@@ -12293,7 +12315,7 @@ def _pin_map_seen_from_top(
     if not pin_map:
         return None
     if not isinstance(pin_map, (list, tuple)):
-        raise ExtractionError(tx("pin_map non e' un elenco di posizioni."))
+        raise ExtractionError(tx("pin_map non è un elenco di posizioni."))
     entries = []
     pins, positions = {}, {}
     for index, raw in enumerate(pin_map, 1):
@@ -12312,7 +12334,7 @@ def _pin_map_seen_from_top(
                                      "dalla matrice {rows}x{cols}.", pin=pin, row=row, col=col,
                                      rows=rows if rows is not None else "?", cols=cols))
         if _pin_text(pin) in pins:
-            raise ExtractionError(tx("pin_map: il pin {pin} compare piu' volte.", pin=pin))
+            raise ExtractionError(tx("pin_map: il pin {pin} compare più volte.", pin=pin))
         if (row, col) in positions:
             raise ExtractionError(tx("pin_map: i pin {pin} e {other} occupano la stessa "
                                      "posizione.", pin=pin, other=positions[(row, col)]))
@@ -12374,7 +12396,7 @@ def _declared_unit_factor(data) -> Optional[float]:
 
 def _undeclared_unit_reason() -> str:
     """The reason of a reading set aside because its drawing unit is not declared."""
-    return tx("unita' non dichiarata")
+    return tx("unità non dichiarata")
 
 _PACKAGE_LENGTH_KEYS = ("body_length_mm", "body_width_mm", "body_height_mm")
 _PACKAGE_PIN_LENGTH_KEYS = ("x_mm", "y_mm", "pad_length_mm", "pad_width_mm", "drill_mm",
@@ -12485,9 +12507,9 @@ def _unit_doubt(data: dict, layout: str) -> Optional[str]:
     if not suspicious:
         return None
     label, pitch = min(suspicious, key=lambda item: item[1])
-    return tx("DUBBIO unita' di misura: {label} vale {pitch:g} mm, meno del passo piu' fine "
-              "dei package reali (circa 0.3 mm). Se il disegno e' in pollici varrebbe "
-              "{inch:.4g} mm: verificare l'unita' del disegno e ripetere l'analisi. Nessuna "
+    return tx("DUBBIO unità di misura: {label} vale {pitch:g} mm, meno del passo più fine "
+              "dei package reali (circa 0.3 mm). Se il disegno è in pollici varrebbe "
+              "{inch:.4g} mm: verificare l'unità del disegno e ripetere l'analisi. Nessuna "
               "conversione applicata.", label=label, pitch=pitch, inch=pitch * 25.4)
 
 
@@ -12567,14 +12589,14 @@ def _canonicalize_answer(data: dict) -> None:
         # The schema requires the unit; a missing one is read as mm, but
         # SAID, like an unknown one, and its provenance is kept as
         # undeclared for _value_sources (review S6, 2026-11-03).
-        notes.append(tx("DUBBIO unita' di misura non dichiarata: quote trattate come "
+        notes.append(tx("DUBBIO unità di misura non dichiarata: quote trattate come "
                         "millimetri, da verificare."))
         data["_unit_undeclared"] = True
         unit = "mm"
     elif not isinstance(unit, str) or unit not in _UNIT_TO_MM:
         # A unit that is not text (a list, an object: unhashable, V1-10) is
         # an unknown unit like any other, never a TypeError.
-        notes.append(tx("DUBBIO unita' di misura {unit!r} non riconosciuta: quote trattate come "
+        notes.append(tx("DUBBIO unità di misura {unit!r} non riconosciuta: quote trattate come "
                         "millimetri, da verificare.", unit=unit))
         data["_unit_undeclared"] = True
         unit = "mm"
@@ -13447,7 +13469,7 @@ def extract_pin_header_params(
                     _log_unreadable_arguments(second, progress, 2)
                     raise ExtractionError(
                         tx("Anche il nuovo tentativo ha restituito argomenti illeggibili; il testo "
-                           "delle due risposte e' nel log AI (righe AI_RESPONSE_UNREADABLE). {exc}",
+                           "delle due risposte è nel log AI (righe AI_RESPONSE_UNREADABLE). {exc}",
                            exc=second)) from second
                 # The first answer was complete and readable, only its
                 # numbering in doubt: a failed retry never loses it.
@@ -13455,8 +13477,8 @@ def extract_pin_header_params(
                     _log_unreadable_arguments(second, progress, 2)
                 data = exc.fallback
                 if progress:
-                    progress(tx("Analisi dei documenti: il nuovo tentativo non e' riuscito ({exc}); "
-                                "si tiene la prima risposta, la numerazione dei lati verra' "
+                    progress(tx("Analisi dei documenti: il nuovo tentativo non è riuscito ({exc}); "
+                                "si tiene la prima risposta, la numerazione dei lati verrà "
                                 "chiesta.", exc=second))
             except SidePinoutContradiction as second:
                 _log_unreadable_arguments(second, progress, 2)
@@ -13465,8 +13487,8 @@ def extract_pin_header_params(
                 data = second.fallback if isinstance(second.fallback, dict) else exc.fallback
                 if progress:
                     progress(tx("Analisi dei documenti: anche il nuovo tentativo non lega lati e "
-                                "pinout in una sola numerazione ({exc}); si tiene la risposta piu' "
-                                "recente e la numerazione dei lati verra' chiesta.", exc=second))
+                                "pinout in una sola numerazione ({exc}); si tiene la risposta più "
+                                "recente e la numerazione dei lati verrà chiesta.", exc=second))
             except AnswerShapeError as second:
                 _log_unreadable_arguments(second, progress, 2)
                 # Two broken shapes: the usable part of the answer (a
@@ -13478,7 +13500,7 @@ def extract_pin_header_params(
                 if fallback is None:
                     raise ExtractionError(
                         tx("Anche il nuovo tentativo ha restituito una risposta senza la forma "
-                           "richiesta; il testo delle due risposte e' nel log AI (righe "
+                           "richiesta; il testo delle due risposte è nel log AI (righe "
                            "AI_RESPONSE_UNREADABLE). {exc}", exc=second)) from second
                 data = fallback
                 if progress:
@@ -13490,7 +13512,7 @@ def extract_pin_header_params(
                     progress(tx("Analisi dei documenti: nel nuovo tentativo lati e pinout sono una "
                                 "sola numerazione; si usa quello.")
                              if side_numbering else
-                             tx("Analisi dei documenti: il nuovo tentativo e' leggibile; si usa "
+                             tx("Analisi dei documenti: il nuovo tentativo è leggibile; si usa "
                                 "quello."))
     except OpenRouterError as exc:
         raise ExtractionError(str(exc)) from exc
@@ -13825,8 +13847,8 @@ def _recount_refusal(side: dict, old: dict, reply: dict, item, data: dict) -> Op
                   measured=", ".join(f"{c:.2f}" for c in measured))
     shift = row_offset_from(centres, measured, tolerance, float("inf"))
     if abs(shift) > bound:
-        return tx("la fila ricontata e' spostata di {shift:.2f} mm rispetto ai semi-fori "
-                  "misurati, piu' di quanto la calibrazione della foto possa spostarla "
+        return tx("la fila ricontata è spostata di {shift:.2f} mm rispetto ai semi-fori "
+                  "misurati, più di quanto la calibrazione della foto possa spostarla "
                   "({bound:.2f} mm)", shift=shift, bound=bound)
     return None
 
@@ -14003,7 +14025,7 @@ def _keep_clean_sides_unmeasured(data, items, say) -> bool:
             if _side_edge(entry) != item.edge:
                 continue
             message = tx("Lato {label}: la foto non mostra tacche sul bordo e il rame lungo il "
-                         "bordo non si puo' misurare ({reason}): lato tenuto con i {declared} "
+                         "bordo non si può misurare ({reason}): lato tenuto con i {declared} "
                          "contatti dichiarati, da verificare a mano.",
                          label=EDGE_LABELS.get(item.edge, item.edge),
                          reason=item.copper_reason or tx("striscia del bordo non misurabile"),
@@ -14074,7 +14096,7 @@ def _recount_sides_attempt(data, disagreements, content_blocks, diagnostic_call,
         + [f"{EDGE_LABELS.get(item.edge, item.edge)} {item.declared} -> ?"
            for item in unverifiable])
     say(tx("Contatti: la foto non conferma l'analisi ({summary}). Richiesta di ricontarli sugli "
-           "stessi documenti: una chiamata in piu'.", summary=summary))
+           "stessi documenti: una chiamata in più.", summary=summary))
     comparison = "Comparison with the photograph: " + "; ".join(part for part in (facts, doubts) if part)
     blocks = list(content_blocks) + [{"type": "text", "text": (
         comparison + ". Recount on the documents (pinout, dimensioned "
@@ -14236,7 +14258,7 @@ def _edge_problems(raw, body_length, body_width) -> list[tuple[str, str, str]]:
             formula = f"(count-1) x pitch_mm = ({count}-1) x {side['pitch_mm']:g} = {span:.2f}"
             problems.append((edge, f"side {edge}: {formula}, more than the edge, which is "
                                    f"{edge_length:g} long",
-                             f"lato {edge}: {formula}, piu' del bordo lungo {edge_length:g}"))
+                             f"lato {edge}: {formula}, più del bordo lungo {edge_length:g}"))
         # A row of N contacts at pitch P spans (N-1)*P from centre to centre;
         # a drawing that quotes the first and the last contact from the two
         # ends of the edge (a, b) fixes that span to L-a-b. When the nearest
@@ -14322,7 +14344,7 @@ def _recount_contradictory_sides(data, content_blocks, diagnostic_call, model, s
     log_summary = "; ".join(ui_text for _edge, _model_text, ui_text in contradicted)
     if progress:
         progress(tx("Risposta AI incoerente sui contatti ({summary}). Richiesta di ricontarli "
-                    "sugli stessi documenti: una chiamata in piu'.", summary=log_summary))
+                    "sugli stessi documenti: una chiamata in più.", summary=log_summary))
     unit = data.get("drawing_unit") or "mm"
     repair_blocks = list(content_blocks) + [{"type": "text", "text": (
         "The previous answer contradicts itself on the contacts of the castellated sides: "
@@ -14456,7 +14478,7 @@ _SWITCH_ROLES = ("common", "nc", "no")
 
 def _CONTACT_ASKED_NOTE() -> str:  # noqa: N802 - a translated constant, read at call time
     """The note of an open «contact_nc» question, settled by its answer (`apply_answers`)."""
-    return tx("Funzioni NC/NO: le letture non concordano, la scelta e' chiesta all'utente; fino "
+    return tx("Funzioni NC/NO: le letture non concordano, la scelta è chiesta all'utente; fino "
               "alla risposta restano quelle della risposta principale.")
 
 
@@ -14720,7 +14742,7 @@ def _confront_contact_functions(data: dict, progress=None) -> None:
         options.append({"label": tx("Nessuna delle due: correggo a mano nella tabella Pinout"),
                         "value": CONTACT_NONE})
         text = tx("Le letture del contatto disegnato non concordano ({why}). Quale assegnazione "
-                  "dei ruoli e' quella del disegno?",
+                  "dei ruoli è quella del disegno?",
                   why="; ".join(why for why, flag in (
                       (tx("le due letture assegnano ruoli diversi"), disagree),
                       (tx("una lettura contraddice il contatto che descrive"), contradicted),
@@ -14760,7 +14782,7 @@ def _single_reading_reason(data: dict, main: dict, pins) -> str:
     """Why a contact group's roles rest on one reading (generality audit M7)."""
     reason = data.get("_dedicated_functions_reason")
     if reason == "failed":
-        return tx("la lettura dedicata dei pad non e' riuscita")
+        return tx("la lettura dedicata dei pad non è riuscita")
     if reason == "old_prompt":
         return tx("il testo della lettura dedicata nel profilo non chiede le funzioni (prompt "
                   "personalizzato o di una versione precedente)")
@@ -14771,7 +14793,7 @@ def _single_reading_reason(data: dict, main: dict, pins) -> str:
             return tx("la risposta principale descrive il contatto disegnato, la lettura dedicata "
                       "non ha visto il simbolo")
         return tx("la lettura dedicata non ha visto un simbolo elettrico")
-    return tx("nessuna seconda lettura: la lettura dedicata dei pad non e' stata fatta")
+    return tx("nessuna seconda lettura: la lettura dedicata dei pad non è stata fatta")
 
 
 def _validate_main_response(data, content_blocks, diagnostic_call, model, system_prompt,
@@ -14986,7 +15008,7 @@ def _validate_main_response(data, content_blocks, diagnostic_call, model, system
             # exist and no call is paid for a re-reading by the same model.
             if body_same_model:
                 if progress:
-                    progress(tx("Spareggio sull'altezza non disponibile: il lettore dedicato e' il "
+                    progress(tx("Spareggio sull'altezza non disponibile: il lettore dedicato è il "
                                 "modello principale {model}, una sua terza lettura non sarebbe "
                                 "indipendente.", model=body_reader))
                 return None
@@ -15029,7 +15051,7 @@ def _validate_main_response(data, content_blocks, diagnostic_call, model, system
         # part number names some, can still confirm the main answer's geometry.
         apply_dedicated_pads(data, {"view": "unknown", "pads": {}, "notes": "", "skipped": tx(
             "nessun disegno in immagine con ruolo pinout o vista dall'alto: la lettura dedicata "
-            "non si puo' fare (un PDF non si ingrandisce)")}, progress,
+            "non si può fare (un PDF non si ingrandisce)")}, progress,
             check_layout=_layout_checker([], numbering.get("library"),
                                          lambda: data.get("contacts_view"),
                                          _reading_tolerance(_declared_unit_factor(data))))
@@ -15045,8 +15067,8 @@ def _validate_main_response(data, content_blocks, diagnostic_call, model, system
             and (data.get("layout") or "matrix") == "matrix" and not data.get("package_geometry")
             and numbering.get("component_family") != "aggregate_tht"):
         data["_numbering_note"] = tx(
-            "Numerazione dei pin NON confermata da una lettura dedicata: il disegno e' "
-            "disponibile solo in PDF, che non si puo' ingrandire. Verificare la posizione dei "
+            "Numerazione dei pin NON confermata da una lettura dedicata: il disegno è "
+            "disponibile solo in PDF, che non si può ingrandire. Verificare la posizione dei "
             "pin sul disegno.")
         if progress:
             progress(data["_numbering_note"])
@@ -15609,7 +15631,7 @@ def _reject_malformed_pad_sizes(package_geometry) -> None:
                                      kind=type(pins).__name__))
     for index, pin in enumerate(pins, 1):
         if not isinstance(pin, dict):
-            raise _malformed_geometry(tx("l'elemento {index} di pins non e' un oggetto", index=index))
+            raise _malformed_geometry(tx("l'elemento {index} di pins non è un oggetto", index=index))
         raw_number = pin.get("number")
         number = "?" if isinstance(raw_number, (list, tuple, dict, set)) or raw_number is None else raw_number
         for key in _PAD_READ_SCALAR_KEYS:
@@ -15926,7 +15948,7 @@ def _settle_numbering_conflict(data: dict, conflict, progress, *, failure=None,
                       "lasciati bloccati per scelta dell'utente.", numbers=numbers,
                       sides=sides_text) if chosen == SIDE_CONFLICT_BLOCK else
                    tx("Numeri dei pad in conflitto fra lati (numeri {numbers}; lati in conflitto: {sides}): "
-                      "numerazione provvisoria, la scelta e' chiesta all'utente.",
+                      "numerazione provvisoria, la scelta è chiesta all'utente.",
                       numbers=numbers, sides=sides_text))
         data["_pin_map_conflict"] = message
         data["_numbering_note"] = message
@@ -16012,7 +16034,7 @@ def _normalized_castellated_sides(raw, notes: Optional[list] = None) -> list[dic
     if not isinstance(raw, (list, tuple)) or not raw:
         raise ExtractionError(
             tx("Il modello ha indicato un modulo con piazzole a mezzo foro ma non ha "
-               "descritto alcun lato. Riprova, eventualmente con un modello piu' "
+               "descritto alcun lato. Riprova, eventualmente con un modello più "
                "capace.")
         )
 
@@ -16083,7 +16105,7 @@ def _normalized_castellated_sides(raw, notes: Optional[list] = None) -> list[dic
     for side in sides:
         if side["edge"] in seen:
             raise ExtractionError(
-                tx("Il lato {label} compare piu' volte nella risposta: non si puo' stabilire "
+                tx("Il lato {label} compare più volte nella risposta: non si può stabilire "
                    "quale descrizione sia quella giusta.",
                    label=EDGE_LABELS.get(side["edge"], side["edge"])))
         seen.add(side["edge"])
@@ -16107,7 +16129,7 @@ def _check_sides_fit_edges(sides, body_length, body_width) -> None:
         if span > edge_length + _PIN_FIELD_TOLERANCE_MM:
             raise ExtractionError(
                 tx("Lato {label}: {count} contatti a passo {pitch} mm occupano {span:.2f} mm, "
-                   "ma il bordo e' lungo {edge:.2f} mm.",
+                   "ma il bordo è lungo {edge:.2f} mm.",
                    label=EDGE_LABELS.get(side["edge"], side["edge"]), count=side["count"],
                    pitch=side["pitch_mm"], span=span, edge=edge_length))
 
@@ -16380,9 +16402,9 @@ def _components_3d(raw: Optional[Sequence[dict]],
             # never silent: every time it fires a line is written, so the
             # user can bring the body back from the review.
             if notes is not None:
-                notes.append(tx("{name}: scartato dai corpi 3D perche' il nome descrive un "
+                notes.append(tx("{name}: scartato dai corpi 3D perché il nome descrive un "
                                 "elemento del PCB (via, pad, contatto, serigrafia) e il tipo "
-                                "di oggetto non e' dichiarato; se e' un componente, "
+                                "di oggetto non è dichiarato; se è un componente, "
                                 "rinominalo o rimettilo nella revisione.",
                                 name=component["name"]))
             continue
@@ -16513,7 +16535,7 @@ def _required_matrix_value(data: dict, key: str):
     if raw is None:
         raise ExtractionError(
             tx("La risposta del modello non contiene il campo obbligatorio '{key}'. "
-               "Riprova, eventualmente con un modello piu' capace.",
+               "Riprova, eventualmente con un modello più capace.",
                key=key)
         )
     if key in _MATRIX_INT_FIELDS:
@@ -16614,7 +16636,7 @@ def _resolve_pin_numbering(pin_map, raw_populated, rows, cols, max_pin, *, dedic
             elif extra:
                 pin_map = [entry for entry in pin_map if entry["pin"] in populated]
                 notes.append(tx("pin_map: scartate le posizioni dei pin {pins}, assenti da "
-                                "populated_pins: nel disegno non c'e' un pin da leggere li', "
+                                "populated_pins: nel disegno non c'è un pin da leggere lì, "
                                 "quindi erano una convenzione e non una lettura. Verificare "
                                 "sul disegno la posizione dei pin presenti.",
                                 pins=", ".join(str(p) for p in extra)))
@@ -16629,7 +16651,7 @@ def _resolve_pin_numbering(pin_map, raw_populated, rows, cols, max_pin, *, dedic
         # the map is set aside with a note, never a crash that loses the
         # paid answer (review S2, 2026-11-03).
         notes.append(tx("pin_map parziale ignorata: righe o colonne della griglia non note, "
-                        "nessuna convenzione puo' completarla. Verificare la numerazione sul "
+                        "nessuna convenzione può completarla. Verificare la numerazione sul "
                         "disegno."))
         return None, populated, None
     expected = len(populated) if populated else (max_pin or 0)
@@ -16657,9 +16679,9 @@ def _resolve_pin_numbering(pin_map, raw_populated, rows, cols, max_pin, *, dedic
                         "Valore DERIVATO, da verificare sul disegno.",
                         read=len(anchors), expected=expected, anchors=summary, name=fitting[0]))
         return completed, populated, None
-    reason = (tx("nessuna convenzione standard e' coerente con i numeri stampati")
+    reason = (tx("nessuna convenzione standard è coerente con i numeri stampati")
               if not fitting else
-              tx("piu' convenzioni sono coerenti con i numeri stampati ({names})",
+              tx("più convenzioni sono coerenti con i numeri stampati ({names})",
                  names=", ".join(fitting)))
     return None, populated, tx(
         "Numerazione letta per {read} pin su {expected} ({anchors}) e {reason}: le altre "
@@ -16769,7 +16791,7 @@ def _footprint_matrix(data: dict, notes: list) -> dict:
             "Pad senza foro (drill_mm assente o 0) e nessun pad esplicito in "
             "package_geometry: la matrice di pin genera solo pad a foro passante, e un "
             "componente SMD richiede i pad descritti uno per uno. Riprova, eventualmente "
-            "con un modello piu' capace."))
+            "con un modello più capace."))
     matrix["drill_mm"] = _required_matrix_value(data, "drill_mm")
     if matrix["drill_mm"] >= matrix["pad_diameter_mm"]:
         raise ExtractionError(tx("Foratura non valida: drill_mm {drill} deve essere minore di "
@@ -17037,10 +17059,10 @@ def _params_from_tool_arguments(data: dict, *, trusted_components: bool = False)
             # these pads: the block names that way out (plan P4/P3).
             hole_block = tx("Foro dei pad {pads} non stampato e terminale non dichiarato; la "
                             "domanda sulla disposizione dei pad propone di toglierli: nessun "
-                            "footprint finche' non ha risposta.", pads=", ".join(unread_holes))
+                            "footprint finché non ha risposta.", pads=", ".join(unread_holes))
         else:
             hole_block = tx("Foro dei pad {pads} non stampato e terminale non dichiarato: nessun "
-                            "footprint finche' il foro non e' letto dal disegno o scelto nella "
+                            "footprint finché il foro non è letto dal disegno o scelto nella "
                             "domanda sui pad senza foro.", pads=", ".join(unread_holes))
         if data.get("_terminal_reread") == "nothing":
             # Said only when the re-read was actually made and found nothing.
@@ -17052,11 +17074,11 @@ def _params_from_tool_arguments(data: dict, *, trusted_components: bool = False)
         # run it, so dropped pads never leave the generation unblocked.
         pin_map_conflict = (tx(
             "Griglia dei pad senza {fields}: posizioni dei pad {pads} non calcolabili, nessun "
-            "footprint finche' le posizioni non sono confermate.",
+            "footprint finché le posizioni non sono confermate.",
             fields=", ".join(grid_missing), pads=", ".join(unread_positions))
             if grid_missing else tx(
             "Posizioni dei pad NON lette (pad {pads} senza coordinate): nessun footprint "
-            "finche' le posizioni non sono confermate.", pads=", ".join(unread_positions)))
+            "finché le posizioni non sono confermate.", pads=", ".join(unread_positions)))
     if pads_footprint_dropped and unfit_reasons:
         # Values that cannot all be true (review round 4): the block names
         # each pad with the values in conflict and what to verify; no reading
@@ -17148,7 +17170,7 @@ def _params_from_tool_arguments(data: dict, *, trusted_components: bool = False)
     if isinstance(data.get("_view_source"), str) and package_geometry is not None:
         # The side actually applied to the pads and who declared it (C3).
         notes.append(tx("Vista dei terminali applicata: {view} (fonte: {source}).",
-                        view=package_geometry.get("source_view", "top"),
+                        view=_view_label(package_geometry.get("source_view", "top")),
                         source=data["_view_source"]))
     params.value_sources = _value_sources(data, params, sides, notes)
     if layout == "castellated":
@@ -17166,8 +17188,8 @@ def _params_from_tool_arguments(data: dict, *, trusted_components: bool = False)
     if unread_holes:
         # Said apart from the positions: here the hole is what was not read.
         notes.append(tx("Geometria dei pad scartata: per i pad {pads} il disegno non stampa il "
-                        "foro e nessun terminale e' dichiarato, ne' per il pad ne' per il "
-                        "componente. Si tengono: {kept}; il foro e' da leggere sul disegno.",
+                        "foro e nessun terminale è dichiarato, né per il pad né per il "
+                        "componente. Si tengono: {kept}; il foro è da leggere sul disegno.",
                         pads=", ".join(unread_holes), kept=_kept_after_pad_drop(params)))
     if unfit_reasons:
         # Said apart again: these pads have every value, but values that
@@ -17749,11 +17771,11 @@ def _resolve_pad_terminals(package_geometry, data: dict, notes: list, *, lift: b
     for pin in pins:
         pin.pop("_callout_roundings", None)
     if found.get("press_fit_gross"):
-        notes.append(tx("ATTENZIONE pad {pads}: dichiarati a pressione, ma il foro e' meno della "
-                        "meta' del terminale: foro o terminale da verificare sul disegno.",
+        notes.append(tx("ATTENZIONE pad {pads}: dichiarati a pressione, ma il foro è meno della "
+                        "metà del terminale: foro o terminale da verificare sul disegno.",
                         pads=", ".join(found["press_fit_gross"])))
     if found["lead_from_layout"]:
-        notes.append(tx("Terminali presi dalla lettura dedicata, di cui e' stata adottata la "
+        notes.append(tx("Terminali presi dalla lettura dedicata, di cui è stata adottata la "
                         "disposizione: la risposta principale assegnava ai pad terminali diversi "
                         "({details}). Valori STIMATI da verificare sul disegno.",
                         details="; ".join(found["lead_from_layout"])))
@@ -17761,7 +17783,7 @@ def _resolve_pad_terminals(package_geometry, data: dict, notes: list, *, lift: b
     unfit = _settle_lands_and_fit(pins, derived, found)
     if found["zero_hole"]:
         notes.append(tx("Pad {pads}: foro 0 nella risposta inteso come «foro non stampato»: "
-                        "ricavato dal terminale quando e' dichiarato, altrimenti non letto.",
+                        "ricavato dal terminale quando è dichiarato, altrimenti non letto.",
                         pads=_bounded_pad_list(found["zero_hole"])))
     if found["smd_drill"]:
         notes.append(tx("Pad {pads}: dichiarati senza foro ma con un foro nella risposta: foro "
@@ -17776,11 +17798,11 @@ def _resolve_pad_terminals(package_geometry, data: dict, notes: list, *, lift: b
     if found["withheld"]:
         notes.append(tx("Pad {pads}: la provenienza «read» del foro dichiarata per tutta la "
                         "risposta non vale per loro: i pad hanno fori diversi e il loro foro non "
-                        "e' fra quelli trascritti dalla lettura dedicata.",
+                        "è fra quelli trascritti dalla lettura dedicata.",
                         pads=", ".join(found["withheld"])))
     if found["disagree"]:
         notes.append(tx("ATTENZIONE foro stampato letto diversamente dalle due letture: {details}. "
-                        "Nessuno dei due valori e' adottato come letto: resta quello della "
+                        "Nessuno dei due valori è adottato come letto: resta quello della "
                         "risposta principale, segnato come stimato, da verificare sul disegno.",
                         details="; ".join(found["disagree"])))
     if found["only_main"]:
@@ -17795,7 +17817,7 @@ def _resolve_pad_terminals(package_geometry, data: dict, notes: list, *, lift: b
                         pads=", ".join(found["only_dedicated"])))
     if found["slot_unoriented"]:
         notes.append(tx("Pad {pads}: asola stampata letta solo dalla lettura dedicata, senza assi: "
-                        "il pad non ne indica l'orientamento (lati uguali, o asola piu' grande del "
+                        "il pad non ne indica l'orientamento (lati uguali, o asola più grande del "
                         "pad). Asola non usata, da verificare sul disegno.",
                         pads=", ".join(found["slot_unoriented"])))
     if found["slot_turned"]:
@@ -17810,16 +17832,16 @@ def _resolve_pad_terminals(package_geometry, data: dict, notes: list, *, lift: b
                         lead=lead["diameter_mm"], source=word))
     if found["lead_withheld"]:
         notes.append(tx("Pad {pads}: foro non stampato e terminale del pad non dichiarato; il "
-                        "terminale del componente (Ø{lead:.2f} mm) non e' applicato perche' i pad "
+                        "terminale del componente (Ø{lead:.2f} mm) non è applicato perché i pad "
                         "hanno fori diversi: foro e piazzola sono quelli del modello, STIMATI.",
                         pads=", ".join(found["lead_withheld"]),
                         lead=part_lead[0]["diameter_mm"]))
     if found["unfounded"]:
-        notes.append(tx("Pad {pads}: ne' foro stampato ne' terminale dichiarato: foro e piazzola "
+        notes.append(tx("Pad {pads}: né foro stampato né terminale dichiarato: foro e piazzola "
                         "sono quelli del modello, STIMATI.", pads=", ".join(found["unfounded"])))
     if found["lead_disagree"]:
         notes.append(tx("ATTENZIONE terminale letto diversamente dalle due letture: {details}. "
-                        "Nessuno dei due valori e' adottato come letto: per la stima resta quello "
+                        "Nessuno dei due valori è adottato come letto: per la stima resta quello "
                         "della risposta principale, da verificare sul disegno.",
                         details="; ".join(found["lead_disagree"])))
     if found["lead_once"]:
@@ -17845,11 +17867,11 @@ def _resolve_pad_terminals(package_geometry, data: dict, notes: list, *, lift: b
         if found["part_narrow"]:
             notes.append(tx("ATTENZIONE fori dei pad {numbers} non maggiori del terminale "
                             "{lead:.2f} mm dichiarato; i pad hanno fori diversi, quindi il "
-                            "terminale puo' riguardarne solo alcuni: fori non modificati, da "
+                            "terminale può riguardarne solo alcuni: fori non modificati, da "
                             "verificare.", numbers=", ".join(found["part_narrow"]), lead=lead))
         if found["part_protected"]:
             notes.append(tx("ATTENZIONE fori letti dei pad {numbers} non maggiori del terminale "
-                            "{lead:.2f} mm, che non e' letto dal disegno: fori non modificati, da "
+                            "{lead:.2f} mm, che non è letto dal disegno: fori non modificati, da "
                             "verificare.", numbers=", ".join(found["part_protected"]), lead=lead))
         if found["part_lifted"] and found["part_widened"]:
             notes.append(tx(
@@ -17931,24 +17953,21 @@ def _land_notes(found: dict) -> list:
 #: geometric threshold: every pad stays in `unread_pads` and in the preview.
 _PAD_REASON_GROUPS_LISTED = ESTIMATED_PADS_LISTED
 
-#: The tail `estimated_pad_list` writes when it leaves pads out (fixed file
-#: language there), recognised to be said in the interface language here.
-_PAD_LIST_MORE_RE = re.compile(
-    r"\s*" + re.escape(ESTIMATED_PADS_MORE).replace(r"\{count\}", r"(\d+)") + r"$")
-
-
 def _bounded_pad_list(numbers) -> str:
     """Pad numbers for a message: unique, runs compressed, bounded (`generators.package.estimated_pad_list`).
 
     The list a block or a note prints must not grow with the pad count
     (review round 5, V1-9). The compression and the bound are the
-    footprint note's own; only its Italian tail is said through the catalog.
+    footprint note's own; both tails («and N more», «N unnumbered») are the
+    interface's, passed as templates in the current language, so the file
+    language of the footprint note never leaks into a message (review
+    2026-11-15, round 2: the old regex recognised only the «more» tail and
+    let the file's «unnumbered» tail through).
     """
-    text = estimated_pad_list(numbers)
-    match = _PAD_LIST_MORE_RE.search(text)
-    if match:
-        text = text[:match.start()] + " " + tx("e altri {count}", count=int(match.group(1)))
-    return text
+    # The value «{count}» keeps the placeholder in the translated template,
+    # filled by `estimated_pad_list` with the real count.
+    return estimated_pad_list(numbers, more=str(tx("e altri {count}", count="{count}")),
+                              unnamed_text=str(tx("{count} senza numero", count="{count}")))
 
 
 def _grouped_pad_reasons(problems) -> list:
@@ -17976,7 +17995,7 @@ def _grouped_pad_reasons(problems) -> list:
 def _fit_block(reasons) -> str:
     """The block of pads whose values cannot all be true, naming them with the values and what to verify."""
     return tx("Fori, piazzole o posizioni dei pad incompatibili fra loro ({reasons}): "
-              "nessun footprint finche' foro, terminale, piazzola e posizioni di quei pad "
+              "nessun footprint finché foro, terminale, piazzola e posizioni di quei pad "
               "non sono verificati sul disegno; poi ripetere l'analisi o correggere i "
               "documenti.", reasons="; ".join(reasons))
 
@@ -17984,7 +18003,7 @@ def _fit_block(reasons) -> str:
 def _loose_blade_note(numbers) -> str:
     """The note naming pads whose estimated round hole is too loose on their flat lead (`_round_hole_loose_on_blade`)."""
     return tx("Pad {pads}: foro TONDO stimato per un terminale piatto: attraverso lo spessore "
-              "resta piu' foro libero che rame di piazzola. Serve un'asola stampata sul disegno o "
+              "resta più foro libero che rame di piazzola. Serve un'asola stampata sul disegno o "
               "una verifica.", pads=", ".join(numbers))
 
 
@@ -18749,7 +18768,7 @@ def _keep_derived_lands_apart(pins: list, derived: dict, found: dict, unfit: dic
             hole = _hole_text_mm(sides[0], None if abs(sides[0] - sides[1]) <= _PRINTED_HOLE_TOLERANCE_MM
                                  else sides[1])
             unfit[id(pin)] = tx(
-                "a questo passo non c'e' posto per il foro {hole} con {ring:.2f} mm di "
+                "a questo passo non c'è posto per il foro {hole} con {ring:.2f} mm di "
                 "corona e {gap:.2f} mm di rame libero dal pad vicino", hole=hole,
                 ring=MIN_ANNULAR_RING_MM, gap=gap)
             continue
@@ -18843,7 +18862,7 @@ def _lift_drill_above_the_lead(params: "ExtractedParams", notes: list) -> None:
         # cannot pass is no longer reported as a measure (review 2026-11-11):
         # it joins the values to verify instead of passing as read.
         notes.append(tx("ATTENZIONE foro letto {drill:.2f} mm non maggiore del terminale {lead:.2f} "
-                        "mm, che non e' letto dal disegno: foro non modificato, da verificare.",
+                        "mm, che non è letto dal disegno: foro non modificato, da verificare.",
                         drill=drill, lead=lead))
         sources["drill_mm"] = "estimated"
         params.value_sources = sources
@@ -18862,7 +18881,7 @@ def _lift_drill_above_the_lead(params: "ExtractedParams", notes: list) -> None:
     if isinstance(pad, (int, float)) and pad < lifted + 2 * MIN_ANNULAR_RING_MM:
         params.pad_diameter_mm = estimated_pad_diameter(lifted)
         sources["pad_diameter_mm"] = "estimated"
-        notes.append(tx("Piazzola {pad:.2f} mm non piu' larga del foro corretto: portata a "
+        notes.append(tx("Piazzola {pad:.2f} mm non più larga del foro corretto: portata a "
                         "{new:.2f} mm, valore STIMATO da verificare.",
                         pad=pad, new=params.pad_diameter_mm))
     params.value_sources = sources
@@ -19298,9 +19317,9 @@ def _ask_row_spacing(data: dict, progress=None) -> None:
     options.append({"label": tx("Non so: stima la distanza dei fori dal bordo"),
                     "value": ROW_SPACING_ESTIMATE})
     text = (tx("Distanza fra le file di contatti {value} mm letta dall'analisi solo da come ha "
-               "etichettato le quote stampate, senza un riscontro: quale quota stampata e' la "
+               "etichettato le quote stampate, senza un riscontro: quale quota stampata è la "
                "distanza fra i centri delle due file?", value=read_key) if read_key else
-            tx("Distanza fra le file di contatti non data dall'analisi: quale quota stampata e' la "
+            tx("Distanza fra le file di contatti non data dall'analisi: quale quota stampata è la "
                "distanza fra i centri delle due file? Mette i fori passanti al posto giusto."))
     candidates = {option["value"]: {"row_spacing_mm": _row_spacing_value(option["value"])}
                   for option in options if option["value"] != ROW_SPACING_ESTIMATE}
@@ -19418,10 +19437,10 @@ def _ask_photo_contact_styles(data: dict, notes: list) -> None:
         why = entry.get("why") if entry.get("recommended_from") == "photo" else None
         text = (tx("{why} Quale tipo di contatto ha il lato {label}?", why=why, label=label)
                 if isinstance(why, str) and why.strip() else
-                tx("Lato {label}: la foto non mostra se il bordo e' tagliato. I contatti sono fori "
+                tx("Lato {label}: la foto non mostra se il bordo è tagliato. I contatti sono fori "
                    "passanti come il lato {like}, oppure semi-fori?", label=label,
                    like=EDGE_LABELS.get(like, like)) if like else
-                tx("Lato {label}: la foto non mostra se il bordo e' tagliato. I contatti sono fori "
+                tx("Lato {label}: la foto non mostra se il bordo è tagliato. I contatti sono fori "
                    "passanti oppure semi-fori?", label=label))
         # Resolved by photo_inventory (twin edge > photo's short-row style).
         recommended = entry.get("recommended")
@@ -19494,15 +19513,15 @@ def _drop_board_outline_row_spacing(params: "ExtractedParams", notes: list) -> N
     params.value_sources = sources
     if along:
         notes.append(tx("Distanza fra le file {spacing} mm uguale all'altra dimensione della "
-                        "scheda ({size} mm): probabilmente e' il contorno e non la distanza fra i "
+                        "scheda ({size} mm): probabilmente è il contorno e non la distanza fra i "
                         "centri dei contatti (metterebbe i fori a {inset:.2f} mm dal bordo), "
-                        "quindi non e' usata finche' non la scegli nella domanda sulla distanza "
+                        "quindi non è usata finché non la scegli nella domanda sulla distanza "
                         "fra le file.", spacing=spacing, size=other,
                         inset=(extent - spacing) / 2 if extent is not None else 0.0))
         return
     notes.append(tx("Distanza fra le file {spacing} mm uguale al contorno della scheda ({extent} mm) "
-                    "fra le due file: e' il contorno, non la distanza fra i centri dei contatti, "
-                    "quindi non e' usata. Indica la distanza fra i centri dei fori delle due file "
+                    "fra le due file: è il contorno, non la distanza fra i centri dei contatti, "
+                    "quindi non è usata. Indica la distanza fra i centri dei fori delle due file "
                     "per mettere i fori passanti al posto giusto.", spacing=spacing, extent=extent))
 
 
@@ -19577,7 +19596,7 @@ def _settle_impossible_double_contacts(data: dict, params: "ExtractedParams", no
                 side["through_hole_drill_mm"] = reduced
                 sources[f"castellated_sides.{built.edge}.through_hole_drill_mm"] = "estimated"
                 params.value_sources = dict(sources)
-                notes.append(tx("Lato {label}: foro passante stimato ridotto a {drill:.2f} mm perche' "
+                notes.append(tx("Lato {label}: foro passante stimato ridotto a {drill:.2f} mm perché "
                                 "resti la parete minima ({minimum} mm) fra il foro e il semi-foro "
                                 "con le file alla distanza dichiarata; da verificare sul "
                                 "disegno.", label=label, drill=reduced, minimum=MIN_HOLE_WALL_MM))
@@ -19634,7 +19653,7 @@ def _downgrade_sizes_wider_than_the_pitch(params: "ExtractedParams", notes: list
                 notes.append(tx(
                     "Lato {label}: {field} = {value} mm dichiarato «{source}» ma pari o superiore "
                     "al passo di {pitch} mm dello stesso lato: due contatti adiacenti si "
-                    "sovrapporrebbero, quindi non e' una misura. Trattato come stima, che il "
+                    "sovrapporrebbero, quindi non è una misura. Trattato come stima, che il "
                     "generatore riduce e annota.",
                     label=EDGE_LABELS.get(edge, edge), field=key, value=value,
                     source=_SOURCE_LABELS.get(sources[source_key], sources[source_key]),

@@ -27,6 +27,10 @@ def test_every_metadata_code_names_a_field():
     seen = set()
     for metadata in METADATA_CASES:
         seen |= _codes(klc_checks.check_metadata(metadata, "Fp"))
+        # The convention of a declared kind (a relay: coil + contacts).
+        seen |= _codes(klc_checks.check_metadata(metadata, "Fp",
+                                                 pin_functions=["coil", "coil", "common", "no"]))
+    assert "reference_convention" in seen, "precondition: the relay case is exercised"
     seen.discard("metadata_type")
     assert seen, "precondition: the cases produce findings"
     assert seen <= set(klc_checks.METADATA_FIELD_OF_CODE)

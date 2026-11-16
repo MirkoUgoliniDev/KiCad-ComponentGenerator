@@ -28,7 +28,7 @@ from kicadgen.core.silk import (
 from kicadgen.generators.castellated_module import (
     CastellatedModuleParams, CastellatedSide, ComponentBox, build_castellated_module,
 )
-from kicadgen.generators.package import build_package
+from kicadgen.generators.package import ESTIMATED_BODY_CENTRE_NOTE, build_package
 from kicadgen.generators.pin_header import PinHeaderParams, build_pin_header
 from kicadgen.services import kicad_library, messages
 
@@ -78,7 +78,9 @@ def test_pin1_origin_is_recentred_on_the_pad_field_with_a_note():
     assert pins["8"].x_mm - pins["1"].x_mm == pytest.approx(5.4)
     assert geometry.frame_notes() and "stima" in geometry.frame_notes()[0]
     fp = build_package(geometry, "SOIC8_PIN1")
-    assert "stimato" in fp.description
+    # CONTRACT CHANGED 2026-11-15 (round 2): the package notes are English
+    # (generators.package.PACKAGE_NOTE_LANGUAGE); the note is the constant.
+    assert fp.description.endswith("; " + ESTIMATED_BODY_CENTRE_NOTE)
     # The body outline drawn around (0, 0) now encloses the pad field centre.
     xs = [p.at[0] for p in fp.pads]
     assert (min(xs) + max(xs)) / 2 == pytest.approx(0.0)
@@ -91,7 +93,8 @@ def test_body_center_origin_keeps_the_declared_coordinates_and_no_note():
     # An asymmetric field is NOT recentred when the body centre is declared.
     assert [(p.x_mm, p.y_mm) for p in seen] == [(-2.7, -1.0), (2.0, 3.0)]
     assert geometry.frame_notes() == []
-    assert "stimato" not in build_package(geometry, "X").description
+    # CONTRACT CHANGED 2026-11-15 (round 2): English note, see the positive twin.
+    assert ESTIMATED_BODY_CENTRE_NOTE not in build_package(geometry, "X").description
 
 
 def test_custom_origin_is_recentred_like_pin1():
@@ -248,7 +251,10 @@ def test_valid_pin_header_raises_nothing():
 
 def test_file_descriptions_do_not_follow_the_interface_language(monkeypatch):
     monkeypatch.setattr(messages, "_translator", lambda key, default="": "XX " + default)
-    assert footprint_module.FOOTPRINT_TEXT_LANGUAGE == "it"
+    # CONTRACT CHANGED 2026-11-15 (user decision: file notes in English): the
+    # fixed file language is English for every generator, still independent
+    # of the interface language checked below.
+    assert footprint_module.FOOTPRINT_TEXT_LANGUAGE == "en"
     assert not build_pin_header(PinHeaderParams()).description.startswith("XX")
     geometry = PackageGeometry(family="soic", pins=[PinSpec("1", 0, 0, 1, 1)])
     assert not build_package(geometry).description.startswith("XX")

@@ -6,10 +6,12 @@ KiCadGen uses two free programs, installed separately:
 
 - **FreeCAD** (freecad.org) — builds the STEP models of the components.
   Without it the footprint and the symbol are still produced.
-- **KiCad 10 or newer** (kicad.org) — to test the result in an isolated
-  project (its PCB Editor), run «Check component for KiCad» (`kicad-cli`
-  adds the real loading check; without it that check is skipped) and install
-  the libraries (`kicad-cli` is needed for the global library). The
+- **KiCad 10 or newer** (kicad.org) — to look at the result with «Open in
+  KiCad» (an isolated project opened in its Schematic Editor and PCB
+  Editor), to run «1 · Component check» in the KiCad tab (`kicad-cli` adds
+  the real loading of the files by KiCad, DRC and ERC; without it those
+  checks are skipped and the installation stays allowed with a warning) and
+  to install the libraries (`kicad-cli` is needed for the global library). The
   global library installation is refused until KiCad has been started once
   and has created its global footprint library table: start KiCad, complete
   its initial library setup, then retry. The generated files use the KiCad 10

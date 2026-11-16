@@ -95,10 +95,11 @@ Requisiti:
 - facoltativo: **FreeCAD** con `freecadcmd` (modelli STEP). Senza, si ottengono
   comunque footprint e simbolo; la finestra di avanzamento dice quale passo
   non può essere eseguito e perché;
-- facoltativo: **KiCad 10 o successivo**: il suo PCB Editor (`pcbnew`) apre
-  «Prova in KiCad...»; `kicad-cli` serve all'installazione della libreria
-  globale e alla prova di caricamento reale di «Verifica componente per
-  KiCad», che senza di esso esegue gli altri controlli e salta solo quella. I
+- facoltativo: **KiCad 10 o successivo**: il suo PCB Editor (`pcbnew`) e
+  l'Editor di schemi (`eeschema`) aprono «Apri in KiCad» (passo 2 della
+  scheda KiCad); `kicad-cli` serve all'installazione della libreria globale e
+  alla prova di caricamento reale del controllo del componente (passo 1), che
+  senza di esso esegue gli altri controlli e salta solo quella. I
   file generati usano i formati di KiCad 10 (footprint `20260206`, libreria di
   simboli `20251024`), che KiCad 8 e 9 non leggono;
 - rilevatori locali facoltativi: `requirements/yolo.txt` (ONNX Runtime, per
@@ -446,8 +447,11 @@ dal catalogo, con annulla/ripeti, bozza recuperata dopo un crash e
 sovrapposti e tipi passivi non verificati; lo stesso controllo precede
 l'esportazione. **Suggerisci tipi pin con AI** propone i tipi elettrici dai
 documenti pinout o datasheet (a pagamento; le proposte hanno fonte e
-motivazione e si scelgono una per una). **Esporta simbolo KiCad** scrive il
-`.kicad_sym` con il collegamento al footprint `KiCadGen:<nome>`. I tipi
+motivazione e si scelgono una per una). **Applica** scrive anche
+`<Nome>.kicad_sym` nella cartella del progetto, con il collegamento al
+footprint `KiCadGen:<nome>`: è il file che la scheda KiCad controlla e
+installa. **Esporta simbolo KiCad** salva una copia del simbolo applicato
+dove scegli tu. I tipi
 iniziali sono *passive*: verificali sul datasheet prima di affidarti all'ERC
 di KiCad.
 
@@ -482,7 +486,7 @@ foto dall'alto: restano da verificare.
 <Nome>/
 ├── <Nome>.pretty/<Nome>.kicad_mod
 ├── <Nome>.3dshapes/<Nome>.step, .wrl, .preview.json
-├── <Nome>.kicad_sym                (dopo «Esporta simbolo KiCad»)
+├── <Nome>.kicad_sym                (scritto da «Applica» nella scheda Simbolo elettrico)
 ├── project_config.json             (il file del progetto: impostazioni, tabelle, annotazioni)
 ├── docs/                           (i tuoi documenti, .document-roles.json, .history/)
 ├── photo-cache/                    (risposte AI, per modello, prompt e pixel; senza chiavi)
@@ -501,62 +505,150 @@ I file generati restano locali finché non li installi esplicitamente.
 
 ![Scheda KiCad: file pronti, metadati con i controlli KLC, verifica e installazione](docs/images/it-kicad.png)
 
+La scheda è un percorso in **tre passi**, nell'ordine in cui si fanno:
+**1 · Controllo del componente**, **2 · Guarda in KiCad (facoltativo)** e
+**3 · Installa nella libreria**; sotto i passi ci sono i metadati del
+componente. Il pulsante **Guida**, in alto a destra, apre una procedura in tre
+pagine: installa, aggiungi il simbolo allo schema, aggiorna il PCB.
+
 ```mermaid
 flowchart TD
-    F["File su disco:<br/>.kicad_mod · .kicad_sym · .step"] --> M{"I file corrispondono ai parametri<br/>e i metadati sono completi?"}
-    M -- no --> FIX["Rimedio indicato nella scheda<br/>Applica ai file · Aggiorna il file del simbolo ·<br/>Rigenera modello STEP"]
-    FIX --> M
-    M -- sì --> T["Prova in KiCad…<br/>progetto isolato in .kicad-preview,<br/>nessuna tabella di librerie toccata"]
-    T --> C{"Dove deve stare<br/>il componente?"}
-    C -- "in un progetto KiCad<br/>(consigliato)" --> PRJ["Installa nel progetto KiCad…<br/>KiCadGen.pretty + .3dshapes,<br/>fp-lib-table del progetto con ${KIPRJMOD}"]
-    C -- "in ogni progetto<br/>di questo computer" --> GLB["Installa come libreria globale…<br/>cartella stabile, fp-lib-table globale,<br/>percorsi assoluti"]
-    PRJ & GLB --> SAFE["Copia di sicurezza della tabella, file temporaneo,<br/>ripristino se un passo fallisce"]
+    F["File su disco:<br/>.kicad_mod · .kicad_sym · .step"] --> G{"File pronti? Nessun lavoro in corso,<br/>nessuna domanda aperta sul footprint,<br/>file corrispondenti ai parametri"}
+    G -- no --> FIX["Rimedio indicato nel passo 1<br/>Applica ai file · Aggiorna il file del simbolo ·<br/>Rigenera o rimuovi il modello STEP"]
+    FIX --> G
+    G -- sì --> C["1 · Controllo del componente<br/>parte da solo, sola lettura"]
+    C -- "errori: NON USARE" --> ROWS["Correggi le righe del passo 1"]
+    ROWS --> G
+    C -- "interrotto o non partito" --> AGAIN["Controlla di nuovo"]
+    AGAIN --> C
+    C -.->|facoltativo| P["2 · Apri in KiCad<br/>progetto isolato in .kicad-preview:<br/>Editor di schemi + PCB Editor,<br/>nessuna tua tabella di librerie toccata"]
+    C -- "avvisi o tutto a posto,<br/>metadati obbligatori compilati" --> I{"3 · Installa nella libreria"}
+    I -- "in un progetto KiCad<br/>(consigliato)" --> PRJ["KiCadGen.pretty + KiCadGen.3dshapes + KiCadGen.kicad_sym,<br/>fp-lib-table + sym-lib-table del progetto<br/>con ${KIPRJMOD}"]
+    I -- "in ogni progetto<br/>di questo computer" --> GLB["gli stessi file in una cartella stabile,<br/>fp-lib-table + sym-lib-table globali,<br/>percorsi assoluti"]
+    PRJ & GLB --> SAFE["Copia .kicadgen-backup, file temporaneo,<br/>ripristino se un passo fallisce"]
 ```
 
-**File pronti per KiCad** elenca footprint, simbolo e STEP con il loro stato.
-Installazione e prova isolata sono **bloccate finché i file su disco non
-corrispondono ai parametri** e ogni blocco nomina il suo rimedio, abilitato
-finché il blocco resta: *Applica ai file* (metadati, footprint) e *Aggiorna il
-file del simbolo* in questa scheda; per uno STEP che non corrisponde più
-(anche dopo un cambio di soli colori o annotazioni 3D) il pulsante di
-rigenerazione nella barra della scheda Modello STEP («Rigenera modello STEP
-con queste annotazioni»), oppure qui *Rimuovi il modello STEP obsoleto* (uno
-STEP vecchio che non si può ricostruire). I progetti salvati da versioni
-precedenti possono richiedere un «Applica ai file». I comandi sono bloccati
-anche mentre gira un lavoro in background. Usano i file **applicati**: una
-bozza non applicata del footprint o del simbolo non viene installata, non
-blocca i comandi e la segnala «Verifica componente per KiCad».
+**1 · Controllo del componente** parte da solo quando la scheda mostra file
+che nessun controllo ha ancora letto; non chiede nulla e non modifica la
+configurazione di KiCad. Non parte prima che il componente abbia un
+footprint, e aspetta — la riga in cima al passo dice perché e nomina il
+rimedio, abilitato finché il blocco resta — finché:
 
-**Metadati del componente** (chiuso per default): designatore di riferimento
-(solo lettere; la proposta in grigio conta come compilata), descrizione,
-parole chiave, datasheet (URL o file), filtri footprint. Designatore,
-descrizione, parole chiave e datasheet sono **obbligatori** prima
-dell'installazione. L'elenco **Controlli KiCad (KLC)** si aggiorna mentre
-scrivi (⛔ errore, ⚠ avviso) e «Applica ai file» scrive i valori nel footprint
-e nel simbolo.
+- un lavoro (generazione, modello STEP, analisi) sta scrivendo i file;
+- le posizioni dei pad sono state lasciate bloccate, o resta aperta una
+  domanda sul footprint (disposizione dei pad, numerazione dei lati,
+  interasse delle file, tipo di contatto, vista dei terminali);
+- i file su disco non corrispondono ai parametri: una modifica applicata al
+  footprint non ancora scritta (*Applica ai file*), un file del simbolo
+  diverso dal simbolo applicato (*Aggiorna il file del simbolo*, accanto al
+  simbolo nel passo 3), un modello STEP costruito su altre piazzole o
+  annotazioni (il pulsante di rigenerazione nella barra della scheda Modello
+  STEP, «Rigenera modello STEP con queste annotazioni»), oppure uno STEP
+  vecchio che non si può ricostruire (*Rimuovi il modello STEP obsoleto*).
 
-**Verifica prima dell'installazione**:
+I comandi usano i file **applicati**: una bozza non applicata del footprint o
+del simbolo non viene installata, non blocca e la segnala il controllo. Il
+controllo legge i file generati e la corrispondenza pin–pad e, se
+`kicad-cli` è disponibile, apre davvero footprint, simbolo e STEP con KiCad
+CLI in una cartella temporanea (DRC ed ERC compresi). L'esito resta scritto
+nel passo: un verdetto, una riga per ogni cosa da fare con il suo pulsante e
+i controlli superati; **Controlla di nuovo**, **Interrompi** e **Copia
+rapporto** agiscono su di esso. Non certifica pinout, misure o allineamento
+visivo 3D; ERC e DRC restano sul progetto finale.
 
-- **Prova in KiCad…** crea un piccolo progetto temporaneo nella cartella
-  `.kicad-preview` del componente, con il footprint incorporato e una copia
-  locale dello STEP referenziata con `${KIPRJMOD}`, e lo apre nel PCB Editor
-  (Alt+3 per la vista 3D). **Nessuna tabella di librerie viene toccata.**
-- **Verifica componente per KiCad** esegue controlli di sola lettura in un
-  worker e mostra un rapporto copiabile: footprint su disco, corrispondenza
-  pin–pad, collegamento 3D originale, integrità STEP, simbolo esportato
-  confrontato con quello applicato e — se `kicad-cli` è disponibile —
-  l'apertura reale di footprint, simbolo e importazione 3D in una cartella
-  temporanea. Non certifica pinout, misure o allineamento visivo; ERC e DRC
-  restano sul progetto finale.
-- **Guida rapida per usare il componente in KiCad** apre una procedura in tre pagine: installa,
-  aggiungi il simbolo allo schema, aggiorna il PCB.
+L'esito decide il passo 3:
 
-**Installazione nella libreria**:
+- **errori** (verdetto *NON USARE*): l'installazione resta bloccata finché
+  non li correggi;
+- **avvisi**, o controlli che lo strumento non ha potuto eseguire perché
+  KiCad CLI non è installato: puoi installare, e il passo 3 dice che cosa
+  rivedere prima della produzione;
+- **KiCad non ha letto tutti i file** che l'installazione copia (il
+  footprint e, se esiste, il file del simbolo): KiCad CLI c'è, ma una
+  lettura è stata saltata o interrotta, per esempio non ha risposto entro 60
+  secondi. L'installazione resta bloccata finché *Controlla di nuovo* non
+  porta a termine ogni lettura;
+- lo **stesso errore di KiCad CLI in due controlli di fila**: ogni lettura
+  di KiCad fallisce dalla parte dello strumento con la stessa causa in due
+  controlli consecutivi — KiCad CLI non si avvia, si chiude ogni volta con lo
+  stesso codice di uscita (anche un codice di crash), termina senza produrre
+  alcun risultato, non risponde mai entro il tempo, rifiuta anche un file di
+  prova valido (vedi sotto), oppure la cartella temporanea del controllo non è
+  utilizzabile (antivirus, disco pieno, permessi); conta anche una
+  combinazione fissa di queste cause. È una causa che dura, trattata come
+  KiCad CLI non installato: puoi installare, e il passo 3 ne dice la causa.
+  Nessuna causa che dura viene mai presunta quando KiCad CLI ha funzionato
+  nello stesso controllo (una lettura riuscita, un DRC o un ERC eseguiti): le
+  letture mancate riguardano allora i file, e vanno ripetute o sono un errore
+  del componente (vedi sotto). Un errore interno del programma non conta mai
+  come causa che dura;
+- un controllo **fermato da un errore interno**: puoi installare solo se
+  aveva già concluso ogni verifica che può bloccare il componente e che lo
+  riguarda — con KiCad CLI la versione di KiCad; il file del footprint e i
+  suoi pad (pad sovrapposti, collegamenti al modello STEP) e, quando ci sono
+  terminali dichiarati, il loro passaggio nei fori; la corrispondenza pin–pad
+  e la costruzione del simbolo; con KiCad CLI le letture di KiCad del
+  footprint, del simbolo applicato e del file del simbolo installato, quando
+  esiste, e il DRC dell'anteprima; la piedinatura del documento, quando
+  esiste una lettura del documento; le funzioni dei contatti (NC, NO,
+  comune), quando il simbolo dichiara dei contatti; quando c'è uno STEP,
+  l'integrità del modello STEP e, con KiCad CLI, la sua importazione in
+  KiCad. In quel caso il passo 3 dice che l'esito è incompleto; altrimenti
+  l'installazione resta bloccata finché *Controlla di nuovo* non le conclude;
+- un controllo **interrotto** con *Interrompi*, o che non è riuscito a
+  partire: non vale come esito, e l'installazione resta bloccata finché
+  *Controlla di nuovo* non lo ripete;
+- **un file del componente è in uso da un altro programma**: il controllo è
+  terminato, ma una verifica che serve all'installazione non si è potuta fare
+  perché il file era aperto altrove. L'installazione resta bloccata: chiudi
+  il programma che lo tiene aperto e usa *Controlla di nuovo*;
+- un **controllo terminato senza concludere tutte le verifiche che servono**
+  all'installazione (le righe saltate del passo 1 dicono quali):
+  l'installazione resta bloccata finché *Controlla di nuovo* non le conclude;
+- **tutto a posto**: *Installa nel progetto KiCad (consigliato)* è in
+  evidenza.
+
+Ogni scrittura dei file che l'installazione copia (una rigenerazione,
+*Applica ai file*, l'*Applica* del simbolo) rende l'esito vecchio: i pulsanti
+di installazione si spengono e il controllo riparte da solo. Quando KiCad
+fallisce sul file del componente (lo rifiuta per due volte, si chiude anche
+con un codice di crash, termina senza produrre nulla o non finisce mai di
+leggerlo), il controllo gli fa leggere con lo stesso comando un piccolo file
+di prova valido dello stesso tipo: se KiCad lo legge, il difetto è del
+componente (errore). Un esempio è un nome che contiene `%`, che KiCad tratta
+come un codice di formato e che lo fa chiudere a ogni lettura: per questo il
+carattere non è ammesso nei nomi dei componenti. Se KiCad fallisce anche sul
+file di prova, o la prova non si può fare, il problema è dello strumento di
+controllo o del computer (l'installazione di KiCad, un antivirus, la
+cartella temporanea) e non del componente, e la lettura risulta «non
+eseguita».
+
+**2 · Guarda in KiCad (facoltativo)**: **Apri in KiCad** crea un piccolo
+progetto temporaneo nella cartella `.kicad-preview` del componente con il
+footprint, il simbolo e una copia locale dello STEP, apre lo schema
+nell'Editor di schemi e la scheda nel PCB Editor (Alt+3 per la vista 3D) e
+mostra un'immagine 3D generata da KiCad. Scrive solo le proprie tabelle di
+librerie di una riga con `${KIPRJMOD}` dentro `.kicad-preview`: **nessuna tua
+tabella di librerie viene toccata** e non installa nulla.
+
+**3 · Installa nella libreria**: una frase dice che cosa puoi fare adesso, e
+**Cosa viene installato:** elenca footprint, simbolo elettrico e modello STEP
+con il loro stato.
 
 | Comando | Che cosa scrive |
 |---|---|
-| **Installa nel progetto KiCad…** (consigliato) | crea o aggiorna `KiCadGen.pretty`, `KiCadGen.3dshapes` e `KiCadGen.kicad_sym` nel progetto KiCad scelto e registra le librerie dei footprint e dei simboli nella `fp-lib-table` e nella `sym-lib-table` di quel progetto con percorsi `${KIPRJMOD}`, così il progetto resta portabile |
-| **Installa come libreria globale…** | copia gli stessi file in una cartella stabile scelta da te e registra `KiCadGen.pretty` e `KiCadGen.kicad_sym` nella `fp-lib-table` e nella `sym-lib-table` globali per utente del KiCad installato (trovate tramite `kicad-cli version`), con percorsi assoluti. Viene rifiutata finché quelle tabelle non esistono: avvia KiCad una volta, completa la configurazione iniziale delle librerie e riprova |
+| **Installa nel progetto KiCad (consigliato)** | crea o aggiorna `KiCadGen.pretty` (i footprint), `KiCadGen.3dshapes` (i modelli STEP/WRL) e `KiCadGen.kicad_sym` (i simboli) nel progetto KiCad scelto e registra le librerie dei footprint e dei simboli nella `fp-lib-table` e nella `sym-lib-table` di quel progetto con percorsi `${KIPRJMOD}`, così il progetto resta portabile |
+| **Installa come libreria globale** | copia gli stessi file in una cartella stabile scelta da te e registra `KiCadGen.pretty` e `KiCadGen.kicad_sym` nella `fp-lib-table` e nella `sym-lib-table` globali per utente del KiCad installato (trovate tramite `kicad-cli version`), con percorsi assoluti. KiCad crea le tabelle globali al primo avvio: finché non esistono l'installazione viene rifiutata — avvia KiCad una volta, completa la configurazione iniziale delle librerie e riprova |
+
+Anche il **simbolo** viene installato: è aggiunto alla libreria condivisa
+`KiCadGen.kicad_sym` (gli altri simboli restano, uno con lo stesso nome viene
+sostituito dopo una conferma) e punta già al suo footprint
+`KiCadGen:<nome>`. Senza file del simbolo l'installazione porta solo
+footprint e modello STEP, e il rapporto dice di premere *Applica* nella
+scheda Simbolo elettrico. Senza modello STEP (per esempio su un computer
+senza FreeCAD) la prova e le due installazioni funzionano lo stesso dopo una
+conferma: il footprint arriva in KiCad senza vista 3D e `KiCadGen.3dshapes`
+non viene creato.
 
 Vengono sostituiti solo i file del componente corrente, dopo conferma
 esplicita; gli altri componenti e le altre righe della tabella sono
@@ -587,15 +679,18 @@ illeggibile (`kicad_exports.json`) viene spostato da parte come
 `kicad_exports.json.corrupt-<data-ora>` e ne viene iniziato uno nuovo, così
 nessuna registrazione si perde in silenzio.
 
-Anche il **simbolo** viene installato: è aggiunto alla libreria condivisa
-`KiCadGen.kicad_sym` (gli altri simboli restano, uno con lo stesso nome viene
-sostituito dopo una conferma) e punta già al suo footprint
-`KiCadGen:<nome>`. Senza file del simbolo l'installazione porta solo
-footprint e modello STEP, e il rapporto dice come aggiungere il simbolo.
+**Metadati del componente** (sotto i passi, chiuso per default; il riquadro
+si apre da solo quando è ciò che blocca): designatore di riferimento (solo
+lettere; la proposta in grigio conta come compilata), descrizione, parole
+chiave, datasheet (URL o file), filtri footprint. Designatore, descrizione,
+parole chiave e datasheet sono **obbligatori** prima dell'installazione.
+L'elenco **Controlli KiCad (KLC)** si aggiorna mentre scrivi (⛔ errore,
+⚠ avviso) e **Applica ai file** scrive i valori nel footprint e nel simbolo.
 
-La scheda **Esportazioni** conserva lo storico di ogni installazione ed
-esportazione del simbolo fatta da questo computer (componente, tipo,
-destinazione, data).
+**Apri cartella componente** apre la cartella con footprint, modello STEP e
+documenti. La scheda **Esportazioni** conserva lo storico di ogni
+installazione ed esportazione del simbolo fatta da questo computer
+(componente, tipo, destinazione, data).
 
 ## Log, problemi, aggiornamenti
 

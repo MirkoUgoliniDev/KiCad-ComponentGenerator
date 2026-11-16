@@ -372,6 +372,10 @@ def test_read_only_wrl_target_gives_a_complete_rollback(tmp_path, no_retry):
     project = tmp_path / "project"
     first = install_component_library(artifacts, project)
     first.footprint_path.write_text("old footprint", encoding="utf-8")
+    # CONTRACT CHANGED 2026-11-15 (P3): a WRL identical to the source is no
+    # longer rewritten, so the read-only WRL never refused anything. An older
+    # WRL content makes the re-install really replace it, as in the audit.
+    first.wrl_path.write_bytes(b"OLD WRL")
     _read_only(first.wrl_path)
     before = _snapshot(project)
     # CONTRACT CHANGED 2026-10-15: was a bare PermissionError (see above).
@@ -533,7 +537,12 @@ def test_installed_files_are_fsynced_before_they_replace_the_targets(tmp_path, m
     """@brief M5: each staged file is on disk before the rename publishes it."""
     artifacts = _artifacts(tmp_path)
     project = tmp_path / "project"
-    install_component_library(artifacts, project)
+    first = install_component_library(artifacts, project)
+    # CONTRACT CHANGED 2026-11-15 (P3): identical installed files are no
+    # longer rewritten, so nothing was published. Older installed copies make
+    # the re-install publish all three, each of which must be fsynced first.
+    for installed in (first.footprint_path, first.step_path, first.wrl_path):
+        installed.write_bytes(b"older copy")
     synced: set[int] = set()
     published: list[tuple[str, bool]] = []
     real_fsync, real_replace = os.fsync, os.replace
@@ -558,7 +567,11 @@ def test_a_transient_lock_on_a_target_is_retried_not_rolled_back(tmp_path, monke
     """@brief M5: one refused replace (antivirus, file watcher) is retried."""
     artifacts = _artifacts(tmp_path)
     project = tmp_path / "project"
-    install_component_library(artifacts, project)
+    first = install_component_library(artifacts, project)
+    # CONTRACT CHANGED 2026-11-15 (P3): an identical STEP is no longer
+    # rewritten, so the lock was never met. An older installed STEP makes the
+    # re-install really replace it through the refused-then-retried rename.
+    first.step_path.write_bytes(b"older STEP")
     real_replace = os.replace
     refusals = []
 
@@ -630,15 +643,27 @@ CRLF_TABLE = (b'(fp_lib_table\r\n  (version 7)\r\n  (lib (name "A")(type "KiCad"
               b'(uri "x")(options "")(descr ""))\r\n)\r\n')
 
 
-def test_a_table_with_a_utf8_bom_is_accepted_and_keeps_it(tmp_path):
-    """@brief L2: the BOM is not an invalid table; the rewrite keeps it."""
+def test_a_table_with_a_utf8_bom_is_accepted_and_rewritten_without_it(tmp_path):
+    """@brief L2: the BOM is not an invalid table; the rewrite drops it.
+
+    CONTRACT CHANGED 2026-11-15 (L3): the rewrite used to keep the BOM.
+    KiCad 10 ignores a whole fp-lib-table or sym-lib-table that starts with
+    one (kicad-cli 10.0.8 `sch erc`, project and global table: «La
+    configurazione corrente non include la libreria», "the current
+    configuration does not include the library", for its rows; the same
+    table without BOM resolves), so keeping it kept the new row unusable.
+    The table is still read and accepted, every other byte kept, and the
+    original with its BOM becomes the history backup.
+    """
     table = tmp_path / "fp-lib-table"
     table.write_bytes(BOM + CRLF_TABLE)
     assert find_library_entry(table, "A").uri == "x"
     assert update_fp_lib_table(table, "KiCadGen", "/y", create_missing=False)
     data = table.read_bytes()
-    assert data.startswith(BOM) and not data[3:].startswith(BOM)
+    assert not data.startswith(BOM)
+    assert data.startswith(CRLF_TABLE[:CRLF_TABLE.rindex(b")")]), "other bytes kept"
     assert find_library_entry(table, "KiCadGen").uri == "/y"
+    assert (tmp_path / "fp-lib-table.kicadgen-backup").read_bytes() == BOM + CRLF_TABLE
 
 
 def test_a_table_without_bom_does_not_gain_one(tmp_path):
@@ -732,6 +757,10 @@ def test_refused_rollback_copy_names_the_users_file_not_the_rollback_folder(
     artifacts = _artifacts(tmp_path)
     project = tmp_path / "project"
     first = install_component_library(artifacts, project)
+    # CONTRACT CHANGED 2026-11-15 (P3): identical installed files are neither
+    # rewritten nor backed up, so no rollback copy was attempted. An older
+    # installed footprint is replaced again and its copy is the refused one.
+    first.footprint_path.write_text("old footprint", encoding="utf-8")
     real_copy = kicad_library._copy_writable
 
     def refuse_backup(source, target):

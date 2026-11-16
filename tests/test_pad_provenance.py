@@ -122,7 +122,9 @@ def test_an_old_mapping_round_trips_unchanged_and_writes_the_same_file(monkeypat
     plain = _render(geometry, monkeypatch)
     assert _render(again, monkeypatch) == plain
     assert all(pad.lead is None and pad.sources is None for pad in build_package(geometry).pads)
-    assert "stimat" not in plain
+    # CONTRACT CHANGED 2026-11-15 (round 2): the package notes are English
+    # (generators.package.PACKAGE_NOTE_LANGUAGE), «stimat» became «estimated».
+    assert "estimated" not in plain and "stimato" not in plain
 
 
 def test_lead_and_sources_never_change_the_pad_nodes_of_the_file(monkeypatch):
@@ -158,8 +160,10 @@ def test_the_note_compresses_runs_skips_blank_numbers_and_stays_bounded():
     # Text numbers are never ranged; a repeated number (split pad) is named once.
     assert estimated_pad_list(["A1", "A2", "A3", "EP", "EP"]) == "A1, A2, A3, EP"
     # Blank numbers are counted, never written as empty entries.
-    assert estimated_pad_list(["1", "", " ", "5"]) == "1, 5, 2 senza numero"
-    assert estimated_pad_list(["", ""]) == "2 senza numero"
+    # CONTRACT CHANGED 2026-11-15 (round 2): the count is written in the
+    # file's English (ESTIMATED_PADS_UNNAMED), no longer «senza numero».
+    assert estimated_pad_list(["1", "", " ", "5"]) == "1, 5, 2 unnumbered"
+    assert estimated_pad_list(["", ""]) == "2 unnumbered"
     assert estimated_pad_list([]) == ""
     # Beyond ESTIMATED_PADS_LISTED entries the rest is a count of pads.
     scattered = [str(n) for n in range(1, 40, 2)]          # 20 isolated numbers
@@ -177,7 +181,8 @@ def test_the_description_of_a_package_names_its_unnumbered_estimated_holes_by_co
     geometry = package_from_mapping(_package(_pin("1", -3.0, sources={"drill_mm": "estimated"}),
                                              _pin("2", 3.0), mechanical))
     description = build_package(geometry).description
-    assert description.endswith(ESTIMATED_PADS_NOTE.format(numbers="1, 1 senza numero"))
+    # CONTRACT CHANGED 2026-11-15 (round 2): English count, see ESTIMATED_PADS_UNNAMED.
+    assert description.endswith(ESTIMATED_PADS_NOTE.format(numbers="1, 1 unnumbered"))
     assert "pad , " not in description and ", ," not in description
 
 

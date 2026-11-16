@@ -119,10 +119,10 @@ def test_the_question_names_a_pad_only_when_the_witness_singles_one_out():
     """Positive and negative together: «il pad N e' il piu' lontano» needs the witness's misplaced_pad."""
     named = _main()
     apply_dedicated_pads(named, _reading(), check_layout=_no_match(0.9, misplaced_pad="5"))
-    assert "il pad 5 e' il piu' lontano dai fori" in _pad_question(named)["text"]
+    assert "il pad 5 è il più lontano dai fori" in _pad_question(named)["text"]
     silent = _main()
     apply_dedicated_pads(silent, _reading(), check_layout=_no_match(0.9))
-    assert "il piu' lontano" not in _pad_question(silent)["text"]
+    assert "il più lontano" not in _pad_question(silent)["text"]
     # A name that is not a pad of the layout is not repeated either.
     foreign = _main()
     apply_dedicated_pads(foreign, _reading(), check_layout=_no_match(0.9, misplaced_pad="99"))
@@ -311,7 +311,9 @@ PINNED_DEFAULT_DIGESTS = {
     "role_prompt_land_pattern": "57b50af37532d38d9cdd9a5e00539e2f3b095f13f6ff03e773118663e33449eb",
     "role_prompt_side_view": "32df70b7e418af5ad0a6fca211d5aeb43231859051d5ee3f7b63d9ca23c664a0",
     "role_prompt_datasheet": "07b5c7262dd7b0586aea8b46cb131db71e89dd6834e8152c226265aeec403ef7",
-    "pin_type_prompt": "64cce1f386941e9a583a1d5d76d0afe91369c6ada27400304ea631a52628da07",
+    # CONTRACT CHANGED 2026-11-15: `source` chosen among the sent file names,
+    # page/table/figure in `location`; the former digest 64cce1f3... is superseded.
+    "pin_type_prompt": "af221e8706bccc1ce03eedb34830b6eb821a840632af4f28e3f7cec585f37553",
     "grounding_prompt": "94054f8d3c319bf2976bbd042cfd094d29e1672959fa9e5c26d21ac213ac0244",
     "mechanical_evidence_prompt": "e263114e5bf1aff8c5a2e5cc30b99d5df89c9d3779c2bfc40476608a540a0862",
     "image_instructions": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",

@@ -1,14 +1,17 @@
 """@brief Read-only checks on disk artifacts and the current applied symbol."""
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace as _replace_fields
+from functools import reduce
 from pathlib import Path
-from .messages import tx
+from . import messages as _messages
 import json
+import operator
 import math
 import os
 import re
 import subprocess
 import tempfile
 import threading
+import time
 from types import SimpleNamespace
 
 from .system_dependencies import check_kicad_version, find_kicad_cli
@@ -17,8 +20,11 @@ from .kicad_library import (ComponentArtifacts, KiCadLibraryError, PREVIEW_FOOTP
                             UTF8_BOM, create_preview_project, neutral_working_dir,
                             detach_3d_model, name_footprint, step_file_is_complete,
                             _decode_utf8, _direct_child_ranges, _node_arguments)
+from ..core.footprint import KICAD_VERSION
+from ..core.output_names import kicad_unsafe_characters
 from ..generators.castellated_module import EDGE_LABELS
-from ..generators.symbol import symbol_inputs, serialize_symbol, symbol_property_positions
+from ..generators.symbol import (SYMBOL_FORMAT_VERSION, symbol_inputs, serialize_symbol,
+                                 symbol_property_positions)
 
 
 #: Categories of a check: the document coherence (pinout against pads and
@@ -56,6 +62,658 @@ ACTION_OPEN_SYMBOL_TAB = 'open_symbol_tab'
 #: code of the row that says kicad-cli is missing).
 CLI_CHECK_CODES = frozenset({'kicad_footprint_read', 'kicad_symbol_read', 'kicad_symbol_file_read',
                              'kicad_3d_import', 'drc', 'erc'})
+
+#: Exit codes kicad-cli DECLARES (KiCad's common/cli/exit_codes.h): 0
+#: success, 1 wrong arguments, 2 «unknown» failure, 3 invalid input file,
+#: 4 output conflict, 5 DRC/ERC violations found (only with
+#: --exit-code-violations, which the check does not pass).
+CLI_EXIT_SUCCESS = 0
+CLI_ERR_ARGS = 1
+CLI_ERR_UNKNOWN = 2
+CLI_ERR_INVALID_INPUT_FILE = 3
+CLI_ERR_INVALID_OUTPUT_CONFLICT = 4
+CLI_ERR_RC_VIOLATIONS = 5
+
+#: The codes by which the three reads of the check (`fp export svg`, `sym
+#: export svg`, `pcb export step --no-board-body`) MAY say that KiCad
+#: refused their input. Observed with kicad-cli 10.0 on 2026-11-15, scratch
+#: files: 3 for a .pretty / .kicad_sym / board that does not exist or cannot
+#: be opened; 2 for a file that exists but does not load -- a footprint or a
+#: symbol with an unknown token or a leading UTF-8 BOM («Unable to load
+#: library»), and a STEP model KiCad cannot read («No valid PCB assembly»,
+#: exit 2 even when the board body is exported and a file is written).
+#: The SAME codes come from failures of the tool itself (round 2, measured
+#: with kicad-cli 10.0 on valid inputs): 2 from `pcb export step` onto a
+#: read-only output file or a folder in the output's place («Cannot rename
+#: temporary file '$tempfile$.step'»), 2 from `fp/sym export svg` with the
+#: input held exclusively by another process (the same «Unable to load
+#: library» as a corrupt file), 2 from `sym export svg -o <folder that
+#: cannot be created>`, 3 from `pcb export step` on a board held
+#: exclusively by another process. Other codes seen: 1 a wrong argument, 4
+#: from `fp export svg -o <folder that cannot be created>`; exit 0 with no
+#: output from `fp export svg` into a folder that does not exist or for a
+#: footprint name not in the library, and from `sym export svg` on a
+#: library holding no symbol.
+#: So a code in this set is only a CANDIDATE refusal: the check attributes
+#: it to the component when it REPEATS on a fresh copy of the input into a
+#: fresh output folder (`verify_component`, inner `run`); a tool failure that
+#: does not repeat is not a verdict on the file. A refusal that repeats is
+#: then tested against a DIFFERENTIAL CONTROL (round 3, `CONTROL_READS`):
+#: the same kind of command on the program's own known-good file -- refused
+#: too, the environment refuses fresh files (SKIP «environment»); read, the
+#: defect is the component's (ERROR). An unbalanced or garbage
+#: .kicad_mod made kicad-cli 10.0 HANG (no code at all): the check's own
+#: parser (`_single_footprint`) refuses such a file before kicad-cli is run.
+CLI_INPUT_REFUSED = frozenset({CLI_ERR_UNKNOWN, CLI_ERR_INVALID_INPUT_FILE})
+
+
+def cli_read_verdict(returncode, produced):
+    """@brief What one kicad-cli read/export says about the component's file.
+
+    @param returncode Exit code of kicad-cli.
+    @param produced True when the expected output exists and is not empty.
+    @return ``'unreadable'`` when KiCad declared its input refused
+        (`CLI_INPUT_REFUSED`): a candidate defect of the component, an
+        ERROR only when a second run on fresh copies refuses again AND the
+        differential control of the same kind is read (the same codes come
+        from failures of the tool and of the environment, see
+        `CLI_INPUT_REFUSED`).
+        ``'read'`` for exit 0 with an output. ``'not_run'`` otherwise: any
+        other declared code, a crash code (e.g. 0xC0000005), or exit 0
+        without an output -- a failure of the checking tool, never a verdict
+        on the file (review 2026-11-15, A2).
+    @note Classified by the DECLARED code only, never by the log text, which
+        is in KiCad's interface language. Observed with kicad-cli 10.0 on
+        2026-11-15: `fp export svg` exits 0 without writing anything when it
+        cannot write its output or does not find the footprint name in the
+        library («no output» is then not a verdict on the file's content).
+    """
+    if returncode in CLI_INPUT_REFUSED:
+        return 'unreadable'
+    if returncode == CLI_EXIT_SUCCESS and produced:
+        return 'read'
+    return 'not_run'
+
+
+def _exit_code_text(code):
+    """An exit code as the user can look it up: a Windows status (crash) in hex, a small code in decimal."""
+    try:
+        value = int(code)
+    except (TypeError, ValueError):
+        return str(code)
+    return f'0x{value & 0xFFFFFFFF:08X}' if value < 0 or value > 255 else str(value)
+
+
+#: Seconds kicad-cli gets for the first attempt of a read of the component.
+CLI_READ_TIMEOUT_S = 60
+#: Least seconds the repeat of a refused read gets (round 3, item 4): the
+#: repeat gets only what the first attempt left of `CLI_READ_TIMEOUT_S`, so
+#: a refusal after 59 s and a timeout do not add up to two minutes, but
+#: never less than this, so a repeat after a slow refusal can still start
+#: KiCad (a cold start of kicad-cli 10 takes a few seconds).
+CLI_RETRY_MIN_TIMEOUT_S = 15
+#: Seconds the differential control (`CONTROL_READS`) gets: its input is a
+#: few lines, so a kicad-cli that needs longer is not answering.
+CLI_CONTROL_TIMEOUT_S = 30
+#: Seconds of a check run after which a read that TIMED OUT gets no
+#: differential control (round 4, item 1): a budget bound, not a
+#: classification threshold. A timeout already cost `CLI_READ_TIMEOUT_S`;
+#: before round 4 four reads that all time out cost 4 x 60 s, and a control
+#: per kind would add up to 3 x 30 s more. Past this point the timeout stays
+#: a SKIP «timeout» without a verdict, exactly as before round 4; a control
+#: of the same kind already made in the run is reused whatever the time
+#: (it costs nothing). Twice the read budget leaves room for the first
+#: timeout's control after the version check and the footprint read.
+CLI_TIMEOUT_CONTROL_LIMIT_S = 2 * CLI_READ_TIMEOUT_S + CLI_CONTROL_TIMEOUT_S
+#: How many times `CLI_READ_TIMEOUT_S` the EXTENDED read gets (round 5,
+#: item 1): a read that timed out while the differential control of its kind
+#: was read is run once more with this longer budget before the timeout is
+#: blamed on the component. The control proved that kicad-cli starts and
+#: reads a file of this kind under the same conditions, so what is left to
+#: tell apart is a file that is merely LARGE (a STEP model of tens of MB
+#: imported on a slow PC) from one that keeps KiCad busy for good. A bound of
+#: patience, not a calibration: four times the normal budget (4 minutes) is
+#: how long a user can be asked to wait for one file of a check; a sound file
+#: that needs longer still is declared slower than the check accepts (an
+#: ERROR the remedy explains), and a hanging file never answers anyway.
+CLI_SLOW_READ_FACTOR = 4
+#: Seconds of the extended read (round 5, item 1).
+CLI_SLOW_READ_TIMEOUT_S = CLI_SLOW_READ_FACTOR * CLI_READ_TIMEOUT_S
+#: Extended reads one check run may make (round 5, item 1): the declared cap
+#: of the whole run. One is enough to judge a slow file and keeps the worst
+#: case of a run bounded at `CLI_SLOW_READ_TIMEOUT_S` more than before round
+#: 5, however many reads time out; a further timeout whose control reads
+#: gets no extended read and stays a SKIP «timeout» without a verdict (the
+#: tool's, as before round 4), never an ERROR on the 60 s criterion alone.
+CLI_SLOW_READS_PER_RUN = 1
+
+#: Clock of the read budgets; a module attribute so tests can fake it.
+_clock = time.monotonic
+
+#: Name of the symbol, footprint and board of the differential control.
+CONTROL_NAME = 'KiCadGenControl'
+
+#: Known-good minimal inputs of the DIFFERENTIAL CONTROL (round 3, item 1),
+#: one per kind of kicad-cli read: {kind: (relative input path, text, args
+#: builder (input, output) -> arguments, output pattern, output file name)}.
+#: When the component's file is refused twice, the same kind of command is
+#: run on this input under the same scratch conditions (`verify_component`):
+#: refused too -> the environment refuses fresh files (an antivirus holding
+#: new files in %TEMP%, a broken KiCad configuration), never the component.
+#: Verified with kicad-cli 10.0 on 2026-11-15 (scratch files): each reads
+#: with exit 0 and writes its output -- `fp export svg` one SVG, `sym export
+#: svg` one SVG, `pcb export step --no-board-body` a STEP holding the
+#: control model's solid.
+#: Literals on purpose, not the program's serializers: a regression of a
+#: generator must not make a sound control fail and turn a defective
+#: component into «environment». The FORMAT VERSION is the one exception
+#: (round 4, item 5): each control carries the version header the program's
+#: files of that kind carry (`KICAD_VERSION` for footprints and the preview
+#: board, `SYMBOL_FORMAT_VERSION` for symbols), so a KiCad too old for the
+#: format refuses the control too -- the environment, not the component.
+#: CONTRACT CHANGED 2026-11-15 (round 4, item 4): the STEP control used to
+#: export the BOARD BODY of a board without a model, which proved the board
+#: read and the STEP write but not a model import; it now holds one
+#: footprint whose model is a tiny known-good STEP (`CONTROL_STEP_TEXT`,
+#: written beside the board, `CONTROL_EXTRA_FILES`) and runs with the same
+#: ``--no-board-body`` as the component's 3D import, so an environment that
+#: breaks model loading fails the control too. Measured with kicad-cli 10.0
+#: on 2026-11-15: that board exports with exit 0 and a MANIFOLD_SOLID_BREP;
+#: the same board with an empty STEP model exits 2 («No valid PCB
+#: assembly»), like a component whose model KiCad cannot load.
+CONTROL_READS = {
+    'fp': (Path(f'{CONTROL_NAME}.pretty') / f'{CONTROL_NAME}.kicad_mod',
+           f'(footprint "{CONTROL_NAME}"\n  (version {KICAD_VERSION})\n  (generator "kicadgen")\n'
+           '  (layer "F.Cu")\n'
+           '  (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu" "F.Paste" "F.Mask"))\n)\n',
+           lambda source, output: ['fp', 'export', 'svg', '--footprint', CONTROL_NAME, '-o', output,
+                                   source.parent],
+           '*.svg', None),
+    'sym': (Path(f'{CONTROL_NAME}.kicad_sym'),
+            f'(kicad_symbol_lib\n  (version {SYMBOL_FORMAT_VERSION})\n  (generator "kicadgen")\n'
+            f'  (symbol "{CONTROL_NAME}"\n    (in_bom yes)\n    (on_board yes)\n'
+            '    (property "Reference" "U" (at 0 3.81 0) (effects (font (size 1.27 1.27))))\n'
+            f'    (property "Value" "{CONTROL_NAME}" (at 0 -3.81 0) (effects (font (size 1.27 1.27))))\n'
+            f'    (symbol "{CONTROL_NAME}_0_1"\n'
+            '      (rectangle (start -2.54 2.54) (end 2.54 -2.54) (stroke (width 0.254) (type default))'
+            ' (fill (type none)))\n    )\n  )\n)\n',
+            lambda source, output: ['sym', 'export', 'svg', '-o', output, source],
+            '*.svg', None),
+    'step': (Path(CONTROL_NAME) / f'{CONTROL_NAME}.kicad_pcb',
+             f'(kicad_pcb\n  (version {KICAD_VERSION})\n  (generator "kicadgen")\n'
+             '  (general (thickness 1.6))\n'
+             '  (paper "A4")\n  (layers\n    (0 "F.Cu" signal)\n    (2 "B.Cu" signal)\n'
+             '    (25 "Edge.Cuts" user)\n  )\n'
+             f'  (footprint "{CONTROL_NAME}" (layer "F.Cu") (at 5 5)\n'
+             '    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu" "F.Paste" "F.Mask"))\n'
+             f'    (model "${{KIPRJMOD}}/{CONTROL_NAME}.step" (offset (xyz 0 0 0))'
+             ' (scale (xyz 1 1 1)) (rotate (xyz 0 0 0)))\n  )\n'
+             '  (gr_rect (start 0 0) (end 10 10) (stroke (width 0.1) (type default)) (fill no)'
+             ' (layer "Edge.Cuts"))\n)\n',
+             lambda source, output: ['pcb', 'export', 'step', '--no-board-body', '-o', output, source],
+             None, f'{CONTROL_NAME}.step'),
+}
+
+
+def _box_step_text(size_mm):
+    """The ISO 10303-21 (AP214) text of one axis-aligned box solid, corner at the origin, mm.
+
+    Built from its 8 corners: 12 straight edges, 6 planar faces whose loops
+    run counter-clockwise seen from outside, one closed shell, one manifold
+    solid, millimetre units -- the smallest solid a STEP reader must load.
+    Private to the differential control: not the program's 3D generator
+    (see `CONTROL_READS`, «literals on purpose»).
+    """
+    entities = []
+
+    def entity(text):
+        entities.append(text)
+        return f'#{len(entities)}'
+
+    def number(value):
+        # STEP reals always carry a decimal point («1.», «0.5»).
+        text = repr(float(value))
+        return text[:-1] if text.endswith('.0') else text
+
+    def point(xyz):
+        return entity(f"CARTESIAN_POINT('',({','.join(number(c) for c in xyz)}))")
+
+    def direction(xyz):
+        return entity(f"DIRECTION('',({','.join(number(c) for c in xyz)}))")
+
+    def unit(start, end):
+        delta = [e - s for s, e in zip(start, end)]
+        length = math.sqrt(sum(c * c for c in delta))
+        return [c / length for c in delta], length
+
+    dx, dy, dz = size_mm
+    corners = [((i & 1) * dx, ((i >> 1) & 1) * dy, ((i >> 2) & 1) * dz) for i in range(8)]
+    vertices = [entity(f"VERTEX_POINT('',{point(corner)})") for corner in corners]
+    # (corner indices counter-clockwise seen from outside, outward normal).
+    faces = (((0, 2, 3, 1), (0, 0, -1)), ((4, 5, 7, 6), (0, 0, 1)), ((0, 1, 5, 4), (0, -1, 0)),
+             ((2, 6, 7, 3), (0, 1, 0)), ((0, 4, 6, 2), (-1, 0, 0)), ((1, 3, 7, 5), (1, 0, 0)))
+    edges = {}
+
+    def oriented_edge(a, b):
+        key = (min(a, b), max(a, b))
+        if key not in edges:
+            start, end = corners[key[0]], corners[key[1]]
+            along, length = unit(start, end)
+            vector = entity(f"VECTOR('',{direction(along)},{number(length)})")
+            line = entity(f"LINE('',{point(start)},{vector})")
+            edges[key] = entity(f"EDGE_CURVE('',{vertices[key[0]]},{vertices[key[1]]},{line},.T.)")
+        return entity(f"ORIENTED_EDGE('',*,*,{edges[key]},{'.T.' if a < b else '.F.'})")
+
+    face_ids = []
+    for loop, normal in faces:
+        sides = [oriented_edge(loop[k], loop[(k + 1) % 4]) for k in range(4)]
+        edge_loop = entity("EDGE_LOOP('',(" + ','.join(sides) + '))')
+        bound = entity(f"FACE_OUTER_BOUND('',{edge_loop},.T.)")
+        reference, _length = unit(corners[loop[0]], corners[loop[1]])
+        placement = entity(f"AXIS2_PLACEMENT_3D('',{point(corners[loop[0]])},{direction(normal)},"
+                        f"{direction(reference)})")
+        plane = entity(f"PLANE('',{placement})")
+        face_ids.append(entity(f"ADVANCED_FACE('',({bound}),{plane},.T.)"))
+    shell = entity("CLOSED_SHELL('',(" + ','.join(face_ids) + '))')
+    solid = entity(f"MANIFOLD_SOLID_BREP('{CONTROL_NAME}',{shell})")
+    origin = entity(f"AXIS2_PLACEMENT_3D('',{point((0, 0, 0))},{direction((0, 0, 1))},{direction((1, 0, 0))})")
+    length_unit = entity('( LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT(.MILLI.,.METRE.) )')
+    angle_unit = entity('( NAMED_UNIT(*) PLANE_ANGLE_UNIT() SI_UNIT($,.RADIAN.) )')
+    solid_angle_unit = entity('( NAMED_UNIT(*) SI_UNIT($,.STERADIAN.) SOLID_ANGLE_UNIT() )')
+    uncertainty = entity(f"UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE(1.E-07),{length_unit},"
+                      "'distance_accuracy_value','confusion accuracy')")
+    context = entity(f'( GEOMETRIC_REPRESENTATION_CONTEXT(3) GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT(({uncertainty})) '
+                  f'GLOBAL_UNIT_ASSIGNED_CONTEXT(({length_unit},{angle_unit},{solid_angle_unit})) '
+                  "REPRESENTATION_CONTEXT('','') )")
+    representation = entity(f"ADVANCED_BREP_SHAPE_REPRESENTATION('',({origin},{solid}),{context})")
+    application = entity("APPLICATION_CONTEXT('core data for automotive mechanical design processes')")
+    entity(f"APPLICATION_PROTOCOL_DEFINITION('international standard','automotive_design',2000,{application})")
+    product_context = entity(f"PRODUCT_CONTEXT('',{application},'mechanical')")
+    product = entity(f"PRODUCT('{CONTROL_NAME}','{CONTROL_NAME}','',({product_context}))")
+    formation = entity(f"PRODUCT_DEFINITION_FORMATION('','',{product})")
+    definition_context = entity(f"PRODUCT_DEFINITION_CONTEXT('part definition',{application},'design')")
+    definition = entity(f"PRODUCT_DEFINITION('design','',{formation},{definition_context})")
+    shape = entity(f"PRODUCT_DEFINITION_SHAPE('','',{definition})")
+    entity(f"SHAPE_DEFINITION_REPRESENTATION({shape},{representation})")
+    data = ''.join(f'#{index} = {text};\n' for index, text in enumerate(entities, 1))
+    return ('ISO-10303-21;\nHEADER;\n'
+            f"FILE_DESCRIPTION(('{CONTROL_NAME}'),'2;1');\n"
+            f"FILE_NAME('{CONTROL_NAME}.step','2026-11-15T00:00:00',(''),(''),'','','');\n"
+            "FILE_SCHEMA(('AUTOMOTIVE_DESIGN { 1 0 10303 214 1 1 1 1 }'));\nENDSEC;\nDATA;\n"
+            + data + 'ENDSEC;\nEND-ISO-10303-21;\n')
+
+
+#: The known-good STEP model of the 3D-import control: a 1 x 1 x 1 mm box.
+CONTROL_STEP_TEXT = _box_step_text((1.0, 1.0, 1.0))
+
+#: Files a control needs BESIDE its main input (`CONTROL_READS`), keyed by
+#: kind: {relative path inside the attempt's input folder: text}. The STEP
+#: control's board names its model through ${KIPRJMOD}, the board's folder,
+#: exactly as the component's preview board does.
+CONTROL_EXTRA_FILES = {
+    'step': {Path(CONTROL_NAME) / f'{CONTROL_NAME}.step': CONTROL_STEP_TEXT},
+}
+
+
+def _output_produced(output, pattern):
+    """True when a read's expected output exists and is not empty.
+
+    `output` is a folder searched with `pattern`, or the output file when
+    `pattern` is None. An OSError (an antivirus quarantining the file) goes
+    to the caller: a failure on the checking side, never a verdict.
+    """
+    files = list(Path(output).rglob(pattern)) if pattern else [Path(output)]
+    return any(path.is_file() and path.stat().st_size for path in files)
+
+
+#: Conditions under which a blocking-capable check applies to one run
+#: (`BlockingCheck.applies`; every condition listed must hold). Each one is
+#: a fact the caller of `required_for_install` declares:
+#: «cli» a kicad-cli was available (`find_kicad_cli`), «step» the component
+#: folder holds its STEP, «symbol_file» it holds its saved ``<name>.kicad_sym``,
+#: «document» a document pinout was given (`document_check_applies`),
+#: «contacts» the applied rows declare switch functions (`declares_contacts`),
+#: «pad_leads» declared terminals were given (`pad_leads` non-empty).
+CONDITIONS = ('cli', 'step', 'symbol_file', 'document', 'contacts', 'pad_leads')
+
+
+@dataclass(frozen=True)
+class BlockingCheck:
+    """@brief One check that can emit an ERROR, declared with when it applies and what concludes it.
+
+    @param applies The `CONDITIONS` that must all hold for the check to run
+        and be able to block (empty: every run).
+    @param concluded_by Codes of the rows whose emission proves the check
+        reached its outcome: its own single conclusion row (an OK, or the
+        ERROR rows it publishes FIRST), a row emitted in its place when it
+        could not be made (e.g. `footprint_missing`), and the rows that are
+        always published AFTER the whole check in `verify_component` (the
+        next stage's first row, the run's last row `manual_checks`). A
+        check whose rows interleave statuses (a per-model loop, a list of
+        DRC violations) is concluded only by a later row. Exact codes, or a
+        family written ``prefix*`` (the ERC violation rows are
+        ``erc_<violation type>``, round 4, item 3).
+    @param errors The ERROR codes the check emits: exact codes, or a family
+        written ``prefix*`` (the DRC rows are ``drc_<violation type>``).
+    @param own The codes (or families) among `concluded_by` that are the
+        check's OWN outcome rows, as opposed to rows published after it. An
+        own row concludes the check only when it IS an outcome: an OK, WARN
+        or ERROR, or a SKIP when `skip_concludes`; a row declared
+        `Check.file_busy` never does (round 4, item 7: the check was not
+        made now). A later row concludes it whatever its status.
+    @param skip_concludes True when a SKIP of an own row is a legitimate
+        outcome of the check (KiCad's reads: a tool failure is judged by
+        the window's read rules, `required_reads`); False when a SKIP means
+        the check was not made (the footprint file held by another program,
+        pin-pad without a readable footprint).
+    @param needs Keys of `BLOCKING_CHECKS` that must be concluded for this
+        check to be: the checks of a stage that runs only after its
+        footprint was read (`footprint_file`) are not concluded by later
+        rows when that read itself was not made (round 4, item 7).
+    """
+    applies: frozenset
+    concluded_by: frozenset
+    errors: frozenset
+    own: frozenset = frozenset()
+    skip_concludes: bool = True
+    needs: frozenset = frozenset()
+
+
+#: The statuses of a row that is an outcome of the check it belongs to.
+_OUTCOME_STATUSES = frozenset({'OK', 'WARN', 'ERROR'})
+
+
+def _code_matches(code, pattern):
+    """True when a row code is `pattern`, or belongs to the family ``prefix*`` it names."""
+    return code.startswith(pattern[:-1]) if pattern.endswith('*') else code == pattern
+
+
+#: The last row of every `verify_component` run: once it is emitted, every
+#: check of the run has reached its outcome.
+_RUN_END = frozenset({'manual_checks'})
+#: First rows of the footprint stage: published after the KiCad version check.
+_FOOTPRINT_STAGE_START = frozenset({'footprint_bom', 'footprint_file', 'footprint_missing'})
+#: Rows that close the footprint stage: KiCad's read of the footprint is its
+#: last row (a SKIP without kicad-cli too), or the footprint does not exist.
+_FOOTPRINT_STAGE_END = frozenset({'kicad_footprint_read', 'footprint_missing'})
+#: Rows that close the symbol stage: the read of the saved symbol file, the
+#: row that says it is missing, or the stage's own failure row.
+_SYMBOL_STAGE_END = frozenset({'kicad_symbol_file_read', 'symbol_export_missing', 'symbol_error'})
+#: First rows of the STEP stage, always published after the document and
+#: contact checks: no STEP, the STEP's integrity, or its failure.
+_STEP_STAGE_START = frozenset({'step_missing', 'step_integrity', 'step_model'})
+
+
+def _blocking(applies, concluded_by, errors, *, own=(), skip_concludes=True, needs=(), run_end=True):
+    """A `BlockingCheck` from plain iterables.
+
+    The run's last row concludes it unless `run_end` is False: a check whose
+    own row is always published when the check is made, and whose SKIP or
+    absence means it was NOT made (round 4, item 7), must not be concluded
+    merely because the run ended. The own codes are added to `concluded_by`.
+    """
+    concluded = frozenset(concluded_by) | frozenset(own) | (_RUN_END if run_end else frozenset())
+    return BlockingCheck(frozenset(applies), concluded, frozenset(errors), frozenset(own),
+                         skip_concludes, frozenset(needs))
+
+
+#: Every check of `verify_component` that can emit an ERROR, which forbids
+#: the installation (review 2026-11-15, round 3, item 2). Keyed by the
+#: check's code. `required_for_install` returns the keys that apply to a
+#: run, `concluded_required` those a (possibly interrupted) run concluded.
+#: CONTRACT CHANGED 2026-11-15 (round 3): the set used to be hand-picked
+#: (five codes) and missed checks that block -- the document pinout, the
+#: NC/NO contact roles, the 3D import, the applied symbol's read; a run
+#: interrupted before them could be judged «crashed» (installation allowed)
+#: with an ERROR never reached. Now every ERROR site of this module is here
+#: or in `ERROR_CODES_NOT_REQUIRED`, enforced by an AST scan in
+#: tests/test_component_check_r3_required_table.py.
+#: CONTRACT CHANGED 2026-11-15 (round 4, item 7): a footprint held by
+#: another program gave a SKIP «file in uso» that concluded `footprint_file`,
+#: and the run's last row concluded everything else, so the footprint stage
+#: (pads, terminals, model links, KiCad's read) and pin-pad counted as
+#: concluded although never made. Now `footprint_file` and `pin_pad` are
+#: concluded only by a real outcome of their own row (never a SKIP, never the
+#: run's end), the saved symbol's read never by a «file in uso» SKIP, and
+#: the checks that need the footprint read (`needs`) stay unconcluded with it.
+BLOCKING_CHECKS = {
+    # Run start: a kicad-cli older than the minimum.
+    'kicad_version': _blocking({'cli'}, {'kicad_version'} | _FOOTPRINT_STAGE_START,
+                               {'kicad_version'}),
+    # Footprint stage.
+    # Reading the footprint file: parsed (OK), refused (ERROR), absent
+    # (`footprint_missing`, emitted in its place). Its SKIP «file in uso»
+    # means the file was not read now: not an outcome, and the run's end
+    # does not stand in for it.
+    'footprint_file': _blocking((), {'footprint_missing'}, {'footprint_file', 'footprint_missing'},
+                                own={'footprint_file'}, skip_concludes=False, run_end=False),
+    'footprint_pads_overlap': _blocking((), {'footprint_pads_overlap', 'footprint_geometry'}
+                                        | _FOOTPRINT_STAGE_END, {'footprint_pads_overlap'},
+                                        needs={'footprint_file'}),
+    'lead_hole': _blocking({'pad_leads'}, {'lead_hole', 'lead_hole_contradicted'} | _FOOTPRINT_STAGE_END,
+                           {'lead_hole'}, needs={'footprint_file'}),
+    # One row per model node and per transform, statuses interleaved: only
+    # the end of the stage concludes it.
+    'model_link': _blocking((), _FOOTPRINT_STAGE_END, {'model_link'}, needs={'footprint_file'}),
+    # A SKIP of KiCad's read (a tool failure, kicad-cli missing) is its
+    # outcome, judged by the window's read rules (`required_reads`).
+    'kicad_footprint_read': _blocking({'cli'}, {'footprint_missing'}, {'kicad_footprint_read'},
+                                      own={'kicad_footprint_read'}, needs={'footprint_file'}),
+    # Symbol stage.
+    # Pin-pad: its SKIP «footprint not readable» compared nothing; a
+    # `symbol_error` (the applied symbol cannot be built) or a
+    # `footprint_missing` (no footprint to compare with, an ERROR that
+    # blocks on its own) stands in for it.
+    'pin_pad': _blocking((), {'symbol_error', 'footprint_missing'}, {'pin_pad'}, own={'pin_pad'},
+                         skip_concludes=False, run_end=False),
+    'kicad_symbol_read': _blocking({'cli'}, _SYMBOL_STAGE_END, {'kicad_symbol_read'},
+                                   own={'kicad_symbol_read'}),
+    # The saved symbol's read: a SKIP «file in uso» (`Check.file_busy`) is
+    # not its outcome; the file gone meanwhile (`symbol_export_missing`) is.
+    'kicad_symbol_file_read': _blocking({'cli', 'symbol_file'},
+                                        {'symbol_error', 'symbol_export_missing'},
+                                        {'kicad_symbol_file_read'},
+                                        own={'kicad_symbol_file_read'}, run_end=False),
+    'symbol_error': _blocking((), _SYMBOL_STAGE_END, {'symbol_error'}),
+    # Document and contact checks, published before the STEP stage.
+    'document_dropped': _blocking({'document'}, _STEP_STAGE_START, {'document_dropped'}),
+    'document_unnamed': _blocking({'document'}, _STEP_STAGE_START, {'document_unnamed'}),
+    'pin_role_contradiction': _blocking({'contacts'}, {'pin_role_contradiction'} | _STEP_STAGE_START,
+                                        {'pin_role_contradiction'}),
+    # STEP stage.
+    # The STEP's integrity: OK, or `step_model` (incomplete, unreadable) in its place.
+    'step_integrity': _blocking({'step'}, {'step_integrity', 'step_model'}, {'step_model'}),
+    # The preview board holds the footprint read above: with that read not
+    # made (`footprint_file` unconcluded) the import was not made either.
+    'kicad_3d_import': _blocking({'cli', 'step'}, {'step_model', 'footprint_missing'},
+                                 {'kicad_3d_import'}, own={'kicad_3d_import'},
+                                 needs={'footprint_file'}),
+    # DRC of the preview: a real contact between two pads is an ERROR,
+    # published among the other violations, so only the ERC rows after it (or
+    # the end) conclude it. CONTRACT CHANGED 2026-11-15 (round 4, item 3):
+    # the ERC publishes ONE row `erc` (OK or SKIP) or one row per violation
+    # group coded `erc_<violation type>`; only the former concluded the DRC,
+    # so a run with ERC violations that stopped before its last row left the
+    # DRC unconcluded. The family `erc_*` concludes it too.
+    'drc': _blocking({'cli'}, {'drc', 'erc', 'erc_*', 'kicad_library'}, {'drc_*'},
+                     needs={'footprint_file'}),
+}
+
+#: ERROR codes of this module that are NOT a requirement, each with the
+#: structural reason (round 3, item 2). The AST scan of the tests accepts an
+#: ERROR code only when it is in a `BlockingCheck.errors` or here.
+ERROR_CODES_NOT_REQUIRED = {
+    # An invalid component name is the run's ONLY row: the run returns at
+    # once, so no interruption can fall between the check and its ERROR.
+    'component_name': 'emitted alone, the run ends with it',
+    # `erc_checks` passes no contact rule to `_violation_groups`, so no ERC
+    # group is ever of the «zero» class: `_violation_checks` gives ERC rows
+    # WARN only (statically the shared code could say ERROR).
+    'erc_*': 'erc_checks never classifies a violation as a contact',
+}
+
+#: The codes of every blocking-capable check (all conditions true).
+REQUIRED_FOR_INSTALL = frozenset(BLOCKING_CHECKS)
+
+#: KiCad's reads of the files an installation COPIES (the footprint and the
+#: saved symbol file): what the window requires KiCad to have READ (OK or
+#: WARN), as opposed to merely concluded. `required_reads` applies them.
+INSTALLED_FILE_READS = frozenset({'kicad_footprint_read', 'kicad_symbol_file_read'})
+
+
+def document_check_applies(document):
+    """@brief True when `document_checks` can judge this document (the «document» condition).
+
+    @param document The `document` argument of `verify_component`.
+    @return True for a side-numbered layout with at least one pinout entry:
+        exactly the case in which `document_checks` emits a row (and may
+        emit «document_dropped» / «document_unnamed»).
+    """
+    if not isinstance(document, dict) or document.get('layout', 'sides') != 'sides':
+        return False
+    return any(str((entry or {}).get('pin', '')).strip() for entry in document.get('pinout') or ()
+               if isinstance(entry, dict) or entry is None)
+
+
+def declares_contacts(rows):
+    """@brief True when the applied rows declare a switch function (the «contacts» condition).
+
+    @param rows Applied symbol rows.
+    @return True when a row's function is NC, NO or COM as the relay symbol
+        reads it (`symbol_relay.pin_function`): exactly the rows
+        `pin_role_checks` judges.
+    """
+    from ..generators.symbol_relay import pin_function
+    return any(pin_function(row) in ('nc', 'no', 'common') for row in rows or () if isinstance(row, dict))
+
+
+def required_for_install(*, cli_available, has_step, has_symbol_file, has_document=False,
+                         has_contacts=False, has_pad_leads=False):
+    """@brief The blocking-capable checks (`BLOCKING_CHECKS`) that apply to one check run.
+
+    @param cli_available True when the check had a kicad-cli to run (the
+        window's `find_kicad_cli` result): without it the KiCad reads, the
+        version check and the DRC are never made, and are not required.
+    @param has_step True when the component folder holds its STEP model.
+    @param has_symbol_file True when the component folder holds its saved
+        ``<name>.kicad_sym``.
+    @param has_document True when a document pinout was given
+        (`document_check_applies` of the `document` argument); False by
+        default, so a caller that passes no document requires no document check.
+    @param has_contacts True when the applied rows declare switch functions
+        (`declares_contacts` of the rows); False by default.
+    @param has_pad_leads True when declared terminals were given (the
+        `pad_leads` argument non-empty); False by default.
+    @return A frozenset of check codes (keys of `BLOCKING_CHECKS`).
+    @note CONTRACT CHANGED 2026-11-15 (round 3, item 2): every check that can
+        block is returned when it applies, not five hand-picked ones; the
+        new keyword-only flags default to False, so existing callers still
+        get a correct (if smaller) set.
+    """
+    facts = {'cli': cli_available, 'step': has_step, 'symbol_file': has_symbol_file,
+             'document': has_document, 'contacts': has_contacts, 'pad_leads': has_pad_leads}
+    return frozenset(code for code, entry in BLOCKING_CHECKS.items()
+                     if all(facts[condition] for condition in entry.applies))
+
+
+def required_reads(*, cli_available, has_symbol_file):
+    """@brief KiCad's reads of the installed files that must have READ them (OK or WARN).
+
+    @param cli_available See `required_for_install`.
+    @param has_symbol_file See `required_for_install`.
+    @return The codes of `INSTALLED_FILE_READS` that apply: none without
+        kicad-cli, the footprint read, plus the saved symbol file's read when
+        that file exists.
+    @note Distinct from `required_for_install` (round 3): the applied
+        symbol's read (`kicad_symbol_read`) can block and must be concluded,
+        but the installation does not copy that text, so it is not a read
+        the window waits for.
+    """
+    if not cli_available:
+        return frozenset()
+    return frozenset({'kicad_footprint_read'} | ({'kicad_symbol_file_read'} if has_symbol_file else set()))
+
+
+def concluded_required(results, *, cli_available, has_step, has_symbol_file, has_document=False,
+                       has_contacts=False, has_pad_leads=False):
+    """@brief Which of the checks an installation needs a (possibly interrupted) run concluded.
+
+    @param results The `Check` rows the run emitted, in any order.
+    @param cli_available See `required_for_install`.
+    @param has_step See `required_for_install`.
+    @param has_symbol_file See `required_for_install`.
+    @param has_document See `required_for_install`.
+    @param has_contacts See `required_for_install`.
+    @param has_pad_leads See `required_for_install`.
+    @return The set of required codes (`required_for_install`) for which a
+        concluding row (`BlockingCheck.concluded_by`) was emitted: a later
+        row whatever its status, an own row as an outcome -- an OK, WARN or
+        ERROR, and a SKIP «not run» of KiCad's reads too, a declared outcome
+        the window judges by its usual rules (an ERROR blocks, a run where
+        KiCad read nothing is «unread»), exactly as in a run that ended
+        normally.
+    @note For the window's «crashed» state (review 2026-11-15, round 2, R1):
+        a run that stopped on an internal failure may be treated as
+        «crashed» (installation allowed, outcome incomplete) only when this
+        set equals `required_for_install(...)`; otherwise something the
+        installation needs was not verified and the state is «failed». Read
+        on the declared `Check.code` only, never on a translated text.
+    @note A required check that never ran because an earlier one failed
+        (no KiCad read of a footprint that did not parse) stays missing here;
+        that run holds an ERROR, which blocks the installation on its own.
+    @note CONTRACT CHANGED 2026-11-15 (round 4, items 3 and 7): a row
+        concludes a check through a code or a declared family
+        (``prefix*``); a check's OWN row concludes it only as an outcome
+        (`BlockingCheck.own`, `skip_concludes`; never a `Check.file_busy`
+        row), and a check is concluded only when the checks it `needs` are.
+        So a footprint held by another program leaves `footprint_file`, its
+        stage and `pin_pad` unconcluded even in a run that ended.
+    """
+    rows = [result for result in results or () if isinstance(getattr(result, 'code', None), str)]
+
+    def concludes(entry, row):
+        """True when `row` concludes the check declared by `entry`."""
+        if not any(_code_matches(row.code, pattern) for pattern in entry.concluded_by):
+            return False
+        if not any(_code_matches(row.code, pattern) for pattern in entry.own):
+            return True
+        if getattr(row, 'file_busy', False):
+            return False
+        status = getattr(row, 'status', '')
+        return status in _OUTCOME_STATUSES or (status == 'SKIP' and entry.skip_concludes)
+
+    concluded = {code for code, entry in BLOCKING_CHECKS.items()
+                 if any(concludes(entry, row) for row in rows)}
+    # A check whose prerequisite was not concluded is not either; repeated
+    # until stable (the `needs` graph is acyclic and shallow).
+    while True:
+        dropped = {code for code in concluded if not BLOCKING_CHECKS[code].needs <= concluded}
+        if not dropped:
+            break
+        concluded -= dropped
+    required = required_for_install(cli_available=cli_available, has_step=has_step,
+                                    has_symbol_file=has_symbol_file, has_document=has_document,
+                                    has_contacts=has_contacts, has_pad_leads=has_pad_leads)
+    return required & concluded
+
+
+def missing_required(results, *, cli_available, has_step, has_symbol_file, has_document=False,
+                     has_contacts=False, has_pad_leads=False):
+    """@brief The required checks a run did NOT conclude (`required_for_install` minus `concluded_required`).
+
+    @param results The `Check` rows the run emitted.
+    @param cli_available See `required_for_install`.
+    @param has_step See `required_for_install`.
+    @param has_symbol_file See `required_for_install`.
+    @param has_document See `required_for_install`.
+    @param has_contacts See `required_for_install`.
+    @param has_pad_leads See `required_for_install`.
+    @return A frozenset of check codes; empty when the run concluded every one.
+    """
+    flags = dict(cli_available=cli_available, has_step=has_step, has_symbol_file=has_symbol_file,
+                 has_document=has_document, has_contacts=has_contacts, has_pad_leads=has_pad_leads)
+    return frozenset(required_for_install(**flags) - concluded_required(results, **flags))
+
 
 #: DRC violation types that come from the PREVIEW board, not from the
 #: footprint: no net (unconnected items) and the preview's own footprint
@@ -111,6 +769,108 @@ VIOLATION_TEXTS = {
 }
 
 
+class LocalizedStr(str):
+    """@brief A text rendered in the current language that remembers how to render itself again.
+
+    @param text The rendered text (what `str` methods see).
+    @param spec How to render it again, or None: ``('tx', template, ((key,
+        value), ...))`` for a `tx` message (values may be LocalizedStr
+        themselves), ``('concat', (part, ...))`` for texts joined with ``+``,
+        ``('join', separator, (item, ...))`` for `_join`, ``('call', obj)``
+        for an object with its own ``localized()`` (a `SymbolError`).
+    @note A `str` on purpose: every consumer that only shows, compares or
+        hashes the text is unaffected; `localized` reads `spec` to recompose
+        the text after a language switch (review 2026-11-15, M3). ``+`` with
+        another str keeps the recipe (``__radd__`` of a str subclass runs
+        before ``str.__add__``); other str methods return plain text, which
+        then simply stays in the language it was written in.
+    """
+
+    spec = None
+
+    def __new__(cls, text, spec=None):
+        """@brief A rendered text with its recipe.
+
+        @param text The rendered text.
+        @param spec The recipe (see the class), None for none; a default so
+            that pickle and deepcopy, which call ``cls(text)``, work.
+        @return The new LocalizedStr.
+        """
+        obj = super().__new__(cls, text)
+        obj.spec = spec
+        return obj
+
+    def __add__(self, other):
+        """@brief Concatenation that keeps both recipes.
+
+        @param other Another str.
+        @return A LocalizedStr whose recipe is the concatenation.
+        """
+        if not isinstance(other, str):
+            return NotImplemented
+        return LocalizedStr(str.__add__(self, other), ('concat', (self, other)))
+
+    def __radd__(self, other):
+        """@brief ``plain + localized``: keeps the recipe of the right operand.
+
+        @param other A str on the left.
+        @return A LocalizedStr whose recipe is the concatenation.
+        """
+        if not isinstance(other, str):
+            return NotImplemented
+        return LocalizedStr(str.__add__(other, self), ('concat', (other, self)))
+
+
+def tx(source, /, **values):
+    """@brief `messages.tx` whose result also remembers its template and values.
+
+    @param source Italian template (the catalog key, as for `messages.tx`).
+    @param values Placeholder values; LocalizedStr values are rendered again
+        with the message.
+    @return A `LocalizedStr` equal to `messages.tx(source, **values)`.
+    @note Every message of this module goes through it, so `localized` can
+        recompose a Check in the language active when it is SHOWN, not the one
+        active when it was produced.
+    """
+    return LocalizedStr(_messages.tx(source, **values), ('tx', source, tuple(values.items())))
+
+
+def _join(separator, items):
+    """``separator.join(items)`` that keeps the recipes of translated items.
+
+    A plain str when no item carries a recipe (pin numbers, file names).
+    """
+    items = tuple(items)
+    text = separator.join(items)
+    if any(isinstance(item, LocalizedStr) and item.spec is not None for item in items):
+        return LocalizedStr(text, ('join', separator, items))
+    return text
+
+
+def _render(value):
+    """A value rendered again in the current language: a recipe is re-run, any other value is kept."""
+    spec = value.spec if isinstance(value, LocalizedStr) else None
+    if spec is None:
+        return value
+    try:
+        kind = spec[0]
+        if kind == 'tx':
+            return tx(spec[1], **{key: _render(item) for key, item in spec[2]})
+        if kind == 'concat':
+            return reduce(operator.add, [_render(part) for part in spec[1]])
+        if kind == 'join':
+            return _join(spec[1], [_render(item) for item in spec[2]])
+        if kind == 'call':
+            return LocalizedStr(str(spec[1].localized()), spec)
+    except Exception:  # noqa: BLE001 - a broken recipe or catalog keeps the text as written
+        return value
+    return value
+
+
+#: The Check fields that `localized` recomposes.
+_LOCALIZED_FIELDS = ('title', 'detail', 'remedy')
+
+
 @dataclass(frozen=True)
 class Check:
     """@brief Carry one verification outcome with status, title and diagnostic detail.
@@ -130,6 +890,20 @@ class Check:
     @param pins Pin or pad numbers the check concerns, as text; the dialog
         compresses them into ranges.
     @param needs_cli True for a check skipped only because kicad-cli is missing.
+    @param cli_failure Why kicad-cli delivered no reading on a SKIP row:
+        'start', 'timeout', 'not_run', 'environment', 'scratch'; on an
+        ERROR row of a read, 'component' (see the field); '' otherwise.
+    @param file_busy True on a SKIP made because a component file is held
+        by another program (see the field).
+    @param cli_exit_code The non-refusal exit code of the kicad-cli process
+        that made a read row SKIP, None otherwise (see the field).
+    @note `texts` is derived, never passed: for each of title, detail and
+        remedy produced by `tx` (a `LocalizedStr`), its recipe -- the Italian
+        template and its values, ``('tx', template, ((key, value), ...))``,
+        or a concatenation/join of such recipes. A text that did not come
+        from `tx` (a kicad-cli log, a path) has no entry. It is left out of
+        equality and hash, so two checks with the same texts stay equal;
+        `localized` uses it to recompose the texts in the current language.
     """
     status: str
     title: str
@@ -143,6 +917,71 @@ class Check:
     #: True for a SKIP only because kicad-cli is missing: the dialog folds
     #: these into one «KiCad non trovato» row (structural, never the text).
     needs_cli: bool = False
+    #: Why kicad-cli did not deliver a reading on a SKIP row: 'start' (the
+    #: program could not be launched, OSError), 'timeout' (no answer in
+    #: time), 'not_run' (any other tool-side failure), 'environment' (KiCad
+    #: refused the component's file twice AND refused the program's own
+    #: known-good control file of the same kind: the computer refuses fresh
+    #: files, round 3 item 1), 'scratch' (round 4, item 6: the check's OWN
+    #: scratch side failed -- its temporary output folder not writable, the
+    #: input copy not openable, or kicad-cli's output there not readable: a
+    #: temporary folder or an antivirus, never KiCad and never the
+    #: component); '' otherwise. On an ERROR row of a read, 'component'
+    #: (round 4, item 1): kicad-cli failed on the component's file without
+    #: declaring it refused -- a crash, exit 0 without output, another exit
+    #: code, no answer in time -- and read the program's own known-good
+    #: control file of the same kind under the same conditions, so the
+    #: failure is the file's. Declared so the window tells a persistent cause
+    #: (a kicad-cli that never starts) from a transient one, and the tool's
+    #: failure from the component's, without reading translated text (review
+    #: 2026-11-15, R5).
+    cli_failure: str = ''
+    #: The exit code of the kicad-cli process whose failure made a read row
+    #: SKIP, when that code is NOT an input refusal (`CLI_INPUT_REFUSED`):
+    #: another declared code, a crash code (e.g. 0xC0000005 as 3221225477),
+    #: or 0 for an exit 0 that wrote nothing; None on every other row (a
+    #: timeout, a start failure, a refusal, a read). Declared for the
+    #: window's persistent-failure signature «the same non-input exit code on
+    #: every read in two consecutive runs» (round 3, item 5).
+    cli_exit_code: int | None = None
+    #: True on a SKIP made because a file of the component exists but
+    #: another program holds it (`_ComponentFileBusy`: the footprint, the
+    #: saved symbol): the check was not made NOW, which a repeat may change.
+    #: Such a row never concludes the check it belongs to
+    #: (`concluded_required`, round 4, item 7). False on every other row.
+    file_busy: bool = False
+    #: {field name: recipe} of the translated texts (see the class note).
+    texts: dict | None = field(default=None, init=False, compare=False, repr=False)
+
+    def __post_init__(self):
+        """@brief Record the recipes of the translated texts.
+
+        @note Derived from the fields at every construction, `dataclasses.replace`
+            included: a field replaced by plain text loses its recipe, one
+            replaced by a `LocalizedStr` brings its own.
+        """
+        texts = {name: getattr(self, name).spec for name in _LOCALIZED_FIELDS
+                 if isinstance(getattr(self, name), LocalizedStr)
+                 and getattr(self, name).spec is not None}
+        object.__setattr__(self, 'texts', texts or None)
+
+
+def localized(check):
+    """@brief A check with its translated texts recomposed in the CURRENT interface language.
+
+    @param check A `Check` (any object without `texts` is returned as it is).
+    @return A new Check whose title, detail and remedy that came from `tx`
+        are rendered again through `messages.tx` with the same values; texts
+        that did not come from `tx` (raw kicad-cli logs, paths) stay as they
+        are. The same check when it has no translated text.
+    @note For the panel, which shows checks produced before a language
+        switch (review 2026-11-15, M3). Never raises: a recipe that cannot
+        be rendered keeps its text.
+    """
+    texts = getattr(check, 'texts', None)
+    if not texts:
+        return check
+    return _replace_fields(check, **{name: _render(getattr(check, name)) for name in texts})
 
 
 def pin_ranges(values):
@@ -992,7 +1831,7 @@ def _pins_text(labels):
     numbers = [label for label in labels if label not in special]
     parts = [pin_ranges(numbers)] if numbers else []
     parts.extend(label for label in special if label in labels)
-    return ', '.join(parts)
+    return _join(', ', parts)
 
 
 def _violation_groups(violations, resolve, ignore, zero=None):
@@ -1221,10 +2060,18 @@ def _run_cli(command, *, timeout=60, cwd=None):
         (`process_log.kill_process_tree`): a check left running when the
         window closes or the project changes must not leave kicad-cli behind
         (review 2026-11-15, M3).
+    @note Any exception out of the wait -- a timeout, but also a
+        KeyboardInterrupt or a `CliStopped` raised in this thread -- kills
+        the process tree and reaps it before propagating; the Job Object
+        handle is closed in every case (`release_process`), so no handle
+        leaks per command and KILL_ON_JOB_CLOSE ends a leftover descendant
+        (review 2026-11-15, L2; same shape as `kicad_models`' measuring child).
+    @note stdin is the null device: kicad-cli must never wait for input.
     """
-    from ..cad3d.process_log import contain_process, kill_process_tree, reap_killed_child
-    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                               errors='replace', cwd=cwd,
+    from ..cad3d.process_log import (contain_process, kill_process_tree, reap_killed_child,
+                                     release_process)
+    process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, text=True, errors='replace', cwd=cwd,
                                creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
     # In a Job Object that dies with it: a descendant the process snapshot
     # cannot prove would otherwise keep the pipes open and the check running.
@@ -1234,11 +2081,17 @@ def _run_cli(command, *, timeout=60, cwd=None):
     try:
         try:
             stdout, stderr = process.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            kill_process_tree(process)
+        except BaseException:
+            # Nothing may outlive the command: a timeout, a stop or an
+            # interrupt all end the tree before the exception goes on.
+            try:
+                kill_process_tree(process)
+            except OSError:
+                pass  # already gone
             reap_killed_child(process)
             raise
     finally:
+        release_process(process)
         with _CLI_LOCK:
             _CLI_PROCESSES.discard(process)
             stopped = process in _CLI_STOPPED
@@ -1267,56 +2120,135 @@ def stop_cli_commands() -> int:
     return len(running)
 
 
-def _installed_symbol_differs(name, symbol_path, library):
-    """@brief What differs between the component's symbol and its copy in an installed library.
+def _installed_symbol_blocks(name, library):
+    """The blocks named `name` of an installed symbol library, or why it cannot be read.
+
+    @return (blocks, None); ([], None) when the file does not exist;
+        (None, reason) with reason «not_utf8» (KiCad reads UTF-8 only),
+        «unopenable» (the file exists but cannot be opened) or «invalid»
+        (its S-expression cannot be walked). An unreadable library is never
+        a missing symbol: the installation refuses to rewrite it, so its
+        remedy is another one (review 2026-11-15, L1).
+    """
+    from .kicad_library import _SYMBOL_HEAD, _atom_value, _direct_child_ranges, _read_utf8
+    library = Path(library)
+    if not library.exists():
+        return [], None
+    try:
+        # The installation's own decoding (UTF-8 only, BOM dropped).
+        text = _read_utf8(library)
+    except KiCadLibraryError as exc:
+        return None, 'not_utf8' if exc.code == 'file_not_utf8' else 'invalid'
+    except OSError:
+        return None, 'unopenable'
+    try:
+        return [text[start:end] for start, end in _direct_child_ranges(text, 'symbol')
+                if (head := _SYMBOL_HEAD.match(text[start:end]))
+                and _atom_value(head.group(2)) == name], None
+    except (ValueError, RuntimeError):
+        return None, 'invalid'
+
+
+#: Italian words of why an installed symbol library cannot be read
+#: (`_installed_symbol_blocks` reasons).
+SYMBOL_LIBRARY_UNREADABLE_TEXTS = {
+    'not_utf8': 'non è testo UTF-8',
+    'unopenable': 'il file non si apre',
+    'invalid': 'non è una libreria di simboli leggibile',
+}
+
+
+def _component_symbol_expected(name, symbol_path, library):
+    """(symbol block an installation writes, None) or (None, reason it ships no symbol).
+
+    `kicad_library._component_symbol` reads `<component_dir>/<name>.kicad_sym`,
+    exactly the file an installation reads; the library's stem is the
+    nickname the installation writes into the symbol's Footprint property.
+    """
+    from .kicad_library import _component_symbol
+    symbol_path = Path(symbol_path)
+    expected, _source, skipped = _component_symbol(
+        SimpleNamespace(name=name, component_dir=symbol_path.parent), Path(library).stem)
+    return expected, skipped
+
+
+def _starts_with_bom(path):
+    """True for a readable file that starts with a UTF-8 BOM; False for a missing or unreadable one."""
+    try:
+        with open(path, 'rb') as handle:
+            return handle.read(len(UTF8_BOM)) == UTF8_BOM
+    except OSError:
+        return False
+
+
+def _installed_symbol_state(name, symbol_path, library):
+    """@brief How the component's symbol stands in an installed symbol library.
 
     @param name Component name, the symbol's name in the library.
     @param symbol_path The component's ``<name>.kicad_sym`` (None: not compared).
     @param library The installed ``<library>.kicad_sym`` next to the ``.pretty``.
-    @return None when nothing differs or nothing can be compared (no usable
-        symbol of the component: an installation would not ship one either);
-        otherwise the translated word for the difference («simbolo mancante»
-        or «simbolo»).
-    @note The comparison is on S-expression tokens of the one symbol block,
-        named as an installation names it (`_named_symbol_block`): the other
-        symbols of the shared library are not this component's business.
+    @return (state, detail): (None, None) when nothing is to be said;
+        («missing», None) or («differs», None) for a symbol an installation
+        would now write differently -- the reinstallation fixes it;
+        («stale», None) when the component has no usable symbol but the
+        library still holds one of its name from an earlier installation --
+        a reinstallation leaves it there (`InstallPlan.symbol_left_stale`),
+        so only repairing the component's symbol fixes it; («unreadable»,
+        reason) for a library the installation cannot read either -- said
+        whether or not the component's own symbol is usable (round 2, R9).
+    @note The symbol expected is derived by the installation's OWN rule,
+        `kicad_library._component_symbol` (same file, same root-version
+        requirement, same naming), so the check and the install cannot
+        disagree (review 2026-11-15, M1): a component symbol without a root
+        ``(version)`` is not compared -- the install skips it -- and is
+        reported only through what the library still holds.
+    @note The comparison is on S-expression tokens of the one symbol block:
+        the other symbols of the shared library are not this component's
+        business.
     """
-    from .kicad_library import _component_symbol_path, _library_symbol, _named_symbol_block
-    from .kicad_library import _SymbolUnusable, _SYMBOL_HEAD, _atom_value, _direct_child_ranges
     if symbol_path is None:
-        return None
-    try:
-        source = Path(symbol_path).read_text(encoding='utf-8-sig')
-        # Named for the library it sits in (the .kicad_sym's stem), as installed.
-        expected = _named_symbol_block(_library_symbol(source, name), name, Path(library).stem)
-    except (OSError, ValueError, RuntimeError, _SymbolUnusable):
-        return None
-    try:
-        text = Path(library).read_text(encoding='utf-8-sig')
-        blocks = [text[start:end] for start, end in _direct_child_ranges(text, 'symbol')
-                  if (head := _SYMBOL_HEAD.match(text[start:end]))
-                  and _atom_value(head.group(2)) == name]
-    except (OSError, ValueError, RuntimeError):
-        blocks = []
+        return None, None
+    expected, skipped = _component_symbol_expected(name, symbol_path, library)
+    blocks, unreadable = _installed_symbol_blocks(name, library)
+    if unreadable is not None:
+        # Checked BEFORE the component's own symbol (round 2, R9): with an
+        # unusable component symbol too, an unreadable library would
+        # otherwise read as «nothing to say» and the row as OK.
+        return 'unreadable', unreadable
+    if skipped is not None:
+        # No usable symbol of the component: an installation ships none and
+        # leaves an earlier one in place.
+        return ('stale', skipped) if blocks else (None, None)
     if not blocks:
-        return tx('simbolo mancante')
-    return None if sexpr_tokens(blocks[0]) == sexpr_tokens(expected) else tx('simbolo')
+        return 'missing', None
+    return (None, None) if sexpr_tokens(blocks[0]) == sexpr_tokens(expected) else ('differs', None)
 
 
 def library_checks(name, footprint_text, installs, step_path=None, model_offset=(0.0, 0.0, 0.0),
-                   symbol_path=None):
+                   symbol_path=None, global_table_path=None):
     """@brief Whether the KiCad libraries the component was installed in hold what an install writes NOW.
 
     @param name Component name (the installed file is `<name>.kicad_mod`).
     @param footprint_text The .kicad_mod text of the component folder.
     @param installs None (no check: the caller records no installation), or
-        a list of {"scope": "project"|"global", "pretty_dir": absolute folder}.
+        a list of {"scope": "project"|"global", "pretty_dir": absolute folder,
+        optionally "table_path" and "symbol_table_path": the fp-lib-table and
+        sym-lib-table the installation registered the libraries in}.
     @param step_path The component's STEP (None or missing: delivered without model).
     @param model_offset The model offset the install would write
         (`kicad_library.model_offset_for_anchor`).
     @param symbol_path The component's ``<name>.kicad_sym``, whose symbol an
         installation adds to ``<library>.kicad_sym`` next to the ``.pretty``
         (user decision 2026-11-15, «opzione 1»); None compares no symbol.
+    @param global_table_path The per-user global ``fp-lib-table`` a global
+        installation registered its library in, when the CALLER knows it;
+        None (the default, and what `verify_component` passes since round 3)
+        when unknown: the global tables of a record without its own
+        ``"table_path"`` are then not looked at. An install entry's own
+        ``"table_path"`` (the ``fp-lib-table``) and ``"symbol_table_path"``
+        (the ``sym-lib-table``; without it the ``sym-lib-table`` beside the
+        ``fp-lib-table``) win. A project installation's tables are the
+        ``fp-lib-table`` / ``sym-lib-table`` beside its ``.pretty``.
     @return [] for None; one WARN (importance 3) when the list is empty (never
         installed); a SKIP «non confrontabile» for an installation that
         cannot be compared (and when none can); otherwise one row per installation: OK when everything an
@@ -1329,6 +2261,24 @@ def library_checks(name, footprint_text, installs, step_path=None, model_offset=
         installed symbol is compared too (CONTRACT CHANGED 2026-11-15: the
         installation writes the symbol library now); a library installed
         before that holds no symbol and reads «simbolo mancante».
+    @note The symbol follows the installation's own rule
+        (`_installed_symbol_state`, `symbol_path` must be
+        ``<component dir>/<name>.kicad_sym``): a component symbol the install
+        would skip while the library still holds one of its name is a WARN
+        importance 2 «vecchio» whose action re-exports the symbol (the
+        reinstallation alone leaves it); a symbol library that cannot be
+        read is a WARN importance 2 of its own, never «simbolo mancante».
+        Neither ever yields an OK row for that installation.
+    @note A leading UTF-8 BOM in a file the installation writes -- the
+        installed ``.kicad_mod`` and the ``fp-lib-table``, and, when the
+        component ships a symbol (`_component_symbol_expected`), the
+        installed ``.kicad_sym`` and the ``sym-lib-table``; an installation
+        that ships no symbol leaves those two alone, so they are not named
+        -- is «not up to date» (round 2, R8): KiCad 10
+        refuses such a file (kicad-cli 10.0 `sym export svg` exit 2, ERC
+        `lib_symbol_issues`, tables whose rows it ignores), and a
+        reinstallation rewrites it without the BOM. The comparisons above
+        drop the BOM, so without this rule the row said «aggiornata».
     """
     if installs is None:
         return []
@@ -1384,17 +2334,68 @@ def library_checks(name, footprint_text, installs, step_path=None, model_offset=
                 differs.append(tx('footprint'))
         if with_model and _file_digest(installed_step) != _file_digest(step_path):
             differs.append(tx('modello STEP'))
-        symbol_differs = _installed_symbol_differs(
-            name, symbol_path, pretty.parent / f'{pretty.stem}.kicad_sym')
-        if symbol_differs:
-            differs.append(symbol_differs)
+        symbol_library = pretty.parent / f'{pretty.stem}.kicad_sym'
+        # A leading BOM in a file the installation writes: KiCad 10 refuses
+        # the file, the reinstallation drops the BOM (round 2, R8). The
+        # symbol library and its table only when the installation ships the
+        # symbol: otherwise it does not touch them.
+        # The tables the record names win (round 3, item 6: the window
+        # records `table_path` and `symbol_table_path` of an installation);
+        # a project installation's are beside its .pretty; a global one
+        # WITHOUT a recorded table is not looked up (another KiCad version's
+        # table may be «the current» one) unless the caller declares it.
+        fp_table = (Path(install['table_path']) if install.get('table_path')
+                    else pretty.parent / 'fp-lib-table' if project
+                    else Path(global_table_path) if global_table_path else None)
+        sym_table = (Path(install['symbol_table_path']) if install.get('symbol_table_path')
+                     else fp_table.with_name('sym-lib-table') if fp_table is not None else None)
+        ships_symbol = (symbol_path is not None and
+                        _component_symbol_expected(name, symbol_path, symbol_library)[1] is None)
+        with_bom = [installed] + ([fp_table] if fp_table is not None else [])
+        if ships_symbol:
+            with_bom.append(symbol_library)
+            if sym_table is not None:
+                with_bom.append(sym_table)
+        for path in with_bom:
+            if _starts_with_bom(path):
+                differs.append(tx('BOM UTF-8 in {file}', file=path.name))
+        symbol_state, unreadable = _installed_symbol_state(name, symbol_path, symbol_library)
+        if symbol_state == 'missing':
+            differs.append(tx('simbolo mancante'))
+        elif symbol_state == 'differs':
+            differs.append(tx('simbolo'))
+        elif symbol_state == 'stale':
+            # A reinstallation cannot fix it (it ships no symbol and leaves
+            # this one): the remedy repairs the component's symbol first
+            # (review 2026-11-15, M1). Never an OK row.
+            results.append(Check('WARN', title, tx(
+                'Libreria {scope} con un simbolo {name} vecchio: il simbolo del componente non è '
+                'utilizzabile, quindi l\'installazione non lo aggiorna: {path}', scope=scope,
+                name=name, path=symbol_library),
+                'technical', IMPORTANCE_BEFORE_PRODUCTION,
+                tx('Usa «Riesporta il simbolo» per riscrivere il .kicad_sym del componente dal simbolo '
+                   'applicato (correggilo prima nella scheda «Simbolo elettrico» se serve), poi '
+                   'reinstalla dalla scheda KiCad.'),
+                ACTION_REEXPORT_SYMBOL, 'kicad_library'))
+        elif symbol_state == 'unreadable':
+            # Not a missing symbol: the installation refuses to rewrite a
+            # library it cannot read, so «reinstall» alone would fail (L1).
+            results.append(Check('WARN', title, tx(
+                'Libreria simboli {scope} non leggibile ({reason}): {path}', scope=scope,
+                reason=tx(SYMBOL_LIBRARY_UNREADABLE_TEXTS[unreadable]), path=symbol_library),
+                'technical', IMPORTANCE_BEFORE_PRODUCTION,
+                tx('Ripristina il file da una copia oppure spostalo altrove, poi reinstalla dalla '
+                   'scheda KiCad: l\'installazione non riscrive una libreria che non sa leggere.'),
+                ACTION_OPEN_KICAD_TAB, 'kicad_library'))
+        if symbol_state in ('stale', 'unreadable') and not differs:
+            continue
         if not differs:
             results.append(Check('OK', title, tx('Libreria {scope} aggiornata: {path}',
                                                  scope=scope, path=installed), code='kicad_library'))
         else:
             results.append(Check('WARN', title, tx(
                 'Libreria {scope} non aggiornata ({what}): {path}', scope=scope,
-                what=', '.join(differs), path=installed),
+                what=_join(', ', differs), path=installed),
                 'technical', IMPORTANCE_BEFORE_PRODUCTION,
                 tx('Reinstallala dalla scheda KiCad: la reinstallazione sovrascrive anche le modifiche '
                    'fatte nell\'editor di KiCad.'), ACTION_OPEN_KICAD_TAB, 'kicad_library'))
@@ -1404,6 +2405,83 @@ def library_checks(name, footprint_text, installs, step_path=None, model_offset=
 
 class _NoStep(Exception):
     """The component has no STEP model: the 3D checks are skipped (already reported)."""
+
+
+class _ComponentFileBusy(Exception):
+    """A file of the component exists but another program holds it: it cannot be read NOW.
+
+    Carries the translated `detail` and `remedy` of the SKIP that says so
+    (round 3, item 3): a file locked by an editor, a backup or an antivirus
+    is neither «missing» nor a defect of the component.
+    """
+
+    def __init__(self, path, error):
+        """@brief The busy file and the operating system's error, rendered as the SKIP's texts.
+
+        @param path The component file that could not be read.
+        @param error The PermissionError raised when reading it.
+        """
+        super().__init__(str(error))
+        self.detail = tx('Il file {path} è in uso da un altro programma e non si può leggere ora '
+                         '({error}): controllo non eseguito.', path=path, error=error)
+        self.remedy = tx('Chiudi il programma che tiene aperto il file (editor di KiCad, backup, '
+                         'antivirus), poi ripeti il controllo.')
+
+
+def _read_component_file(path):
+    """The bytes of a component file; `_ComponentFileBusy` when another program holds it.
+
+    A PermissionError on a REGULAR file is a lock (Windows reports a
+    sharing violation that way); on anything else -- a folder in the
+    file's place, which Windows also refuses with PermissionError -- the
+    original error goes on and keeps its former meaning. FileNotFoundError
+    and the other OSErrors go on unchanged.
+    """
+    path = Path(path)
+    try:
+        return path.read_bytes()
+    except PermissionError as exc:
+        if path.is_file():
+            raise _ComponentFileBusy(path, exc) from exc
+        raise
+
+
+class _ToolSideFailure(Exception):
+    """A kicad-cli read could not be prepared on the checking side (output folder, input copy).
+
+    Its only argument is the translated reason: a SKIP with `cli_failure`
+    «scratch» (round 4, item 6; «not_run» before), never a verdict on the
+    component (round 2, R2).
+    """
+
+
+def symbol_library_problem(text, name):
+    """@brief What a symbol library lacks for the component, read by the check's own parser.
+
+    @param text The ``.kicad_sym`` text (BOM already dropped).
+    @param name The component's name, the symbol it must hold.
+    @return None when the library holds a top-level symbol named `name`, or
+        when it cannot be walked at all (then kicad-cli's own verdict
+        stands); otherwise the translated detail: no symbol at all, or the
+        names it holds instead.
+    @note kicad-cli 10.0 `sym export svg` exits 0 on both (measured
+        2026-11-15): with no output for a library holding no symbol, with
+        another symbol's drawing for a library holding another name. That
+        is a problem of the component's file, said as such, never «not run»
+        (round 2, R10).
+    """
+    from .kicad_library import _SYMBOL_HEAD, _atom_value
+    try:
+        names = [_atom_value(head.group(2)) for start, end in _direct_child_ranges(text, 'symbol')
+                 if (head := _SYMBOL_HEAD.match(text[start:end]))]
+    except (ValueError, RuntimeError, IndexError):
+        return None
+    if name in names:
+        return None
+    if not names:
+        return tx('La libreria non contiene alcun simbolo.')
+    return tx('La libreria non contiene il simbolo {name}, ma: {names}.', name=name,
+              names=', '.join(names))
 
 
 #: Symbol properties that belong to the metadata (written by «Applica ai file»,
@@ -1435,10 +2513,60 @@ def symbol_text_without_metadata(text: str) -> str:
     return "\n".join(kept)
 
 
+def estimated_pad_checks(findings, pad_numbers=None):
+    """@brief The component-check rows of the estimated-pad findings of the footprint tab.
+
+    @param findings None, or the findings of
+        `footprint_checks.check_estimated_pads` (code «estimated_pad»,
+        translated `message`, `pads` as INDICES into the footprint's pads).
+        Findings of another code are ignored.
+    @param pad_numbers The pad numbers of the SAME `Footprint` the findings
+        were computed on, in its `pads` order (index i -> pad_numbers[i]),
+        or None when the caller has none: then no pad is named.
+    @return One WARN per finding: title «Pad stimati», the finding's text as
+        detail, its pad numbers as `pins`, code «estimated_pads», category
+        «final», importance 2 (to verify before production), and the
+        footprint tab's own remedy for «estimated_pad»
+        (`footprint_checks.GEOMETRY_HINTS`, one wording for both places).
+        [] for None or an empty list.
+    @note CONTRACT CHANGED 2026-11-15 (round 2, R6): the indices are no
+        longer named through the pad order of the FILE on disk. KiCad's
+        footprint editor may save the pads in another order (the window's
+        own alignment gate compares pads regardless of order), so the file's
+        i-th pad may be another pad than the one the finding means; the
+        right pad would not be highlighted. Only the numbers of the very
+        footprint the findings were computed on are used; without them, or
+        with an index they do not have, no pin is named (never a guessed
+        pad); the detail still names the pads.
+    @note The detail is the finding's text as `footprint_checks` rendered
+        it, in the language active then: the finding keeps neither a
+        template nor the per-pad values, so it is not recomposed after a
+        language switch (round 2, reported to the coordinator).
+    """
+    from .footprint_checks import GEOMETRY_HINTS
+    results = []
+    for finding in findings or ():
+        if getattr(finding, 'code', None) != 'estimated_pad':
+            continue
+        indices = tuple(getattr(finding, 'pads', ()) or ())
+        pins = ()
+        if pad_numbers is not None and all(
+                isinstance(index, int) and 0 <= index < len(pad_numbers) for index in indices):
+            # Unnumbered pads (mechanical holes) have no pin to name.
+            pins = tuple(dict.fromkeys(str(pad_numbers[index]) for index in indices
+                                       if str(pad_numbers[index] or '')))
+        results.append(Check(
+            'WARN', tx('Pad stimati'), str(getattr(finding, 'message', '') or ''), 'final',
+            IMPORTANCE_BEFORE_PRODUCTION, tx(GEOMETRY_HINTS['estimated_pad']), None,
+            'estimated_pads', pins))
+    return results
+
+
 def verify_component(directory, name, rows, *, pending=False, issues=(), emit=lambda result: None,
                      footprint_pending=False, model_offset=(0.0, 0.0, 0.0), document=None,
                      applied_symbol=None, footprint_missing=None, contact_witness=None,
-                     pad_leads=None, installs=None, describe_error=None):
+                     pad_leads=None, installs=None, describe_error=None, estimated_pads=None,
+                     estimated_pad_numbers=None):
     """@brief Use scratch copies only; failed checks do not suppress independent checks.
 
     @param directory Component folder.
@@ -1482,6 +2610,54 @@ def verify_component(directory, name, rows, *, pending=False, issues=(), emit=la
         (`library_checks`), None for no library row.
     @param describe_error Callable translating a `KiCadLibraryError` for the
         SKIP rows (the window's `_kicad_error_text`), None for its own text.
+    @param estimated_pads None, or `footprint_checks.check_estimated_pads` of
+        the applied footprint: one WARN «Pad stimati» per finding
+        (`estimated_pad_checks`); None or [] gives no row.
+    @param estimated_pad_numbers The pad numbers of the SAME `Footprint`
+        `estimated_pads` was computed on, in its `pads` order (the window
+        passes ``[pad.number for pad in footprint.pads]``); None names no
+        pad (round 2, R6: never guessed from the file's pad order).
+    @note The three kicad-cli reads (footprint, applied symbol, symbol on
+        disk) and the 3D import run on scratch COPIES, never on the project's
+        files in place, each attempt in a fresh input and output folder whose
+        output is probed writable and whose input copy is opened first (a
+        failure there is SKIP «not run»). Their outcome is classified by
+        kicad-cli's declared exit code (`cli_read_verdict`): input refused
+        (`CLI_INPUT_REFUSED`) -> one more run on fresh copies, given only the
+        time the first attempt left (at least `CLI_RETRY_MIN_TIMEOUT_S`), the
+        read's normal outcome when it then succeeds; refused again -> the
+        differential control of that kind (`CONTROL_READS`, once per kind and
+        run, `CLI_CONTROL_TIMEOUT_S`): read -> ERROR (round 2, R2: kicad-cli 10
+        gives the same codes for its own failures), refused too -> SKIP with
+        `cli_failure` «environment», no verdict -> SKIP «not run» (round 3);
+        any other code, a crash or no output -> one more run the same way,
+        and a timeout at once (never repeated), then the differential control
+        of the same kind (round 4, item 1; a timeout's control only before
+        `CLI_TIMEOUT_CONTROL_LIMIT_S` of the run, unless one was already
+        made): control read -> ERROR with `cli_failure` «component» and a
+        remedy (rename, when the name holds a character KiCad mis-handles,
+        `output_names.kicad_unsafe_characters`) -- for a timeout only after
+        ONE extended read (`CLI_SLOW_READ_TIMEOUT_S`,
+        `CLI_SLOW_READS_PER_RUN` per run) timed out too (round 5, item 1):
+        read on it -> the read's outcome with a «slow read» note; no
+        extended read left -> SKIP «timeout»; control failed or not run
+        -> SKIP with the cause («not_run» or «timeout») and, for a completed
+        process, its exit code in `Check.cli_exit_code`; a kicad-cli that
+        cannot start -> SKIP «start»; a failure of the check's own scratch
+        folder -> SKIP «scratch» (round 4, item 6). Exit 0 with an
+        output -> OK, or WARN showing KiCad's log when it contains error or
+        warning words (never an ERROR from text). Exit 0 on a symbol library
+        that lacks the component's symbol is that problem, from the check's
+        own parser (`symbol_library_problem`), never «not run» (R10).
+    @note Every check that can emit an ERROR is declared in
+        `BLOCKING_CHECKS` with the rows that conclude it: a run that stopped
+        early is judged by `concluded_required`. The stages publish in a
+        fixed order (footprint, symbol, document and contacts, STEP, DRC,
+        ERC, libraries, manual checks) that the table's stage closers rely on.
+    @note A component file another program holds (PermissionError on a
+        regular file: the footprint, the saved symbol) is a SKIP
+        with a «file in uso» cause and remedy, never «missing» nor an ERROR
+        (round 3, item 3); so is an OSError on the check's own scratch output.
     @note DRC and ERC run AUTOMATICALLY (user decision 2026-11-14) on a
         preview project written in the scratch folder: the APPLIED symbol and
         the footprint on disk, through `create_preview_project`, created once
@@ -1499,23 +2675,35 @@ def verify_component(directory, name, rows, *, pending=False, issues=(), emit=la
     """
     results = []
     def add(status, title, detail, *, category='technical', importance=None, remedy='',
-            action=None, code='', pins=()):
+            action=None, code='', pins=(), cli_failure='', cli_exit_code=None, file_busy=False):
         # A generator error (SymbolError) carries its own translatable text.
         # No lookup argument: `tx` also formats, so the error renders itself
         # through the catalogue (passing `tx` would fall back to Italian).
-        localized = getattr(detail, 'localized', None)
+        render_again = getattr(detail, 'localized', None)
         text = None
-        if callable(localized):
+        if callable(render_again):
             try:
-                text = str(localized())
+                # Kept with its recipe: `localized` asks the error again
+                # after a language switch.
+                text = LocalizedStr(str(render_again()), ('call', detail))
             except Exception:  # noqa: BLE001 - fall back to the plain message
                 text = None
+        if text is None:
+            if isinstance(detail, str):
+                text = detail
+            elif (isinstance(detail, BaseException) and len(detail.args) == 1
+                  and isinstance(detail.args[0], LocalizedStr)):
+                # An exception raised with a `tx` message keeps its recipe.
+                text = detail.args[0]
+            else:
+                text = str(detail)
         if importance is None:
             # An error blocks the use; everything else is a final review
             # unless the caller ranks it.
             importance = IMPORTANCE_BLOCKS_USE if status == 'ERROR' else IMPORTANCE_FINAL_REVIEW
-        result = Check(status, title, text if text is not None else str(detail), category,
-                       importance, remedy, action, code, tuple(pins))
+        result = Check(status, title, text, category,
+                       importance, remedy, action, code, tuple(pins), cli_failure=cli_failure,
+                       cli_exit_code=cli_exit_code, file_busy=file_busy)
         publish(result)
 
     def publish(result):
@@ -1525,7 +2713,7 @@ def verify_component(directory, name, rows, *, pending=False, issues=(), emit=la
     root = Path(directory)
     if not isinstance(name, str) or not name.strip() or name in ('.', '..') or any(
             c in name for c in '/\\:\x00'):
-        add('ERROR', tx('Componente'), tx('Nome componente non valido.'))
+        add('ERROR', tx('Componente'), tx('Nome componente non valido.'), code='component_name')
         return results
     fp = root / f'{name}.pretty' / f'{name}.kicad_mod'
     step = root / f'{name}.3dshapes' / f'{name}.step'
@@ -1543,13 +2731,13 @@ def verify_component(directory, name, rows, *, pending=False, issues=(), emit=la
                 'KiCad {version} ({path}) è più vecchio del minimo {minimum}: '
                 'la verifica usa KiCad {newer} ({newer_path}).',
                 version=verdict.version, path=cli, minimum=verdict.minimum,
-                newer=verdict.newer_version, newer_path=verdict.newer_cli))
+                newer=verdict.newer_version, newer_path=verdict.newer_cli), code='kicad_version')
             cli = verdict.newer_cli
         elif verdict.supported is False:
             add('ERROR', tx('Versione KiCad'), tx(
                 'KiCad {version} ({path}) è più vecchio del minimo {minimum}: '
                 'non legge i file generati. Installare KiCad {minimum} o successivo.',
-                version=verdict.version, path=cli, minimum=verdict.minimum))
+                version=verdict.version, path=cli, minimum=verdict.minimum), code='kicad_version')
     if pending:
         # Said in plain words, with the way to fix it (user, 2026-11-15: the
         # former «Verificato il simbolo applicato; la bozza non è inclusa»
@@ -1605,63 +2793,412 @@ def verify_component(directory, name, rows, *, pending=False, issues=(), emit=la
     # kicad-cli) must not turn the end of the check into «Verifica interrotta».
     with tempfile.TemporaryDirectory(prefix='kicadgen-check-', ignore_cleanup_errors=True) as scratch:
         scratch = Path(scratch)
-        def run(title, args, output, pattern=None, code=''):
+        #: Serial of the attempt folders: every kicad-cli read gets a folder
+        #: of its own, never one an earlier attempt used.
+        attempt_serial = iter(range(1, 1_000_000))
+        #: When the kicad-cli reads of this run began: a timeout's control is
+        #: skipped past `CLI_TIMEOUT_CONTROL_LIMIT_S` (round 4, item 1).
+        run_started = _clock()
+        #: Extended reads still allowed in this run (round 5, item 1): a
+        #: one-item list so the nested `run` can spend it.
+        slow_reads_left = [CLI_SLOW_READS_PER_RUN]
+
+        def prepare(folder, materialise, output_name):
+            """A fresh input and output of one attempt inside `folder`: (input file, output path).
+
+            Raises `_ToolSideFailure` when the output folder cannot be
+            created or written, or the input copy cannot be written or
+            opened: a failure on the checking side, never a verdict on the
+            component (round 2, R2).
+            """
+            out_dir = folder / 'out'
+            try:
+                out_dir.mkdir(parents=True)
+                # Written and removed: a folder that exists but refuses files
+                # (an antivirus, a policy) is found before kicad-cli runs.
+                probe = out_dir / '.kicadgen-probe'
+                probe.write_bytes(b'probe')
+                probe.unlink()
+            except OSError as exc:
+                raise _ToolSideFailure(tx(
+                    'Cartella temporanea del controllo non scrivibile ({error}): lettura non '
+                    'verificata.', error=exc)) from exc
+            try:
+                source = materialise(folder / 'in')
+                with open(source, 'rb') as handle:
+                    handle.read(1)
+            except (OSError, ValueError) as exc:
+                raise _ToolSideFailure(tx(
+                    'Copia temporanea del file da leggere non apribile ({error}): lettura non '
+                    'verificata.', error=exc)) from exc
+            return source, (out_dir / output_name if output_name else out_dir)
+
+        #: Outcome of the differential control per kind of read ('fp',
+        #: 'sym', 'step'): one control per kind and per run (round 3, item 1).
+        controls = {}
+
+        def control_outcome(kind):
+            """The differential control of one kind of read: SimpleNamespace(verdict, failure, exit_code, reason).
+
+            Runs the same kind of kicad-cli command as the component's read,
+            under the same scratch conditions (a fresh input and output
+            folder prepared by `prepare`), on the program's own known-good
+            minimal input (`CONTROL_READS`). ``verdict`` is 'read' (KiCad read
+            it: the environment reads fresh files), 'refused' (an input
+            refusal, `CLI_INPUT_REFUSED`, on a sound file: the environment
+            refuses fresh files) or 'failed' (no verdict: the control could not
+            be prepared, timed out, did not start, or ended with another
+            code); ``failure`` and ``exit_code`` are what the read row
+            declares for a 'failed' control, ``reason`` its translated cause.
+            Cached in `controls`: one control per kind in one run.
+            """
+            if kind in controls:
+                return controls[kind]
+            relative, text, make_args, pattern, output_name = CONTROL_READS[kind]
+            folder = scratch / f'control-{kind}'
+            outcome = SimpleNamespace(verdict='failed', failure='not_run', exit_code=None, reason='')
+
+            def materialise(target):
+                """The control's main input plus the files it needs beside it (`CONTROL_EXTRA_FILES`)."""
+                for extra, extra_text in CONTROL_EXTRA_FILES.get(kind, {}).items():
+                    bytes_input(extra, extra_text.encode('utf-8'))(target)
+                return bytes_input(relative, text.encode('utf-8'))(target)
+            try:
+                source, output = prepare(folder, materialise, output_name)
+                proc = _run_cli([cli, *map(str, make_args(source, output))],
+                                timeout=CLI_CONTROL_TIMEOUT_S, cwd=str(neutral_working_dir(cli)))
+            except _ToolSideFailure as exc:
+                # The control's own scratch side (round 4, item 6).
+                outcome.failure, outcome.reason = 'scratch', exc.args[0]
+            except subprocess.TimeoutExpired:
+                outcome.failure = 'timeout'
+                outcome.reason = tx('nessuna risposta entro {seconds} secondi',
+                                    seconds=CLI_CONTROL_TIMEOUT_S)
+            except OSError as exc:
+                outcome.failure = 'start'
+                outcome.reason = tx('kicad-cli non avviato: {error}', error=exc)
+            else:
+                try:
+                    produced = _output_produced(output, pattern)
+                except OSError as exc:
+                    produced = None
+                    outcome.failure = 'scratch'
+                    outcome.reason = tx('Risultato di kicad-cli non leggibile nella cartella '
+                                        'temporanea ({error}): lettura non verificata.', error=exc)
+                if produced is not None:
+                    verdict = cli_read_verdict(proc.returncode, produced)
+                    if verdict == 'read':
+                        outcome.verdict, outcome.failure = 'read', ''
+                    elif verdict == 'unreadable':
+                        outcome.verdict, outcome.failure = 'refused', 'environment'
+                    else:
+                        outcome.exit_code = proc.returncode
+                        outcome.reason = tx('codice {code}', code=_exit_code_text(proc.returncode))
+            controls[kind] = outcome
+            return outcome
+
+        def run(title, materialise, make_args, *, pattern=None, output_name=None, code='',
+                explain=None, control=None):
+            """One kicad-cli read on fresh scratch copies; returns its output path when KiCad read it, else None.
+
+            `materialise(folder)` writes a fresh copy of the input inside
+            `folder` and returns the file to open; `make_args(input, output)`
+            builds the arguments; the output is a folder searched with
+            `pattern`, or the file `output_name`. `explain()` returns the
+            component problem the check's own parser finds in the input
+            (status, detail, importance, remedy, action), or None. `control`
+            is the kind of read (a key of `CONTROL_READS`) whose differential
+            control decides a failure that repeats; None attributes a
+            repeated refusal to the component without a control, and leaves
+            any other failure unattributed.
+            """
             if not cli:
                 publish(Check('SKIP', title, tx('Richiede KiCad CLI.'), code=code, needs_cli=True))
-                return False
-            try:
-                if pattern:
-                    output.mkdir(parents=True, exist_ok=True)
-                proc = _run_cli([cli, *map(str, args)], timeout=60, cwd=str(neutral_working_dir(cli)))
-                log = (proc.stdout + '\n' + proc.stderr).strip()
-                files = list(output.rglob(pattern)) if pattern else [output]
-                valid = any(p.is_file() and p.stat().st_size for p in files)
-                if proc.returncode or not valid:
-                    add('ERROR', title, log.replace(str(scratch), '…') or tx('Nessun risultato prodotto da KiCad.'),
+                return None
+            retry = tx('Ripeti il controllo; se si ripete, chiudi gli altri programmi KiCad.')
+            # Round 4, item 6: a failure of the check's OWN scratch side is
+            # declared «scratch», so the window names a temporary folder or
+            # an antivirus, never KiCad.
+            scratch_remedy = tx("Ripeti il controllo; se si ripete, controlla che l'antivirus non "
+                                'blocchi la cartella temporanea e che il disco non sia pieno.')
+            def attempt(budget):
+                """One kicad-cli run of the read on fresh scratch copies: (proc, log, verdict, output, problem), or None.
+
+                None means the attempt already published the read's SKIP
+                («scratch» or «start»); ``verdict`` is 'timeout' with no
+                process when kicad-cli did not answer within `budget`;
+                ``problem`` is the check's own parser's verdict on an exit 0
+                (`explain`), published by `run` itself so every row that may
+                be an ERROR is emitted where its `code` is a parameter.
+                """
+                folder = scratch / f'read-{next(attempt_serial)}'
+                try:
+                    source, output = prepare(folder, materialise, output_name)
+                    proc = _run_cli([cli, *map(str, make_args(source, output))], timeout=budget,
+                                    cwd=str(neutral_working_dir(cli)))
+                except _ToolSideFailure as exc:
+                    add('SKIP', title, exc.args[0], code=code, remedy=scratch_remedy,
+                        cli_failure='scratch')
+                    return None
+                except subprocess.TimeoutExpired:
+                    return None, '', 'timeout', None, None
+                except OSError as exc:
+                    # kicad-cli could not be STARTED: the control would not
+                    # start either, so none is made.
+                    add('SKIP', title, tx('kicad-cli non avviato: {error}', error=exc), code=code,
+                        remedy=tx('Ripeti il controllo; se si ripete, verifica che KiCad sia '
+                                  "installato e non bloccato dall'antivirus."),
+                        cli_failure='start')
+                    return None
+                # The scratch folder is shortened in both spellings KiCad
+                # prints (Windows separators and forward slashes).
+                log = ((proc.stdout or '') + '\n' + (proc.stderr or '')).strip()
+                log = log.replace(str(scratch), '…').replace(scratch.as_posix(), '…')
+                try:
+                    # Round 3, item 3: inside the protected block -- an
+                    # antivirus quarantining the SVG made this OSError escape
+                    # into the footprint's «no footprint» ERROR.
+                    valid = _output_produced(output, pattern)
+                except OSError as exc:
+                    add('SKIP', title, tx('Risultato di kicad-cli non leggibile nella cartella '
+                                          'temporanea ({error}): lettura non verificata.', error=exc),
+                        code=code, remedy=scratch_remedy, cli_failure='scratch')
+                    return None
+                # Exit 0 is not the whole story (round 2, R10): a library
+                # holding no symbol, or not the component's, exits 0 with no
+                # output (or with another symbol's drawing). The check's own
+                # parser says what the component lacks; never «not run» for
+                # it, and no repeat is needed to say so.
+                problem = (explain() if proc.returncode == CLI_EXIT_SUCCESS and explain is not None
+                           else None)
+                return proc, log, cli_read_verdict(proc.returncode, valid), output, problem
+
+            # Round 3, item 4: the repeat of a failure gets only what the first
+            # attempt left of the read's budget (never less than
+            # CLI_RETRY_MIN_TIMEOUT_S): a refusal after 59 s followed by a
+            # timeout no longer doubles the worst case.
+            budget = CLI_READ_TIMEOUT_S
+            proc, log, verdict, output, problem = None, '', 'not_run', None, None
+            for number in (1, 2):
+                started = _clock()
+                result = attempt(budget)
+                if result is None:
+                    return None
+                proc, log, verdict, output, problem = result
+                # Round 4, item 1: a timeout is no longer a verdict of its
+                # own -- the differential control below decides whether the
+                # file or the tool does not answer. Never repeated with the
+                # normal budget: this attempt used all of it, so the repeat
+                # would get only the floor (`CLI_RETRY_MIN_TIMEOUT_S`), and a
+                # shortened repeat that times out proves less than this full
+                # attempt did.
+                # A failure is the COMPONENT's only when it repeats (round 2,
+                # R2; round 4, item 1 for every failure, not only a refusal):
+                # kicad-cli 10 gives the same codes 2 and 3 for its own
+                # failures (an output it cannot write, an input another
+                # process holds; `CLI_INPUT_REFUSED`), and a crash may be
+                # transient. One more run on a fresh copy into a fresh output
+                # folder settles it.
+                if problem is not None or verdict in ('read', 'timeout') or number == 2:
+                    break
+                budget = max(CLI_RETRY_MIN_TIMEOUT_S, budget - (_clock() - started))
+            # Round 5, item 1: a timeout whose control of the same kind READS
+            # gets ONE extended read (`CLI_SLOW_READ_TIMEOUT_S`, at most
+            # `CLI_SLOW_READS_PER_RUN` per run) before it is blamed on the
+            # component: a sound but large file (a STEP model of tens of MB
+            # imported on a slow PC) may need more than the normal budget,
+            # and one 60 s criterion alone made it a permanent ERROR. Read on
+            # the extended attempt -> the read's normal outcome, with a note
+            # that it is slow; timed out again -> ERROR «component» below (a
+            # file that keeps KiCad busy far longer than a sound control of
+            # its kind is the file's); any other outcome is judged like a
+            # first attempt's against the control already read.
+            # DECLARED FRAGILITY: the extended read only says that the file
+            # took longer than `CLI_SLOW_READ_TIMEOUT_S` on THIS computer at
+            # THIS moment; a sound file slower than that bound (or a PC busy
+            # with something else during those minutes) is still declared
+            # the component's. The bound is one of patience, not a
+            # measurement of the file; what would make it superfluous is a
+            # read whose progress kicad-cli reports, which it does not.
+            slow_note = ''
+            extended = False
+            if (verdict == 'timeout' and control is not None
+                    and slow_reads_left[0] > 0
+                    and (control in controls
+                         or _clock() - run_started <= CLI_TIMEOUT_CONTROL_LIMIT_S)
+                    and control_outcome(control).verdict == 'read'):
+                slow_reads_left[0] -= 1
+                extended = True
+                first_budget, budget = budget, CLI_SLOW_READ_TIMEOUT_S
+                result = attempt(budget)
+                if result is None:
+                    return None
+                proc, log, verdict, output, problem = result
+                if verdict == 'read':
+                    slow_note = tx('Lettura lenta: KiCad non aveva finito entro {seconds} secondi '
+                                   'e ha letto il file solo con il tempo esteso di {extended} '
+                                   'secondi.', seconds=math.ceil(first_budget),
+                                   extended=CLI_SLOW_READ_TIMEOUT_S)
+            if problem is not None:
+                # The check's own parser's verdict on an exit 0 (round 2,
+                # R10), from the attempt that ended the reads.
+                status, detail, importance, remedy, action = problem
+                add(status, title, detail, importance=importance, remedy=remedy,
+                    action=action, code=code)
+                return None
+            if verdict == 'unreadable':
+                # Refused twice, on two fresh copies. Round 3, item 1: an
+                # environment that refuses EVERY fresh file (an antivirus
+                # holding new files in %TEMP%, a broken KiCad user
+                # configuration) gives the same two refusals, so the program's
+                # own known-good file of the same kind is read under the same
+                # conditions: read -> the defect is the component's (ERROR);
+                # refused too -> the environment's (SKIP «environment»); no
+                # verdict from the control -> not attributed (SKIP «not run»).
+                outcome = control_outcome(control) if control is not None else None
+                if outcome is None or outcome.verdict == 'read':
+                    add('ERROR', title, log or tx('KiCad dichiara il file non valido (codice {code}).',
+                                                  code=proc.returncode),
                         code=code)
-                    return False
-                # A successful CLI exit can still contain model import warnings.
-                if re.search(r'^[\s*]*(?:error|errore|fehler|erreur|fallita|fallito|impossibile|échec|echec)\b|\b(?:failed|unable)\s+to\b|\bcannot\s+(?:read|open|load|import)\b', log, re.I | re.M):
-                    add('ERROR', title, log.replace(str(scratch), '…'), code=code)
-                    return False
-                warning = bool(re.search(r'^[\s*]*(?:warning|avviso|attenzione|warnung|avertissement)\b', log, re.I | re.M))
-                # A passed read says so in the interface language; kicad-cli's
-                # own lines (in KiCad's language, naming a scratch file deleted
-                # at the end of the check) are kept only for a warning, with
-                # the scratch folder shortened.
-                add('WARN' if warning else 'OK', title,
-                    log.replace(str(scratch), '…') if warning and log else tx('File letto da KiCad.'),
-                    code=code)
-                return True
-            except subprocess.TimeoutExpired:
-                # A failure of the CHECKING TOOL, not of the component: «not
-                # run», never an ERROR -- an ERROR forbids the installation in
-                # the guided KiCad tab, and a slow PC or an antivirus holding
-                # kicad-cli would then block a sound component for good
-                # (review 2026-11-15, H1). KiCad saying it cannot read the
-                # file (exit code, error lines above) stays an ERROR.
-                add('SKIP', title, tx('kicad-cli non ha risposto entro 60 secondi.'), code=code,
-                    remedy=tx('Ripeti il controllo; se si ripete, chiudi gli altri programmi KiCad.'))
-                return False
-            except OSError as exc:
-                add('SKIP', title, tx('kicad-cli non avviato: {error}', error=exc), code=code,
-                    remedy=tx('Ripeti il controllo; se si ripete, verifica che KiCad sia installato '
-                              "e non bloccato dall'antivirus."))
-                return False
+                elif outcome.verdict == 'refused':
+                    add('SKIP', title, tx(
+                        'KiCad rifiuta anche un file di controllo sicuramente valido, creato dal '
+                        'programma nella stessa cartella temporanea: il rifiuto viene dal computer '
+                        '(antivirus, configurazione di KiCad), non dal componente. Lettura non '
+                        'verificata.') + ('\n' + log if log else ''), code=code,
+                        remedy=tx("Controlla che l'antivirus non blocchi i file nuovi nella cartella "
+                                  'temporanea e che KiCad si apra normalmente, poi ripeti il '
+                                  'controllo.'),
+                        cli_failure='environment')
+                else:
+                    add('SKIP', title, tx(
+                        'KiCad ha rifiutato due volte il file del componente, ma non ha letto '
+                        'neppure il file di controllo del programma ({reason}): non si può dire '
+                        'se il difetto è del componente. Lettura non verificata.',
+                        reason=outcome.reason) + ('\n' + log if log else ''), code=code,
+                        remedy=retry, cli_failure=outcome.failure, cli_exit_code=outcome.exit_code)
+                return None
+            if verdict in ('not_run', 'timeout'):
+                # A failure kicad-cli did not declare as a refusal: a crash
+                # (e.g. 0xC0000409), another exit code, exit 0 without an
+                # output (KiCad 10 exits 0 when it cannot write its own
+                # output, observed 2026-11-15), or no answer in time. Round 4,
+                # item 1: the component's OWN input can cause every one of
+                # them -- a footprint or symbol named «x%NOPE%y» makes
+                # kicad-cli 10 crash on every read while the DRC and ERC of
+                # the same run finish -- so the differential control of the
+                # same kind decides: read -> the failure is the component's
+                # (ERROR, `cli_failure` «component»); failed too, or not run
+                # -> the tool's or the computer's (SKIP with the cause, as
+                # before round 4).
+                outcome = None
+                if control is not None and (verdict != 'timeout' or control in controls
+                                            or _clock() - run_started <= CLI_TIMEOUT_CONTROL_LIMIT_S):
+                    outcome = control_outcome(control)
+                # Round 5, item 1: a TIMEOUT is the component's only after the
+                # extended read timed out too; one that got no extended read
+                # (the run's `CLI_SLOW_READS_PER_RUN` already spent) stays
+                # unattributed below even when its control reads.
+                attributed = (outcome is not None and outcome.verdict == 'read'
+                              and (verdict != 'timeout' or extended))
+                if attributed:
+                    if verdict == 'timeout':
+                        detail = tx('KiCad non ha finito di leggere questo file entro {seconds} '
+                                    'secondi, mentre ha letto un file di controllo dello stesso tipo '
+                                    'creato dal programma: è il file del componente a bloccare '
+                                    'KiCad.', seconds=math.ceil(budget))
+                    elif proc.returncode == CLI_EXIT_SUCCESS:
+                        detail = tx('KiCad termina senza errori ma non produce nulla leggendo questo '
+                                    'file, mentre legge normalmente un file di controllo dello stesso '
+                                    'tipo creato dal programma: il difetto è del file del componente.')
+                    else:
+                        detail = tx('KiCad si chiude leggendo questo file (codice {code}), mentre '
+                                    'legge normalmente un file di controllo dello stesso tipo creato '
+                                    'dal programma: il difetto è del file del componente.',
+                                    code=_exit_code_text(proc.returncode))
+                    unsafe = kicad_unsafe_characters(name)
+                    remedy = (tx('Il nome del componente contiene «{characters}», che KiCad non '
+                                 'gestisce nei nomi: rinomina il progetto senza questo carattere '
+                                 '(File > Rinomina progetto...), rigenera i file e ripeti il '
+                                 'controllo.', characters=' '.join(unsafe)) if unsafe else
+                              tx('Rigenera i file del componente, poi ripeti il controllo; se si '
+                                 'ripete, il file contiene qualcosa che KiCad non sa leggere.'))
+                    add('ERROR', title, detail + ('\n' + log if log else ''), code=code,
+                        remedy=remedy, cli_failure='component')
+                    return None
+                # Not attributed: the tool's own failure, said as before
+                # round 4, with the control's confirmation when it failed too.
+                if verdict == 'timeout':
+                    reason = tx('kicad-cli non ha risposto entro {seconds} secondi.',
+                                seconds=math.ceil(budget))
+                    failure, exit_code = 'timeout', None
+                else:
+                    reason = (tx('kicad-cli è terminato con il codice {code} senza dichiarare il '
+                                 'file non valido: lettura non verificata.',
+                                 code=_exit_code_text(proc.returncode))
+                              if proc.returncode else
+                              tx('kicad-cli non ha prodotto alcun risultato: lettura non verificata.'))
+                    failure, exit_code = 'not_run', proc.returncode
+                if outcome is not None and outcome.verdict == 'read':
+                    # Only a timeout gets here with a control that read: the
+                    # run's extended read was already spent on another file.
+                    reason += '\n' + tx('KiCad ha letto un file di controllo dello stesso tipo, ma '
+                                        'il tempo esteso di questo controllo è già stato dato a un '
+                                        "altro file: ripeti il controllo per dare più tempo a "
+                                        'questo.')
+                elif outcome is not None:
+                    reason += '\n' + tx('Anche il file di controllo del programma non è stato letto '
+                                        '({reason}): il problema viene da KiCad o dal computer, non '
+                                        'dal componente.',
+                                        reason=outcome.reason or tx('rifiutato da KiCad'))
+                # A failure of the CHECKING TOOL is «not run», never an ERROR:
+                # an ERROR forbids the installation in the guided KiCad tab,
+                # and a slow PC or an antivirus holding kicad-cli would then
+                # block a sound component for good (review 2026-11-15, H1).
+                # The exit code is declared on the row (round 3, item 5).
+                add('SKIP', title, reason + ('\n' + log if log else ''), code=code, remedy=retry,
+                    cli_failure=failure, cli_exit_code=exit_code)
+                return None
+            # Exit 0 with an output: KiCad read the file. Its log lines are in
+            # KiCad's interface language and are only SHOWN: words that look
+            # like an error or a warning give at most a WARN with the log,
+            # never an ERROR (an error is recognised by its code, not by
+            # translated text). A passed read says so in the interface
+            # language; the scratch folder is shortened in the log.
+            worded = bool(re.search(
+                r'^[\s*]*(?:error|errore|fehler|erreur|fallita|fallito|impossibile|échec|echec|'
+                r'warning|avviso|attenzione|warnung|avertissement)\b|\b(?:failed|unable)\s+to\b|'
+                r'\bcannot\s+(?:read|open|load|import)\b', log, re.I | re.M))
+            detail = log if worded else tx('File letto da KiCad.')
+            if slow_note:
+                # Round 5, item 1: read only on the extended attempt.
+                detail = detail + '\n' + slow_note
+            add('WARN' if worded else 'OK', title, detail, code=code)
+            return output
+
+        def bytes_input(relative, payload):
+            """A `materialise` writing `payload` at `relative` inside the attempt's input folder."""
+            def materialise(folder):
+                path = folder / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(payload)
+                return path
+            return materialise
 
         pad_ids = None
         footprint_text = None
         overlap_pairs = []
         symbol = None
         try:
-            data = fp.read_bytes()
+            data = _read_component_file(fp)
             if data.startswith(UTF8_BOM):
                 # A BOM made the root check fail with a generic «File footprint
                 # non valido» («invalid footprint file») although the file is
                 # readable; kicad-cli refuses it, the install strips it
                 # (review 2026-10-29, L4). Named here, the checks go on.
                 add('WARN', tx('Footprint su disco'),
-                    tx('Il file {path} inizia con un BOM UTF-8 (byte EF BB BF): KiCad non legge questa copia nella cartella del componente. La copia installata nella libreria viene scritta senza BOM.', path=fp))
+                    tx('Il file {path} inizia con un BOM UTF-8 (byte EF BB BF): KiCad non legge questa copia nella cartella del componente. La copia installata nella libreria viene scritta senza BOM.', path=fp),
+                    code='footprint_bom')
             # Same decoding as the install (BOM dropped, universal newlines),
             # so the check reads the footprint the library will receive.
             text = _decode_utf8(data, fp)
@@ -1670,7 +3207,7 @@ def verify_component(directory, name, rows, *, pending=False, issues=(), emit=la
             pad_ids = {p[0] for p in pads if len(p) > 2 and p[1] != 'np_thru_hole' and p[0]}
             if not pad_ids:
                 raise ValueError(tx('Nessun pad elettrico trovato.'))
-            add('OK', tx('Footprint su disco'), str(fp))
+            add('OK', tx('Footprint su disco'), str(fp), code='footprint_file')
             # The copper rules of the footprint tab, on the file the library
             # receives (real run 2026-11-14: overlapping pads were not seen).
             footprint_text = text
@@ -1719,26 +3256,49 @@ def verify_component(directory, name, rows, *, pending=False, issues=(), emit=la
                     except ValueError:
                         valid = False
                     if not valid:
-                        add('ERROR', tx('Collegamento 3D originale'), tx('Trasformazione {field} non valida.', field=field))
+                        add('ERROR', tx('Collegamento 3D originale'), tx('Trasformazione {field} non valida.', field=field), code='model_link')
                     elif tuple(values) != default:
                         changed_transform = True
                 if changed_transform:
-                    add('WARN', tx('Collegamento 3D originale'), tx('Trasformazione 3D originale non verificata: la prova temporanea usa scala e orientamento normalizzati.'))
+                    add('WARN', tx('Collegamento 3D originale'), tx('Trasformazione 3D originale non verificata: la prova temporanea usa scala e orientamento normalizzati.'), code='model_link')
                 args = _node_arguments(model)
                 reference = args[0] if args else ''
                 expanded = os.path.expandvars(reference)
                 if not reference:
-                    add('ERROR', tx('Collegamento 3D originale'), tx('Riferimento modello vuoto.'))
+                    add('ERROR', tx('Collegamento 3D originale'), tx('Riferimento modello vuoto.'), code='model_link')
                 elif '${' in expanded or re.search(r'%[^%]+%', expanded):
-                    add('SKIP', tx('Collegamento 3D originale'), tx('Variabile KiCad da risolvere nel progetto di destinazione: {reference}', reference=reference))
+                    add('SKIP', tx('Collegamento 3D originale'), tx('Variabile KiCad da risolvere nel progetto di destinazione: {reference}', reference=reference), code='model_link')
                 elif not Path(expanded).is_absolute():
-                    add('SKIP', tx('Collegamento 3D originale'), tx('Percorso relativo da verificare nel progetto di destinazione: {reference}', reference=reference))
+                    add('SKIP', tx('Collegamento 3D originale'), tx('Percorso relativo da verificare nel progetto di destinazione: {reference}', reference=reference), code='model_link')
                 elif not Path(expanded).is_file():
-                    add('ERROR', tx('Collegamento 3D originale'), tx('Modello non trovato: {reference}', reference=reference))
+                    add('ERROR', tx('Collegamento 3D originale'), tx('Modello non trovato: {reference}', reference=reference), code='model_link')
                 else:
-                    add('OK', tx('Collegamento 3D originale'), reference)
-            run(tx('Lettura footprint in KiCad'), ['fp', 'export', 'svg', '--footprint', name, '-o', scratch / 'fp', fp.parent], scratch / 'fp', '*.svg',
-                code='kicad_footprint_read')
+                    add('OK', tx('Collegamento 3D originale'), reference, code='model_link')
+            # kicad-cli reads a scratch COPY of the bytes checked above, never
+            # the project's .pretty in place: the window may write the folder
+            # meanwhile (a Windows sharing violation, or a file read half
+            # written), and the copy is exactly what the rules above saw
+            # (review 2026-11-15, M4).
+            # Without a leading BOM (round 2, R11): kicad-cli 10 refuses a
+            # file that starts with one (exit 2, measured), the installation
+            # writes the library copy without it, and the WARN above already
+            # names it -- an ERROR here would block a footprint the install
+            # repairs. Every other byte (newlines included) is kept.
+            fp_bytes = data[len(UTF8_BOM):] if data.startswith(UTF8_BOM) else data
+            # The footprint is looked up by FILE name (kicad-cli 10.0, measured:
+            # a different `(footprint "...")` inside still exports), and the
+            # copy is named after the component, so exit 0 without an output
+            # cannot come from the file's content: no `explain` here.
+            run(tx('Lettura footprint in KiCad'),
+                bytes_input(Path(f'{name}.pretty') / f'{name}.kicad_mod', fp_bytes),
+                lambda source, output: ['fp', 'export', 'svg', '--footprint', name, '-o', output,
+                                        source.parent],
+                pattern='*.svg', code='kicad_footprint_read', control='fp')
+        except _ComponentFileBusy as exc:
+            # Round 3, item 3: the footprint exists but cannot be read now
+            # (held by another program): not «no footprint», not a defect.
+            add('SKIP', tx('Footprint su disco'), exc.detail, remedy=exc.remedy, code='footprint_file',
+                file_busy=True)
         except FileNotFoundError:
             # No footprint yet: said in words, with its cause when the caller
             # knows it (an open pad-layout question), never as an errno.
@@ -1749,7 +3309,7 @@ def verify_component(directory, name, rows, *, pending=False, issues=(), emit=la
                 tx('Genera il footprint, poi ripeti la verifica.'),
                 code='footprint_missing', importance=IMPORTANCE_BLOCKS_USE)
         except (OSError, ValueError, RuntimeError) as exc:
-            add('ERROR', tx('Footprint su disco'), exc)
+            add('ERROR', tx('Footprint su disco'), exc, code='footprint_file')
 
         try:
             pins, body = symbol_inputs(rows)
@@ -1760,7 +3320,7 @@ def verify_component(directory, name, rows, *, pending=False, issues=(), emit=la
                                  pin_names_hidden=symbol_pin_names_hidden(rows))
             ids = {str(p.number) for p in pins}
             if pad_ids is None:
-                add('SKIP', tx('Corrispondenza pin-pad'), tx('Footprint non leggibile.'))
+                add('SKIP', tx('Corrispondenza pin-pad'), tx('Footprint non leggibile.'), code='pin_pad')
             elif ids != pad_ids:
                 add('ERROR', tx('Corrispondenza pin-pad'),
                     tx('Solo simbolo: {symbol_only}; solo footprint: {footprint_only}', symbol_only=sorted(ids - pad_ids), footprint_only=sorted(pad_ids - ids)),
@@ -1768,11 +3328,25 @@ def verify_component(directory, name, rows, *, pending=False, issues=(), emit=la
             else:
                 add('OK', tx('Corrispondenza pin-pad'), tx('{count} numeri elettrici corrispondenti.', count=len(ids)),
                     code='pin_pad')
-            candidate = scratch / f'{name}.kicad_sym'
-            candidate.write_text(symbol, encoding='utf-8')
-            run(tx('Simbolo applicato: lettura in KiCad'), ['sym', 'export', 'svg', '-o', scratch / 'sym', candidate], scratch / 'sym', '*.svg',
-                code='kicad_symbol_read')
-            saved = root / f'{name}.kicad_sym'
+            def sym_args(source, output):
+                """The `sym export svg` arguments of one attempt (every symbol of the library)."""
+                return ['sym', 'export', 'svg', '-o', output, source]
+
+            def symbol_problem(text, saved_file):
+                """The component problem of a symbol library that lacks the component's symbol, or None."""
+                detail = symbol_library_problem(text, name)
+                if detail is None:
+                    return None
+                if saved_file:
+                    # The file the installation ships: re-exported from the
+                    # applied symbol, like a stale export (same remedy).
+                    return ('WARN', detail, IMPORTANCE_BEFORE_PRODUCTION, export_remedy,
+                            ACTION_REEXPORT_SYMBOL)
+                return ('ERROR', detail, IMPORTANCE_BLOCKS_USE,
+                        tx('Correggi il simbolo nella scheda «Simbolo elettrico» e premi «Applica», '
+                           'poi ripeti la verifica.'), None)
+
+            # Defined before the reads: `symbol_problem` names it.
             # A stale or missing exported symbol is to be fixed before
             # production (user decision 2026-11-13): importance 2, «DA RIVEDERE
             # PRIMA DELL’USO» until fixed. Other technical warnings, the
@@ -1781,30 +3355,71 @@ def verify_component(directory, name, rows, *, pending=False, issues=(), emit=la
             # installation brings the symbol): the row's own action rewrites it.
             export_remedy = tx('Usa «Riesporta il simbolo»: riscrive il .kicad_sym nella cartella '
                                'del componente dal simbolo applicato.')
-            if saved.is_file():
-                if (symbol_text_without_metadata(saved.read_text(encoding='utf-8'))
+            run(tx('Simbolo applicato: lettura in KiCad'),
+                bytes_input(f'{name}.kicad_sym', symbol.encode('utf-8')), sym_args,
+                pattern='*.svg', code='kicad_symbol_read', control='sym',
+                explain=lambda: symbol_problem(symbol, False))
+            saved = root / f'{name}.kicad_sym'
+            saved_bytes, busy = None, None
+            try:
+                saved_bytes = _read_component_file(saved) if saved.is_file() else None
+            except _ComponentFileBusy as exc:
+                busy = exc
+            except FileNotFoundError:
+                saved_bytes = None  # removed between the test and the read: as missing
+            if busy is not None:
+                # Round 3, item 3: held by another program -- the KiCad read
+                # of it is not made now: a SKIP with the cause (it closes the
+                # symbol stage like the read itself), never an ERROR.
+                add('SKIP', tx('Simbolo su disco: lettura in KiCad'), busy.detail, remedy=busy.remedy,
+                    code='kicad_symbol_file_read', file_busy=True)
+            elif saved_bytes is not None:
+                # Read ONCE: the comparison and kicad-cli see the same bytes,
+                # and kicad-cli reads a scratch copy, never the component's
+                # file in place (review 2026-11-15, M4). A leading BOM is
+                # dropped, as the installation's own reading drops it
+                # (`_component_symbol`): kicad-cli 10 refuses such a copy
+                # (exit 2, measured), and an ERROR would block a symbol the
+                # installation ships correctly (round 2, R11, same class).
+                if saved_bytes.startswith(UTF8_BOM):
+                    saved_bytes = saved_bytes[len(UTF8_BOM):]
+                saved_text = saved_bytes.decode('utf-8')
+                if (symbol_text_without_metadata(saved_text)
                         != symbol_text_without_metadata(symbol)):
                     add('WARN', tx('Simbolo esportato'), tx('Il file nella cartella componente differisce dal simbolo applicato: riesportarlo.'),
                         remedy=export_remedy, action=ACTION_REEXPORT_SYMBOL, code='symbol_export_stale',
                     importance=IMPORTANCE_BEFORE_PRODUCTION)
-                run(tx('Simbolo su disco: lettura in KiCad'), ['sym', 'export', 'svg', '-o', scratch / 'saved', saved], scratch / 'saved', '*.svg',
-                    code='kicad_symbol_file_read')
+                run(tx('Simbolo su disco: lettura in KiCad'),
+                    bytes_input(f'{name}.kicad_sym', saved_bytes), sym_args,
+                    pattern='*.svg', code='kicad_symbol_file_read', control='sym',
+                    explain=lambda: symbol_problem(saved_text, True))
             else:
                 # The same export writes a missing file: the same fix applies.
                 add('WARN', tx('Simbolo esportato'), tx('Nessun .kicad_sym nella cartella componente; verificata la versione applicata in memoria.'),
                     remedy=export_remedy, action=ACTION_REEXPORT_SYMBOL, code='symbol_export_missing',
                     importance=IMPORTANCE_BEFORE_PRODUCTION)
         except (OSError, ValueError, TypeError) as exc:
-            add('ERROR', tx('Simbolo'), exc)
+            add('ERROR', tx('Simbolo'), exc, code='symbol_error')
+
+        # Pads whose values the program derived or estimated (review
+        # 2026-11-15, A5): never silent in the component check.
+        # Their pads are named through the numbers of the footprint they were
+        # computed on, never through the file's pad order (round 2, R6).
+        for result in estimated_pad_checks(estimated_pads, estimated_pad_numbers):
+            publish(result)
 
         # The document pinout against the pads on disk and the applied names.
         for result in document_checks(document, rows, pad_ids):
             publish(result)
         # The NC/NO functions of a switch contact, as the analysis confirmed them,
         # and pin names that contradict them.
-        for result in contact_function_checks(contact_witness, rows):
-            publish(result)
+        # The pin roles first (round 3): their ERRORs then come before the
+        # witness row, so nothing of this stage follows a blocking row late.
+        # Their conclusion is still declared by the next stage's first row
+        # (`BLOCKING_CHECKS['pin_role_contradiction']`).
         for result in pin_role_checks(rows):
+            publish(result)
+        for result in contact_function_checks(contact_witness, rows):
             publish(result)
 
         # ONE preview project for the 3D import, the DRC and the ERC
@@ -1836,17 +3451,37 @@ def verify_component(directory, name, rows, *, pending=False, issues=(), emit=la
                 # without FreeCAD delivers the footprint alone. A missing model
                 # is a warning, never an ERROR («NON USARE»); a STEP that exists
                 # but is truncated stays an ERROR below.
-                add('WARN', tx('Modello STEP'), tx('Nessun modello STEP: il componente sarà consegnato a KiCad senza vista 3D.'))
+                add('WARN', tx('Modello STEP'), tx('Nessun modello STEP: il componente sarà consegnato a KiCad senza vista 3D.'),
+                    code='step_missing')
                 add('SKIP', tx('Importazione 3D in KiCad'), tx('Nessun modello STEP da importare.'))
                 raise _NoStep()
+            # A STEP held by another program stays a «Modello STEP» ERROR here
+            # (round 3): as a SKIP the window, which waits for no read of the
+            # STEP, would allow the installation with its integrity unchecked.
             if not step_file_is_complete(step):
                 raise ValueError(tx('STEP incompleto o troncato.'))
             add('OK', tx('Integrità STEP'), str(step), code='step_integrity')
             if preview is not None:
-                output = scratch / 'assembly.step'
-                if run(tx('Importazione 3D in KiCad'), ['pcb', 'export', 'step', '--no-board-body', '-o', output, preview.board_path], output,
-                       code='kicad_3d_import'):
-                    solid = re.search(r'\b(MANIFOLD_SOLID_BREP|BREP_WITH_VOIDS)\s*\(', output.read_text(errors='replace'))
+                def board_input(folder, project=preview):
+                    """A fresh copy of the whole preview project (its paths are ${KIPRJMOD})."""
+                    import shutil
+                    shutil.copytree(project.directory, folder)
+                    return folder / project.board_path.relative_to(project.directory)
+
+                output = run(tx('Importazione 3D in KiCad'), board_input,
+                             lambda source, target: ['pcb', 'export', 'step', '--no-board-body',
+                                                     '-o', target, source],
+                             output_name='assembly.step', code='kicad_3d_import',
+                             control='step')
+                if output is not None:
+                    try:
+                        solid = re.search(r'\b(MANIFOLD_SOLID_BREP|BREP_WITH_VOIDS)\s*\(',
+                                          output.read_text(errors='replace'))
+                    except OSError:
+                        # The check's own scratch output became unreadable
+                        # (round 3, item 3, same class): the solids are not
+                        # confirmed, never a «Modello STEP» ERROR.
+                        solid = None
                     if not solid:
                         add('WARN', tx('Solidi 3D'), tx('Esportazione riuscita, ma presenza di solidi non confermata.'),
                             code='solids_unconfirmed')
@@ -1934,6 +3569,13 @@ def verify_component(directory, name, rows, *, pending=False, issues=(), emit=la
 
         # The KiCad libraries the component was installed in.
         if footprint_text is not None:
+            # CONTRACT CHANGED 2026-11-15 (round 3): the global tables of a
+            # global installation are the ones its record names
+            # (`table_path`, `symbol_table_path`); «the current» global table
+            # is no longer resolved for a record without them -- it may
+            # belong to another KiCad version than the one the library was
+            # registered in, and a BOM found there would name a file the
+            # installation never wrote.
             for result in library_checks(name, footprint_text, installs, step, model_offset,
                                          symbol_path=root / f'{name}.kicad_sym'):
                 publish(result)

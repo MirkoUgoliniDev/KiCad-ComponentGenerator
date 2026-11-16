@@ -684,36 +684,100 @@ ne viene iniziato uno nuovo: nessuna registrazione si perde in silenzio.</p>
 <h3 id="controllo">Controllo del componente (passo 1)</h3>
 <p>Quando apri la scheda <span class="ui">KiCad</span> con file che nessun controllo ha
 ancora letto, il controllo <strong>parte da solo</strong>: non chiede nulla e non
-modifica la configurazione di KiCad. Aspetta solo se un lavoro sta scrivendo i file o
-se i file non corrispondono ai parametri (la riga in cima al passo dice perché).
+modifica la configurazione di KiCad. Non parte finché il componente non ha un footprint,
+e aspetta (la riga in cima al passo dice perché e qual è il rimedio) finché: un lavoro
+(generazione, modello STEP, analisi) sta scrivendo i file; le posizioni dei pad sono
+state lasciate bloccate; resta aperta una domanda sul footprint (disposizione dei pad,
+numerazione dei lati, interasse delle file, tipo di contatto, vista dei terminali);
+i file su disco non corrispondono ai parametri, cioè una modifica applicata al
+footprint non è ancora scritta nel file, il file del simbolo non corrisponde al simbolo
+applicato o il modello STEP è obsoleto. Appena la causa sparisce il controllo parte da
+solo.
 Controlla i file generati, la corrispondenza dei numeri pin-pad e, se
 <code>kicad-cli</code> è disponibile, prova la lettura di footprint, simbolo e STEP con
 KiCad CLI (DRC ed ERC compresi). L'esito resta scritto nel passo: un verdetto, una riga
 per ogni cosa da fare con il suo pulsante (per esempio <span class="ui">Apri la tabella
 Pinout</span> o <span class="ui">Suggerisci con AI</span>) e i controlli superati.
 <span class="ui">Controlla di nuovo</span> lo ripete, <span class="ui">Interrompi</span>
-lo ferma subito, <span class="ui">Copia rapporto</span> copia verdetto, righe e dettagli
-tecnici.</p>
+lo ferma subito (e allora va ripetuto prima di installare), <span class="ui">Copia
+rapporto</span> copia verdetto, righe e dettagli tecnici.</p>
 <p>L'esito decide il passo 3:</p>
 <ul>
   <li><strong>errori</strong> (verdetto <span class="ui">NON USARE</span>): l'installazione
   resta bloccata finché non li correggi;</li>
-  <li><strong>avvisi</strong> o controlli non eseguiti: puoi installare, e la frase del
-  passo 3 dice che cosa rivedere prima della produzione;</li>
+  <li><strong>avvisi</strong> o controlli non eseguiti perché KiCad CLI non è installato:
+  puoi installare, e la frase del passo 3 dice che cosa rivedere prima della produzione;</li>
+  <li><strong>KiCad non ha letto tutti i file</strong> che l'installazione copia (il
+  footprint e, se esiste, il file del simbolo): KiCad CLI c'è, ma una lettura è stata
+  saltata o interrotta, per esempio non ha risposto entro 60 secondi; l'installazione
+  resta bloccata finché <span class="ui">Controlla di nuovo</span> non porta a termine
+  ogni lettura;</li>
+  <li><strong>stesso errore di KiCad CLI in due controlli di fila</strong>: ogni lettura
+  di KiCad fallisce dalla parte dello strumento, con la stessa causa in due controlli
+  consecutivi: KiCad CLI non si avvia, si chiude ogni volta con lo stesso codice di
+  uscita (anche un codice di crash), termina senza produrre alcun risultato, non risponde
+  mai entro il tempo, rifiuta anche un file di prova valido (vedi sotto), oppure la
+  cartella temporanea del controllo non è utilizzabile (antivirus, disco pieno,
+  permessi); conta anche una combinazione fissa di queste cause. È una causa che dura,
+  trattata come KiCad CLI non installato: puoi installare, e il passo 3 ne dice la causa.
+  Nessuna causa che dura viene mai presunta quando KiCad CLI ha funzionato nello stesso
+  controllo (una lettura riuscita, un DRC o un ERC eseguiti): le letture mancate
+  riguardano allora i file, e vanno ripetute o sono un errore del componente (vedi
+  sotto). Un errore interno del programma non conta mai come causa che dura: ricade
+  sempre nel punto seguente;</li>
+  <li><strong>controllo fermato da un errore interno</strong>: puoi installare solo se
+  aveva già concluso ogni verifica che può bloccare il componente e che lo riguarda:
+  <ul class="required-checks">
+    <li>con KiCad CLI, la versione di KiCad;</li>
+    <li>il file del footprint e i suoi pad (pad sovrapposti, collegamenti al modello
+    STEP) e, quando ci sono terminali dichiarati, il loro passaggio nei fori;</li>
+    <li>la corrispondenza pin-pad e la costruzione del simbolo;</li>
+    <li>con KiCad CLI, le letture di KiCad del footprint, del simbolo applicato e del
+    file del simbolo installato, quando esiste, e il DRC dell'anteprima (un contatto
+    reale fra due pad);</li>
+    <li>la piedinatura del documento, quando esiste una lettura del documento;</li>
+    <li>le funzioni dei contatti (NC, NO, comune), quando il simbolo dichiara dei
+    contatti;</li>
+    <li>quando c'è uno STEP, l'integrità del modello STEP e, con KiCad CLI, la sua
+    importazione in KiCad.</li>
+  </ul>
+  In quel caso il passo 3 dice che l'esito è incompleto; altrimenti l'installazione resta
+  bloccata finché <span class="ui">Controlla di nuovo</span> non le conclude;</li>
+  <li><strong>controllo interrotto</strong> o che non è riuscito a partire: non vale come
+  esito, l'installazione resta bloccata finché non lo ripeti con
+  <span class="ui">Controlla di nuovo</span>;</li>
+  <li><strong>un file del componente è in uso da un altro programma</strong>: il
+  controllo è terminato, ma una verifica che serve all'installazione non si è potuta
+  fare perché il file era aperto altrove; l'installazione resta bloccata: chiudi il
+  programma che lo tiene aperto e usa <span class="ui">Controlla di nuovo</span>;</li>
+  <li><strong>controllo terminato senza concludere tutte le verifiche che
+  servono</strong> all'installazione (le righe saltate del passo 1 dicono quali):
+  l'installazione resta bloccata finché <span class="ui">Controlla di nuovo</span> non
+  le conclude;</li>
   <li><strong>tutto a posto</strong> (restano solo le verifiche da fare a mano in KiCad):
   <span class="ui">Installa nel progetto KiCad (consigliato)</span> è in evidenza.</li>
 </ul>
 <p>Ogni modifica ai file che l'installazione copia (una rigenerazione,
 <span class="ui">Applica ai file</span>, una nuova esportazione del simbolo) rende
-l'esito vecchio: i pulsanti di installazione si spengono e il controllo riparte. Un
-problema dello strumento di controllo (KiCad CLI che non risponde entro 60 secondi o
-non si avvia) non è un errore del componente: risulta «non eseguito» e non blocca
-l'installazione. Dopo un'installazione si aggiorna solo la riga della libreria KiCad.
+l'esito vecchio: i pulsanti di installazione si spengono e il controllo riparte. Quando
+KiCad fallisce sul file del componente (lo rifiuta per due volte, si chiude anche con un
+codice di crash, termina senza produrre nulla o non finisce mai di leggerlo), il
+controllo gli fa leggere con lo stesso comando un piccolo file di prova valido dello
+stesso tipo: se KiCad lo legge, il difetto è del componente (errore). Un esempio è un
+nome che contiene «%», che KiCad tratta come un codice di formato e che lo fa chiudere a
+ogni lettura: per questo il carattere non è ammesso nei nomi dei componenti. Se KiCad
+fallisce anche sul file di prova, o la prova non si può fare, il problema è dello
+strumento di controllo o del computer (l'installazione di KiCad, un antivirus, la
+cartella temporanea) e non del componente: la lettura risulta «non eseguita», e blocca
+l'installazione solo quando manca una lettura di KiCad dei file che l'installazione
+copia, finché il controllo non la porta a termine o la causa non si dimostra duratura
+(vedi sopra); un DRC o un ERC non eseguito non la blocca. Dopo un'installazione si aggiorna solo la riga della libreria KiCad.
 Il simbolo applicato viene provato anche se non ancora esportato; le bozze non
 applicate sono escluse e segnalate. Questo controllo non certifica pinout, misure o
 allineamento visivo 3D; ERC e DRC vanno eseguiti sullo schema e sulla scheda finali.</p>
-<p>Il controllo resta disponibile quando esiste il footprint ma manca lo STEP;
-l'installazione resta disabilitata finché i file richiesti non sono presenti.
+<p>Il controllo e l'installazione restano disponibili quando esiste il footprint ma
+manca lo STEP (l'installazione chiede conferma e porta il componente senza vista 3D);
+l'installazione resta disabilitata finché non c'è il footprint.
 I riferimenti e le trasformazioni 3D originali sono controllati separatamente dalla
 copia temporanea normalizzata. Percorsi relativi o variabili KiCad non risolti
 richiedono verifica nel progetto di destinazione.</p>
