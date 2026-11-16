@@ -25,9 +25,14 @@ def test_price_converted_to_dollars_per_million_tokens():
     assert _parse_price("0.000003") == pytest.approx(3.0)
 
 
-def test_sentinel_negative_price_counts_as_free():
-    # I modelli "auto" espongono -1000000 come prezzo: non e' un costo.
-    assert _parse_price("-1000000") == 0.0
+def test_sentinel_negative_price_is_unknown_not_free():
+    # CONTRACT CHANGED (review R7-6, 2026-11-16): the "auto" models publish
+    # -1000000 because their price depends on the model routed at call time.
+    # That is an unknown price, not a free one: shown as «gratis» it misled
+    # the user. A declared zero stays free (test_model_without_pdf...).
+    import math
+    assert math.isnan(_parse_price("-1000000"))
+    assert _parse_price("0") == 0.0
 
 
 def test_model_parsed_with_capabilities():

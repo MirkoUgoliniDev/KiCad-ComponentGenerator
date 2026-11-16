@@ -25,6 +25,23 @@ from PyQt6.QtWidgets import QApplication, QGraphicsView
 #: Device pixels added around a grid line before it is tested against the paint region.
 GRID_PAINT_MARGIN_PX = 2
 
+#: Smallest on-screen distance, LOGICAL pixels, between two grid lines that are
+#: drawn (`painter_scale`: the painter's world transform in `drawBackground`
+#: leaves the screen's devicePixelRatio out; on a high-DPI screen the physical
+#: spacing is that many times larger, so the rule may skip a level still
+#: legible there, never draw one that is not).
+#: Two 1 px cosmetic lines need a free pixel between them to be told
+#: apart, so lines closer than 2 px merge into a uniform tint that shows no
+#: position at all, while laying them out costs one line per pixel or more
+#: (review 2026-11-16, R5-3: 330 ms per repaint of the footprint preview at
+#: its minimum zoom, lines 0.4 px apart). The level is skipped below it, as
+#: KiCad skips a grid level closer than its minimum grid spacing
+#: (`GAL::DrawGrid`). Derived from the pen width, not tuned on a zoom: the
+#: symbol editor's coarsest view (ZOOM_MIN 0.15, 2.54 mm grid = 3.81 px)
+#: and the footprint preview at its fit zooms stay above it and paint as
+#: before.
+GRID_LINE_MIN_PX = 2.0
+
 #: Colour of the fine-grid dots on the DARK canvases of both tabs (symbol editor
 #: «dark» theme and footprint preview): one value, so the two grids look alike.
 #: Brightened on 2026-11-02 (user: «puntini della griglia un poco più evidenti»,
@@ -147,9 +164,24 @@ def dots_legible(fine_step: float, scale: float, min_px: float) -> bool:
     return fine_step * scale >= min_px
 
 
+def painter_scale(painter: QPainter) -> float:
+    """@brief Logical pixels per scene unit of a painter in scene coordinates.
+
+    @param painter The painter `drawBackground` receives: its world
+        transform maps the scene to the viewport's logical pixels (the
+        view's transform, and the target's scale in a `render`); the
+        screen's devicePixelRatio is not part of it.
+    @return The smaller of the two axis scales (the denser direction of the
+        grid on screen); rotation-safe through the column norms.
+    """
+    t = painter.worldTransform()
+    return min(math.hypot(t.m11(), t.m12()), math.hypot(t.m21(), t.m22()))
+
+
 def paint_grid(painter: QPainter, rect: QRectF, *, exposed: ExposedRegion | None, step: float,
                origin: tuple[float, float] = (0.0, 0.0), style: GridStyle, fine_step: float | None = None,
-               skip_dots_on_lines: bool = False, dots_first: bool = False) -> None:
+               skip_dots_on_lines: bool = False, dots_first: bool = False,
+               min_line_px: float = GRID_LINE_MIN_PX) -> None:
     """@brief Paint the grid lines and the fine dots over `rect`.
 
     @param painter Painter in scene coordinates; its state is saved and restored.
@@ -164,6 +196,8 @@ def paint_grid(painter: QPainter, rect: QRectF, *, exposed: ExposedRegion | None
         `round(step / fine_step)`); needs `fine_step` to divide `step`.
     @param dots_first True paints the dots BEFORE the lines (the symbol editor: a line crosses
         its dots); False paints them after (the footprint preview).
+    @param min_line_px Lines closer than this on screen (logical pixels, `painter_scale`) are
+        not laid out at all (`GRID_LINE_MIN_PX`); the dots keep the caller's own rule.
     @note Lines are cosmetic 1 px pens drawn in index order, columns then rows. Dots are one
         `drawPoints` call, columns outer and rows inner. With a paint region only the
         lines, columns and rows reaching it are laid out; the dots are a superset of those
@@ -174,15 +208,16 @@ def paint_grid(painter: QPainter, rect: QRectF, *, exposed: ExposedRegion | None
     try:
         if dots_first:
             _paint_dots(painter, rect, exposed, step, ox, oy, style, fine_step, skip_dots_on_lines)
-        pen = QPen(QColor(style.line_color))
-        pen.setCosmetic(True)
-        painter.setPen(pen)
-        for index in _indices(exposed, rect, step, 0, ox):
-            x = ox + index * step
-            painter.drawLine(QLineF(x, rect.top(), x, rect.bottom()))
-        for index in _indices(exposed, rect, step, 1, oy):
-            y = oy + index * step
-            painter.drawLine(QLineF(rect.left(), y, rect.right(), y))
+        if step * painter_scale(painter) >= min_line_px:
+            pen = QPen(QColor(style.line_color))
+            pen.setCosmetic(True)
+            painter.setPen(pen)
+            for index in _indices(exposed, rect, step, 0, ox):
+                x = ox + index * step
+                painter.drawLine(QLineF(x, rect.top(), x, rect.bottom()))
+            for index in _indices(exposed, rect, step, 1, oy):
+                y = oy + index * step
+                painter.drawLine(QLineF(rect.left(), y, rect.right(), y))
         if not dots_first:
             _paint_dots(painter, rect, exposed, step, ox, oy, style, fine_step, skip_dots_on_lines)
     finally:

@@ -25,6 +25,58 @@ def no_window_flags(platform: str = sys.platform) -> int:
     return getattr(subprocess, "CREATE_NO_WINDOW", 0) if platform == "win32" else 0
 
 
+def _unbiased_interrupt_clock():
+    """Return Windows' sleep-excluding clock reader, or None off Windows or when unavailable."""
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+        query = ctypes.windll.kernel32.QueryUnbiasedInterruptTime
+        query.argtypes = [ctypes.POINTER(ctypes.c_ulonglong)]
+        query.restype = ctypes.c_int
+    except (AttributeError, OSError, ImportError):
+        return None
+
+    def read():
+        """Seconds of QueryUnbiasedInterruptTime (100 ns units), None on a refused call."""
+        value = ctypes.c_ulonglong(0)
+        return value.value / 1e7 if query(ctypes.byref(value)) else None
+    return read
+
+
+_UNBIASED_READER = _unbiased_interrupt_clock()
+
+#: Last good reading of the sleep-excluding clock (see `awake_clock`).
+_LAST_AWAKE: list = []
+
+
+def awake_clock() -> float:
+    """@brief Seconds on a monotonic clock that does NOT advance while the computer sleeps.
+
+    @return A monotonic reading in seconds, comparable only with other
+        readings of this function.
+    @note Why it exists (2026-11-16 review, R10-1/R10-2): every silence
+        watchdog of the package compared `time.monotonic()` readings, and on
+        Windows that clock keeps counting while the PC is suspended. A
+        machine put to sleep in the middle of a FreeCAD run woke up with
+        every deadline already past, so a healthy child was killed and its
+        model remembered as «stalled» forever. Windows'
+        `QueryUnbiasedInterruptTime` excludes sleep and hibernation by
+        definition; elsewhere `time.monotonic` already does (Linux
+        CLOCK_MONOTONIC, macOS mach_absolute_time), so it is used as is.
+        A refused query (never seen) answers the last good reading: the
+        clock stands still for that poll instead of jumping to another time
+        base, which could look like a long silence.
+    """
+    if _UNBIASED_READER is None:
+        return time.monotonic()
+    reading = _UNBIASED_READER()
+    if reading is None:
+        return _LAST_AWAKE[0] if _LAST_AWAKE else time.monotonic()
+    _LAST_AWAKE[:] = [reading]
+    return reading
+
+
 #: Creation flags of every FreeCAD child: one value for every launcher in
 #: the package (solid build, model measurement).
 NO_WINDOW_FLAGS = no_window_flags()
@@ -396,16 +448,18 @@ class CpuActivity:
         only, as before.
     """
 
-    def __init__(self, process, timeout, clock=time.monotonic):
+    def __init__(self, process, timeout, clock=None):
         """@brief Take the first sample of the child's job CPU time.
 
         @param process `subprocess.Popen` already passed to `contain_process`.
         @param timeout Silence timeout of the caller, in seconds: it caps the
             sample interval (see `CPU_SAMPLE_INTERVAL_S`).
-        @param clock Monotonic clock (tests pass a fake one).
+        @param clock Monotonic clock (tests pass a fake one); None is
+            `awake_clock`, the clock the watchdogs read, so that the `now` they
+            pass to `busy` and this sample share one time base.
         """
         self._process = process
-        self._clock = clock
+        self._clock = clock = clock or awake_clock
         try:
             self._interval = min(CPU_SAMPLE_INTERVAL_S, heartbeat_interval(timeout))
         except (TypeError, ValueError):
@@ -839,7 +893,9 @@ def run_logged(command, log_path: Path, progress=None, timeout=120, creationflag
                     # they are translated here (see messages.render_child_line).
                     progress("FreeCAD: " + render_child_line(text.rstrip()))
 
-            last_output = time.monotonic()
+            # Sleep-excluding clock: a suspended PC is not a silent child
+            # (2026-11-16 review, R10-2; see `awake_clock`).
+            last_output = awake_clock()
             deadline = last_output + timeout
             cpu = CpuActivity(process, timeout)
             cpu_limit = cpu_silence_limit(timeout)
@@ -862,7 +918,7 @@ def run_logged(command, log_path: Path, progress=None, timeout=120, creationflag
                         process.wait(timeout=CANCEL_POLL_INTERVAL_S)
                     except subprocess.TimeoutExpired:
                         pass
-                now = time.monotonic()
+                now = awake_clock()
                 if line is not None:
                     # Every line is proof that the process is working: the
                     # silence count restarts from zero.

@@ -6,6 +6,7 @@ the name of an existing project folder, and the interface asks explicitly
 whether to open an existing project or create a new one (File menu: «Nuovo
 progetto…», «Apri progetto…», «Rinomina progetto…»).
 """
+import stat
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -25,6 +26,19 @@ from ..core.output_names import (is_valid_output_name, kicad_unsafe_characters,
 #: by hand) is not listed, so it cannot be opened as if it were a project.
 PROJECT_MARKERS = ("docs", "analisi-ai.log", "photo-review", "photo-cache")
 
+#: Shown when the working folder exists but cannot be listed (permissions,
+#: a disconnected network share): the open-project list cannot be built.
+UNREADABLE_ROOT = ("Non riesco a leggere la cartella di lavoro: controlla che esista e di "
+                   "avere il permesso di aprirla.")
+
+#: Returned by `name_problem` when the working folder cannot be listed: the
+#: name cannot be checked against the existing projects, so it is refused
+#: rather than accepted blind (a rename onto an existing project would merge
+#: two projects).
+UNREADABLE_ROOT_NAME = ("Non riesco a leggere la cartella di lavoro, quindi non posso "
+                        "controllare che il nome sia libero: controlla che esista e di avere "
+                        "il permesso di aprirla.")
+
 #: Names Windows reserves for devices, with or without an extension.
 _RESERVED = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)),
              *(f"LPT{i}" for i in range(1, 10))}
@@ -37,6 +51,32 @@ class ProjectEntry:
     name: str
     path: Path
     modified: datetime
+
+
+def _root_is_folder(root: Path) -> bool:
+    """Whether `root` is an existing folder; a folder that cannot be inspected raises.
+
+    `Path.is_dir` answers False for ANY error, so an unreadable working folder
+    looked like a missing one; only «does not exist» (or «is not a folder»)
+    is False here.
+
+    @throws OSError when the folder exists but cannot be inspected.
+    """
+    try:
+        return stat.S_ISDIR(root.stat().st_mode)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+
+
+def unreadable_root_reason(root, error: OSError) -> str:
+    """@brief The folder and the system's own reason for an unreadable working folder.
+
+    @param root Working folder that could not be listed.
+    @param error The error raised while listing it.
+    @return «<folder>: <system message>»; the system message is already in
+        the language of Windows, so it is shown as it is.
+    """
+    return f"{root}: {error.strerror or error}"
 
 
 def is_project_folder(path: Path) -> bool:
@@ -57,18 +97,21 @@ def list_projects(root) -> list:
 
     @param root Library root (the «Cartella di lavoro»).
     @return List of ProjectEntry; empty when the root does not exist.
+    @throws OSError when the root exists but cannot be listed (permissions,
+        a disconnected share): an unreadable folder is not an empty one.
+        A single project folder that cannot be inspected is left out.
     @note The modification time is the newest one among the folder and its
         direct children, so a project whose documents changed yesterday is
         listed as changed yesterday.
     """
     root = Path(root)
-    if not root.is_dir():
+    if not _root_is_folder(root):
         return []
     entries = []
     for path in root.iterdir():
-        if not is_project_folder(path):
-            continue
         try:
+            if not is_project_folder(path):
+                continue
             stamps = [path.stat().st_mtime] + [child.stat().st_mtime for child in path.iterdir()]
         except OSError:
             continue
@@ -81,9 +124,10 @@ def taken_project_names(root) -> frozenset:
 
     @param root Library root.
     @return The casefolded folder names; empty when `root` is not a folder.
+    @throws OSError when the root exists but cannot be listed.
     """
     root = Path(root)
-    if not root.is_dir():
+    if not _root_is_folder(root):
         return frozenset()
     return frozenset(path.name.casefold() for path in root.iterdir() if path.is_dir())
 
@@ -103,6 +147,10 @@ def name_problem(root, name: str, current: str = "", taken=None) -> str:
         caller's catalog lookup returns it unchanged).
     @note Existing folders are compared ignoring letter case: on Windows
         «Test» and «TEST» are the same folder, so they are the same project.
+    @note A working folder that cannot be listed returns UNREADABLE_ROOT_NAME
+        instead of raising: the callers (the name dialog, the final checks of
+        «Nuovo progetto…» and «Rinomina progetto…») run inside Qt slots, where
+        an exception closed the program (super review 2026-11-16).
     @note CONTRACT CHANGED 2026-11-15 (round 5): which characters a name may
         hold is decided by the ONE rule of the generated files,
         `output_names.validate_output_name` -- the project name becomes the
@@ -120,7 +168,10 @@ def name_problem(root, name: str, current: str = "", taken=None) -> str:
     if name.split(".")[0].upper() in _RESERVED:
         return "Questo nome e' riservato da Windows."
     if taken is None:
-        taken = taken_project_names(root)
+        try:
+            taken = taken_project_names(root)
+        except OSError:
+            return UNREADABLE_ROOT_NAME
     if name.casefold() in taken and name.casefold() != current.strip().casefold():
         return "Esiste gia' un progetto con questo nome: aprilo da «Apri progetto…»."
     return ""
@@ -173,6 +224,8 @@ class ProjectNameDialog(QDialog):
         self._current = current
         #: (modification stamp of the root, its folder names); see `_taken`.
         self._taken_snapshot = None
+        #: OSError of the last failed listing of the root, None when it was read.
+        self._read_error = None
         self.setWindowTitle(self._tr(title))
         self.setModal(True)
         self.field = QLineEdit(current)
@@ -204,7 +257,10 @@ class ProjectNameDialog(QDialog):
         each entry for a folder at each key was the cost of the typing. The
         root's modification stamp changes whenever a folder is created,
         renamed or removed in it, so it keys the snapshot; `fresh` reads the
-        folder regardless (the final check of `accept`).
+        folder regardless (the final check of `accept`). A failed listing is
+        never cached: once the permission is fixed the next key reads it.
+
+        @throws OSError when the root exists but cannot be listed.
         """
         try:
             stamp = self._root.stat().st_mtime_ns
@@ -215,16 +271,36 @@ class ProjectNameDialog(QDialog):
         return self._taken_snapshot[1]
 
     def _problem(self, fresh: bool = False) -> str:
-        """Why the typed name cannot be used, or ""; `fresh` re-reads the root folder."""
+        """Why the typed name cannot be used, or ""; `fresh` re-reads the root folder.
+
+        The root is read even for an empty name, so an unreadable working
+        folder is reported as soon as the dialog opens, not at the first key.
+        """
         name = self.field.text()
-        problem = name_problem(self._root, name, self._current, taken=self._taken(fresh))
+        try:
+            taken = self._taken(fresh)
+        except OSError as exc:
+            self._read_error = exc
+            return UNREADABLE_ROOT_NAME
+        self._read_error = None
+        problem = name_problem(self._root, name, self._current, taken=taken)
         if not problem and self._current and name.strip() == self._current.strip():
             problem = "E' gia' il nome del progetto."
         return problem
 
     def _validate(self):
+        """Write why the name is refused under the field; OK only for a usable name.
+
+        An unreadable working folder is shown even before anything is typed,
+        with the folder and the system's reason.
+        """
         problem = self._problem()
-        self.problem.setText(self._tr(problem) if problem and self.field.text().strip() else "")
+        if self._read_error is not None:
+            self.problem.setText(self._tr(problem) + "\n"
+                                 + unreadable_root_reason(self._root, self._read_error))
+        else:
+            self.problem.setText(self._tr(problem) if problem and self.field.text().strip()
+                                 else "")
         self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(not problem)
 
     def accept(self):
@@ -253,6 +329,12 @@ class OpenProjectDialog(QDialog):
     def __init__(self, root, current: str = "", tr=None, parent=None):
         """@brief List the projects of the root, most recent first, with the current one selected.
 
+        @note A working folder that cannot be listed leaves the list empty and
+            says why (folder and system reason) where «no project» is
+            otherwise written; the dialog stays usable and closes with
+            «Annulla» (super review 2026-11-16: the PermissionError closed
+            the program).
+
         @param root Working folder whose sub-folders are the projects.
         @param current Name of the open project, preselected when listed.
         @param tr Translation function (Italian source -> shown text).
@@ -262,7 +344,12 @@ class OpenProjectDialog(QDialog):
         self._tr = tr or (lambda text: text)
         self.setWindowTitle(self._tr("Apri progetto"))
         self.setModal(True)
-        self.projects = list_projects(root)
+        #: OSError raised while listing the root, None when it was read.
+        self.read_error = None
+        try:
+            self.projects = list_projects(root)
+        except OSError as exc:
+            self.projects, self.read_error = [], exc
         self.list = QListWidget()
         for entry in self.projects:
             item = QListWidgetItem(f"{entry.name}    ·    {entry.modified:%d/%m/%Y %H:%M}")
@@ -274,6 +361,11 @@ class OpenProjectDialog(QDialog):
         self.empty = QLabel(self._tr("Nessun progetto nella cartella di lavoro: creane uno "
                                      "con «Nuovo progetto…»."))
         self.empty.setWordWrap(True)
+        if self.read_error is not None:
+            self.empty.setText(self._tr(UNREADABLE_ROOT) + "\n"
+                               + unreadable_root_reason(root, self.read_error))
+            # Composed text: a later retranslation must not look it up.
+            self.empty.setProperty("i18n_skip", True)
         self.empty.setVisible(not self.projects)
         self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Open
                                         | QDialogButtonBox.StandardButton.Cancel)

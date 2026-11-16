@@ -8,6 +8,7 @@ from PyQt6.QtWidgets import (QApplication, QDialog, QVBoxLayout, QLabel, QTableW
 from ..services.pin_type_ai import suggest_pin_types
 from ..services.ai_diagnostics import CallCancelled
 from .symbol_tab import _TYPE_LABELS
+from .quit_wait import connect_quit_wait, disconnect_quit_wait
 
 
 class _Worker(QThread):
@@ -18,7 +19,9 @@ class _Worker(QThread):
         destroyed while running aborts the process, and the dialog can be
         destroyed without `closeEvent` (parent window deleted, application
         quit); owned by QApplication the worker outlives the dialog, deletes
-        itself when finished and the application exit waits for it.
+        itself when finished and the application exit asks it to stop and
+        waits for it at most `quit_wait.QUIT_WAIT_MS` (super review
+        2026-11-16, R4-5: an AI call in flight kept the process alive).
     """
 
     done = pyqtSignal(object)
@@ -35,14 +38,27 @@ class _Worker(QThread):
         application = QApplication.instance()
         super().__init__(application if application is not None else parent)
         self.args = args
-        if application is not None:
-            # Quitting with the request in flight would destroy the running
-            # thread: wait for it instead, bounded by the HTTP timeout.
-            application.aboutToQuit.connect(self.wait)
+        # Quitting with the request in flight would destroy the running
+        # thread: ask it to stop between calls, then wait a bounded time.
+        connect_quit_wait(self, stop=self.requestInterruption)
         self.finished.connect(self._release)
 
     def run(self):
-        """@brief QThread override: emit `done` with the proposals, `error` with a message, nothing when cancelled."""
+        """@brief QThread override: emit `done` with the proposals, `error` with a message, nothing when cancelled.
+
+        @note Run inside a usage scope of its own (final review follow-up of
+            2026-11-16, R6-8): the per-call cost deltas of its log never mix
+            with an analysis running at the same time. Without
+            `openrouter.UsageScope` (an older service) it runs as before.
+        """
+        from contextlib import nullcontext
+        from ..services import openrouter
+        scope_class = getattr(openrouter, "UsageScope", None)
+        with scope_class().active() if scope_class is not None else nullcontext():
+            self._request()
+
+    def _request(self):
+        """Body of `run`: the pin-type request and its outcome signals."""
         try:
             result = suggest_pin_types(**self.args, progress=self.progress.emit,
                                        cancelled=self._check_cancel)
@@ -63,13 +79,7 @@ class _Worker(QThread):
         Left connected, at exit Qt would call `wait` on an object already
         removed by `deleteLater` (same sequence as `model_dialog._ModelsWorker`).
         """
-        application = QApplication.instance()
-        if application is not None:
-            try:
-                application.aboutToQuit.disconnect(self.wait)
-            except TypeError:
-                # Never connected or already disconnected: nothing to undo.
-                pass
+        disconnect_quit_wait(self)
         self.deleteLater()
 
 

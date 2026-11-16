@@ -15,6 +15,18 @@ from kicadgen.gui import component_check_dialog as ccd
 from kicadgen.services.component_check import Check
 
 
+@pytest.fixture(autouse=True)
+def _fresh_exit_deadline(monkeypatch):
+    """Each test starts before the exit: the exit hooks share ONE process-wide deadline.
+
+    Since 2026-11-16 (`quit_wait.begin_exit`) a hook that ran in an earlier
+    test would leave the deadline in the past, and this test's wait would be 0.
+    """
+    from kicadgen.gui import quit_wait
+    monkeypatch.setattr(quit_wait, "_deadline", None)
+    monkeypatch.setattr(quit_wait, "_quitting", False)
+
+
 def _worker():
     return ccd._CheckWorker(dict(directory=".", name="X", rows=[]))
 

@@ -25,6 +25,7 @@ from datetime import datetime
 import json
 import os
 from pathlib import Path
+import threading
 
 #: Key of config.json that holds the list.
 CONFIG_KEY = "recent_projects"
@@ -159,17 +160,50 @@ def remove(config: dict, path) -> list[str]:
     return list(current)
 
 
-def load(config) -> list[str]:
+#: Longest wait (s) of `load` for the existence checks of all the entries.
+#: A start-up budget, not a measurement: a local disk answers in
+#: milliseconds, while a network share that is mapped but disconnected can
+#: hold one check for the system's SMB timeout (tens of seconds) and the
+#: window was not shown meanwhile (review R7-12).
+LOAD_TIMEOUT_S = 2.0
+
+
+def load(config, timeout_s: float = LOAD_TIMEOUT_S) -> list[str]:
     """@brief The recent projects that can be reopened now.
 
     @param config Configuration dictionary.
+    @param timeout_s Longest total wait for the existence checks.
     @return Stored paths, in order, whose folder still exists and holds a
-        project file.
+        project file, among those whose check answered within `timeout_s`.
     @note A folder that is missing or is no longer a project is skipped,
         not removed from the stored list: a drive that comes back makes it
         reappear. Only `remove` forgets an entry.
+    @note The checks run in parallel daemon threads, so one unreachable
+        folder (a disconnected network drive) neither blocks the start-up nor
+        hides the other entries; a check still running at the deadline
+        counts as «not reachable now», exactly like a missing drive, and is
+        left to finish in the background.
     """
-    return [path for path in stored(config) if is_project(path)]
+    paths = stored(config)
+    if not paths:
+        return []
+    answers: dict = {}
+    done = threading.Event()
+    lock = threading.Lock()
+
+    def check(index: int, path: str) -> None:
+        result = is_project(path)
+        with lock:
+            answers[index] = result
+            if len(answers) == len(paths):
+                done.set()
+
+    for index, path in enumerate(paths):
+        threading.Thread(target=check, args=(index, path), daemon=True,
+                         name="recent-project-check").start()
+    done.wait(max(0.0, float(timeout_s)))
+    with lock:
+        return [path for index, path in enumerate(paths) if answers.get(index) is True]
 
 
 def describe(path) -> RecentProject:

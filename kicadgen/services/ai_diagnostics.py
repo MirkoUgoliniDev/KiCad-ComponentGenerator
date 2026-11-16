@@ -9,6 +9,7 @@ tool answer, redacted (review 2026-11-04, M17): without them a well-formed but
 wrong reading could not be checked against the log.
 """
 
+from contextlib import contextmanager
 from functools import wraps
 import hashlib
 import inspect
@@ -312,6 +313,14 @@ class _CancelWatch:
     def __exit__(self, *exc_info) -> bool:
         self._stop.set()
         self._thread.join()
+        if self.cancelled is not None:
+            # The sticky cancellation belonged to this attempt only: the
+            # thread may run other work afterwards (see `_run`).
+            try:
+                from .openrouter import clear_abort
+                clear_abort(self._thread_id)
+            except Exception:  # noqa: BLE001 - nothing to clear is not a failure
+                pass
         return False
 
     def _run(self) -> None:
@@ -322,10 +331,46 @@ class _CancelWatch:
                 self.cancelled = exc
                 try:
                     from .openrouter import abort_request
-                    abort_request(self._thread_id)
+                    # Sticky (review R7-4): a Cancel that arrives while the
+                    # attempt is still preparing its request, before it is
+                    # registered, must refuse that request when it is
+                    # registered, not be lost while the call is paid in full.
+                    abort_request(self._thread_id, sticky=True)
                 except Exception:  # noqa: BLE001 - the kept exception still stops the chain
                     pass
                 return
+
+
+@contextmanager
+def cancel_scope(cancel: Optional[Callable[[], None]]):
+    """@brief Run a block of provider requests that the user's Cancel can close.
+
+    @param cancel Thread-safe checker that raises to cancel (the same
+        `cancel` as `make_logged_call`); None runs the block unchanged.
+    @throws BaseException The exception raised by `cancel`: before the block
+        when it is already cancelled, or in place of whatever the block ends
+        with once `cancel` fired while it ran.
+    @note Meant for the free requests made outside a logged call, such as
+        the credit and balance checks before a run (review R7-5): each GET can
+        wait up to its timeout, and a Cancel pressed meanwhile was only seen
+        once the checks had all timed out. The watch closes the request in
+        flight within _CANCEL_POLL_S and refuses the next ones (sticky abort).
+    """
+    if cancel is None:
+        yield
+        return
+    cancel()
+    watch = _CancelWatch(cancel)
+    try:
+        with watch:
+            yield
+    except BaseException as exc:
+        if watch.cancelled is not None:
+            raise watch.cancelled from exc
+        raise
+    if watch.cancelled is not None:
+        # Fired after the block's last request: the user still asked to stop.
+        raise watch.cancelled
 
 
 def retry_delay(attempt: int, retry_after=None) -> float:

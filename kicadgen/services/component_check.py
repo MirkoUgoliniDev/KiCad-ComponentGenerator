@@ -1,5 +1,6 @@
 """@brief Read-only checks on disk artifacts and the current applied symbol."""
 from dataclasses import dataclass, field, replace as _replace_fields
+import functools
 from functools import reduce
 from pathlib import Path
 from . import messages as _messages
@@ -23,8 +24,8 @@ from .kicad_library import (ComponentArtifacts, KiCadLibraryError, PREVIEW_FOOTP
 from ..core.footprint import KICAD_VERSION
 from ..core.output_names import kicad_unsafe_characters
 from ..generators.castellated_module import EDGE_LABELS
-from ..generators.symbol import (SYMBOL_FORMAT_VERSION, symbol_inputs, serialize_symbol,
-                                 symbol_property_positions)
+from ..generators.symbol import (SYMBOL_FORMAT_VERSION, primary_pin_names_enabled, symbol_inputs,
+                                 serialize_symbol, symbol_property_positions)
 
 
 #: Categories of a check: the document coherence (pinout against pads and
@@ -518,6 +519,10 @@ BLOCKING_CHECKS = {
     # Document and contact checks, published before the STEP stage.
     'document_dropped': _blocking({'document'}, _STEP_STAGE_START, {'document_dropped'}),
     'document_unnamed': _blocking({'document'}, _STEP_STAGE_START, {'document_unnamed'}),
+    # The sides' contact count was unusable, the pinout not compared
+    # (pinout_coherence.FINDING_COUNT_UNUSABLE, review 2026-11-16).
+    'document_count_unusable': _blocking({'document'}, _STEP_STAGE_START,
+                                         {'document_count_unusable'}),
     'pin_role_contradiction': _blocking({'contacts'}, {'pin_role_contradiction'} | _STEP_STAGE_START,
                                         {'pin_role_contradiction'}),
     # STEP stage.
@@ -1043,7 +1048,11 @@ def document_checks(document, rows, pad_ids):
         `numbers_printed` (False when the documents print no pin numbers;
         missing reads as printed) and `label_conflicts` ([{"edge", "pins"}]:
         sides whose labels strongly put the pinout names on other contacts,
-        `pinout_coherence.FINDING_LABEL_PLACEMENT`; may be missing).
+        `pinout_coherence.FINDING_LABEL_PLACEMENT`; may be missing) and
+        `count_unusable` (`side_pinout_report(...)["count_unusable"]`:
+        None, or {"total", "limit"} when the sides' contact count is not
+        usable -- one blocking «document_count_unusable» row, total None
+        shown «?»; may be missing).
     @param rows Applied symbol rows ({pin, name, ...}).
     @param pad_ids Electrical pad numbers of the footprint on disk, or None
         when it was not readable (the symbol's pin numbers stand in: the
@@ -1118,6 +1127,24 @@ def document_checks(document, rows, pad_ids):
 
     renumber = tx('Rispondi alla domanda sulla numerazione dei lati, oppure correggi i numeri dei pin '
                   'nella scheda «Simbolo elettrico» confrontandoli con il pinout del documento.')
+    # pinout_coherence.FINDING_COUNT_UNUSABLE (review 2026-11-16): the sides
+    # declare more contacts than `count_unusable` accepts (or an infinite
+    # count), so the side/pinout comparison was NOT made. Blocking like the
+    # other structural document errors: an absent comparison must never read
+    # as a passed one.
+    unusable = document.get('count_unusable')
+    if unusable:
+        total = unusable.get('total') if isinstance(unusable, dict) else None
+        limit = unusable.get('limit') if isinstance(unusable, dict) else None
+        contradiction(tx('Pinout del documento'),
+                      tx('I lati dichiarano {total} contatti, oltre il limite di {limit}: il '
+                         'conteggio non è utilizzabile, il pinout non è stato confrontato. '
+                         'Controlla il numero di contatti dei lati.',
+                         total='?' if total is None else total,
+                         limit='?' if limit is None else limit),
+                      tx('Correggi il numero di contatti dei lati del modulo (o ripeti l’analisi), '
+                         'poi ripeti la verifica.'),
+                      'document_count_unusable', ())
     off_side = {str(pin) for pin in (document.get('off_side_pins') or ())}
     # A shifted numbering (positive evidence) drops its entries: structural, it
     # blocks. Without that evidence an entry without a pad is unexplained; by
@@ -2045,6 +2072,65 @@ _CLI_PROCESSES = set()
 #: Processes `stop_cli_commands` killed, so their runner raises CliStopped.
 _CLI_STOPPED = set()
 _CLI_LOCK = threading.Lock()
+#: Number of `stop_cli_commands` calls so far. A check records the value it
+#: started with (`_RUN_STATE.epoch`, set by `_stoppable_run`); once a stop
+#: changed it, that check starts no further kicad-cli command (review
+#: 2026-11-16, R9-3/R4-1). Guarded by `_CLI_LOCK`.
+_STOP_EPOCH = 0
+#: Per-thread state of the running check: ``epoch`` is the `_STOP_EPOCH` it
+#: started under, absent outside a check.
+_RUN_STATE = threading.local()
+
+
+def _run_stopped():
+    """True when the check running in this thread began before the latest `stop_cli_commands` (call under `_CLI_LOCK`)."""
+    epoch = getattr(_RUN_STATE, 'epoch', None)
+    return epoch is not None and epoch != _STOP_EPOCH
+
+
+def _stoppable_run(function):
+    """@brief Make a stop sticky for one check run: record the stop epoch it started under.
+
+    @param function `verify_component`.
+    @return The wrapped function, same signature and docstring.
+    @note Review 2026-11-16, R9-3 (= R4-1): `stop_cli_commands` used to kill
+        only the commands already running, so a kicad-cli command the check
+        started right after the stop (between two reads) ran to its budget,
+        up to 240 s, after a project switch. Now every `_run_cli` of a run
+        that began before the latest stop raises `CliStopped` instead of
+        starting, and one started at the very moment of the stop is killed
+        as soon as it is registered. A check started AFTER the stop is not
+        affected. The previous value is restored on exit, so a nested call
+        keeps the caller's epoch.
+    """
+    @functools.wraps(function)
+    def wrapper(*args, **kwargs):
+        """Run the check with this thread's stop epoch recorded."""
+        previous = getattr(_RUN_STATE, 'epoch', None)
+        # The epoch the CALLER captured when it created the run (its worker),
+        # when given: a stop between that moment and this call then still
+        # stops the run (review 2026-11-16, follow-up 3).
+        given = kwargs.get('stop_epoch')
+        with _CLI_LOCK:
+            _RUN_STATE.epoch = _STOP_EPOCH if given is None else given
+        try:
+            return function(*args, **kwargs)
+        finally:
+            _RUN_STATE.epoch = previous
+    return wrapper
+
+
+def current_stop_epoch():
+    """@brief The stop epoch now, to capture when a check is CREATED (passed as `stop_epoch`).
+
+    @return The number of `stop_cli_commands` calls so far.
+    @note A worker reads it in its constructor and passes it to
+        `verify_component(stop_epoch=...)`: a stop asked after the worker was
+        created but before the check began then still stops every kicad-cli
+        command of that check (review 2026-11-16, follow-up 3).
+    """
+    with _CLI_LOCK:
+        return _STOP_EPOCH
 
 
 def _run_cli(command, *, timeout=60, cwd=None):
@@ -2067,9 +2153,15 @@ def _run_cli(command, *, timeout=60, cwd=None):
         leaks per command and KILL_ON_JOB_CLOSE ends a leftover descendant
         (review 2026-11-15, L2; same shape as `kicad_models`' measuring child).
     @note stdin is the null device: kicad-cli must never wait for input.
+    @note A stop is sticky for the check that was running (R9-3, see
+        `_stoppable_run`): after it, no command of that check is started, and
+        one started at the same moment is killed before its wait.
     """
     from ..cad3d.process_log import (contain_process, kill_process_tree, reap_killed_child,
                                      release_process)
+    with _CLI_LOCK:
+        if _run_stopped():
+            raise CliStopped()
     process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                stderr=subprocess.PIPE, text=True, errors='replace', cwd=cwd,
                                creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
@@ -2077,8 +2169,17 @@ def _run_cli(command, *, timeout=60, cwd=None):
     # cannot prove would otherwise keep the pipes open and the check running.
     contain_process(process)
     with _CLI_LOCK:
+        # A stop between the test above and here found nothing to kill:
+        # this command is then marked stopped and ended below at once.
+        if _run_stopped():
+            _CLI_STOPPED.add(process)
         _CLI_PROCESSES.add(process)
     try:
+        if process in _CLI_STOPPED:
+            try:
+                kill_process_tree(process)
+            except OSError:
+                pass  # already gone
         try:
             stdout, stderr = process.communicate(timeout=timeout)
         except BaseException:
@@ -2107,9 +2208,14 @@ def stop_cli_commands() -> int:
     @return The number of commands killed.
     @note Their runners raise CliStopped, which ends the check: what a
         killed command would have reported is not a result.
+    @note Sticky (review 2026-11-16, R9-3): every check running now starts
+        no further command (`_STOP_EPOCH`, `_stoppable_run`); a check
+        started afterwards runs normally.
     """
+    global _STOP_EPOCH
     from ..cad3d.process_log import kill_process_tree
     with _CLI_LOCK:
+        _STOP_EPOCH += 1
         running = [process for process in _CLI_PROCESSES if process.poll() is None]
         _CLI_STOPPED.update(running)
     for process in running:
@@ -2224,6 +2330,47 @@ def _installed_symbol_state(name, symbol_path, library):
     return (None, None) if sexpr_tokens(blocks[0]) == sexpr_tokens(expected) else ('differs', None)
 
 
+def _table_row_problem(table, library, uri, project_dir, root):
+    """@brief What keeps KiCad from finding an installed library through its table row, or None.
+
+    @param table The ``fp-lib-table`` or ``sym-lib-table`` the installation
+        registered the library in.
+    @param library The library nickname (the ``.pretty``/``.kicad_sym`` stem).
+    @param uri The URI the installation writes for it (``${KIPRJMOD}/…`` for
+        a project, the absolute path for a global library).
+    @param project_dir The folder ``${KIPRJMOD}`` stands for (project
+        installation), None for a global one.
+    @param root `kicad_library.FP_TABLE_ROOT` or `SYM_TABLE_ROOT`.
+    @return None when an enabled ``KiCad`` row of that name points to the
+        installed library; otherwise (kind, words): kind «table» for the
+        table missing or unreadable, «row» for the row missing, disabled, of
+        another type or pointing elsewhere; words translated.
+    @note Review 2026-11-16, R9-4: the files alone said «Libreria
+        aggiornata» while KiCad could not see the library (row removed or
+        disabled by the user in «Gestisci librerie»). The rule is the
+        installation's own (`kicad_library._same_place`, the same
+        enabled-``KiCad``-row test as `_destination_row_already_there`), so
+        the check and a reinstallation agree; a reinstallation adds a
+        missing row and asks before enabling or repointing one.
+    """
+    from .kicad_library import _same_place, find_library_entry
+    table = Path(table)
+    if not table.is_file():
+        return 'table', tx('tabella {file} mancante', file=table.name)
+    try:
+        entry = find_library_entry(table, library, root=root)
+    except (KiCadLibraryError, OSError):
+        return 'table', tx('tabella {file} non leggibile', file=table.name)
+    if entry is None:
+        return 'row', tx('riga {library} mancante in {file}', library=library, file=table.name)
+    if entry.disabled:
+        return 'row', tx('riga {library} disattivata in {file}', library=library, file=table.name)
+    if (entry.library_type or '').casefold() != 'kicad' or not _same_place(entry.uri, uri, project_dir):
+        return 'row', tx('riga {library} di {file} non punta a questa libreria', library=library,
+                  file=table.name)
+    return None
+
+
 def library_checks(name, footprint_text, installs, step_path=None, model_offset=(0.0, 0.0, 0.0),
                    symbol_path=None, global_table_path=None):
     """@brief Whether the KiCad libraries the component was installed in hold what an install writes NOW.
@@ -2279,6 +2426,12 @@ def library_checks(name, footprint_text, installs, step_path=None, model_offset=
         `lib_symbol_issues`, tables whose rows it ignores), and a
         reinstallation rewrites it without the BOM. The comparisons above
         drop the BOM, so without this rule the row said «aggiornata».
+    @note CONTRACT CHANGED 2026-11-16 (R9-4): the table rows are read too
+        (`_table_row_problem`) -- the ``fp-lib-table`` row of the ``.pretty``
+        and, when the installation ships the symbol, the ``sym-lib-table``
+        row of the ``.kicad_sym``. A table missing or unreadable, a row
+        missing, disabled or pointing elsewhere is «not up to date» naming
+        it: the files alone never make the row «aggiornata».
     """
     if installs is None:
         return []
@@ -2359,6 +2512,30 @@ def library_checks(name, footprint_text, installs, step_path=None, model_offset=
         for path in with_bom:
             if _starts_with_bom(path):
                 differs.append(tx('BOM UTF-8 in {file}', file=path.name))
+        # The rows KiCad finds the libraries through (review 2026-11-16,
+        # R9-4): a row removed or disabled leaves the files in place and the
+        # library invisible. Only tables KNOWN for this record are read (a
+        # global record without its table is not looked up, as above); the
+        # symbol table only when the installation ships the symbol.
+        from .kicad_library import FP_TABLE_ROOT, SYM_TABLE_ROOT
+        project_dir = pretty.parent if project else None
+        rows_to_check = []
+        if fp_table is not None:
+            rows_to_check.append((fp_table, f'${{KIPRJMOD}}/{pretty.name}' if project
+                                  else pretty.as_posix(), FP_TABLE_ROOT))
+        if ships_symbol and sym_table is not None:
+            rows_to_check.append((sym_table, f'${{KIPRJMOD}}/{symbol_library.name}' if project
+                                  else symbol_library.as_posix(), SYM_TABLE_ROOT))
+        #: A GLOBAL table missing or unreadable (follow-up 5): a reinstall
+        #: cannot fix it (the global install never creates KiCad's table),
+        #: so the row's remedy sends the user to KiCad's own table setup.
+        global_table_unusable = False
+        for table, uri, table_root in rows_to_check:
+            problem = _table_row_problem(table, pretty.stem, uri, project_dir, table_root)
+            if problem is not None:
+                kind, words = problem
+                differs.append(words)
+                global_table_unusable = global_table_unusable or (kind == 'table' and not project)
         symbol_state, unreadable = _installed_symbol_state(name, symbol_path, symbol_library)
         if symbol_state == 'missing':
             differs.append(tx('simbolo mancante'))
@@ -2397,6 +2574,9 @@ def library_checks(name, footprint_text, installs, step_path=None, model_offset=
                 'Libreria {scope} non aggiornata ({what}): {path}', scope=scope,
                 what=_join(', ', differs), path=installed),
                 'technical', IMPORTANCE_BEFORE_PRODUCTION,
+                tx('Apri KiCad e la sua impostazione delle librerie (Preferenze > Gestisci librerie '
+                   'dei simboli / dei footprint) perché ricrei la tabella globale, poi reinstalla '
+                   'dalla scheda KiCad.') if global_table_unusable else
                 tx('Reinstallala dalla scheda KiCad: la reinstallazione sovrascrive anche le modifiche '
                    'fatte nell\'editor di KiCad.'), ACTION_OPEN_KICAD_TAB, 'kicad_library'))
     # Recorded installations none of which could be compared: said, never silent.
@@ -2562,11 +2742,12 @@ def estimated_pad_checks(findings, pad_numbers=None):
     return results
 
 
+@_stoppable_run
 def verify_component(directory, name, rows, *, pending=False, issues=(), emit=lambda result: None,
                      footprint_pending=False, model_offset=(0.0, 0.0, 0.0), document=None,
                      applied_symbol=None, footprint_missing=None, contact_witness=None,
                      pad_leads=None, installs=None, describe_error=None, estimated_pads=None,
-                     estimated_pad_numbers=None):
+                     estimated_pad_numbers=None, stop_epoch=None):
     """@brief Use scratch copies only; failed checks do not suppress independent checks.
 
     @param directory Component folder.
@@ -2617,6 +2798,9 @@ def verify_component(directory, name, rows, *, pending=False, issues=(), emit=la
         `estimated_pads` was computed on, in its `pads` order (the window
         passes ``[pad.number for pad in footprint.pads]``); None names no
         pad (round 2, R6: never guessed from the file's pad order).
+    @param stop_epoch `current_stop_epoch()` captured when the caller
+        created this run (its worker), or None for the epoch at entry; read
+        by `_stoppable_run`, not by the body.
     @note The three kicad-cli reads (footprint, applied symbol, symbol on
         disk) and the 3D import run on scratch COPIES, never on the project's
         files in place, each attempt in a fresh input and output folder whose
@@ -2665,6 +2849,11 @@ def verify_component(directory, name, rows, *, pending=False, issues=(), emit=la
         or an unreadable report is a SKIP, never an ERROR; the preview's own
         artefacts are filtered (`drc_checks`, `erc_checks`).
     @return The list of Check results.
+    @note The process-wide «Solo nome principale» choice
+        (`primary_pin_names_enabled`) is read ONCE when the check starts and
+        passed to `symbol_inputs` (review 2026-11-16, R11-5): the check runs
+        on a worker thread for tens of seconds, and a toggle in the window
+        meanwhile must not make it build a symbol of the other mode.
     @note No exception escapes for a footprint without electrical pads or an
         incomplete STEP file: the ValueError raised internally is caught and
         reported as an ERROR check.
@@ -2674,6 +2863,8 @@ def verify_component(directory, name, rows, *, pending=False, issues=(), emit=la
         both. An unknown version gives no verdict.
     """
     results = []
+    # Read once, at the start (R11-5): the whole check uses one pin-name mode.
+    primary_names = primary_pin_names_enabled()
     def add(status, title, detail, *, category='technical', importance=None, remedy='',
             action=None, code='', pins=(), cli_failure='', cli_exit_code=None, file_busy=False):
         # A generator error (SymbolError) carries its own translatable text.
@@ -3187,10 +3378,15 @@ def verify_component(directory, name, rows, *, pending=False, issues=(), emit=la
 
         pad_ids = None
         footprint_text = None
+        #: The footprint bytes read ONCE for the checks (R9-6): the preview
+        #: of the 3D import, DRC and ERC is built from them, never from a
+        #: second read of the file the window may rewrite meanwhile.
+        footprint_bytes = None
         overlap_pairs = []
         symbol = None
         try:
             data = _read_component_file(fp)
+            footprint_bytes = data
             if data.startswith(UTF8_BOM):
                 # A BOM made the root check fail with a generic «File footprint
                 # non valido» («invalid footprint file») although the file is
@@ -3312,7 +3508,7 @@ def verify_component(directory, name, rows, *, pending=False, issues=(), emit=la
             add('ERROR', tx('Footprint su disco'), exc, code='footprint_file')
 
         try:
-            pins, body = symbol_inputs(rows)
+            pins, body = symbol_inputs(rows, primary_names=primary_names)
             from ..generators.symbol import symbol_pin_names_hidden
             symbol = applied_symbol if isinstance(applied_symbol, str) and applied_symbol else \
                 serialize_symbol(name, pins, footprint=f'KiCadGen:{name}', body=body,
@@ -3428,20 +3624,30 @@ def verify_component(directory, name, rows, *, pending=False, issues=(), emit=la
         # what the user applied, not an older exported file. Works without
         # a STEP (the board then has no model node).
         preview, preview_error = None, ''
-        if fp.is_file():
+        if footprint_bytes is not None:
             try:
                 applied_dir = scratch / 'applied'
                 applied_dir.mkdir(parents=True, exist_ok=True)
                 if isinstance(symbol, str) and symbol:
                     _atomic_write_text(applied_dir / f'{name}.kicad_sym', symbol)
+                # The bytes the checks above read (review 2026-11-16, R9-6):
+                # DRC and ERC judge the footprint those rows judged, even if
+                # the window rewrote the file in between.
+                checked_fp = applied_dir / f'{name}.pretty' / f'{name}.kicad_mod'
+                checked_fp.parent.mkdir(parents=True, exist_ok=True)
+                checked_fp.write_bytes(footprint_bytes)
                 wrl = root / f'{name}.3dshapes' / f'{name}.wrl'
-                artifacts = ComponentArtifacts(name, applied_dir, fp, step,
+                artifacts = ComponentArtifacts(name, applied_dir, checked_fp, step,
                                                wrl if wrl.is_file() else None,
                                                model_offset=tuple(model_offset))
                 preview = create_preview_project(artifacts, scratch / 'project')
             except (OSError, ValueError, RuntimeError) as exc:
                 preview_error = (describe_error(exc) if callable(describe_error)
                                  and isinstance(exc, KiCadLibraryError) else str(exc))
+        elif fp.is_file():
+            # On disk but not read above (held by another program): the
+            # «Footprint su disco» row already says why.
+            preview_error = tx('Footprint non leggibile.')
         else:
             preview_error = tx('Footprint mancante.')
 

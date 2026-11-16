@@ -24,6 +24,7 @@ from kicadgen.core.kicad_text import (  # noqa: F401 (re-exported, see kicad_tex
     kicad_corner_from_centre,
     kicad_text_margin,
 )
+from kicadgen.core.output_names import kicad_unsafe_characters
 from kicadgen.core.sexpr import format_number, quote
 from kicadgen.fsutil import replace_file
 
@@ -1308,8 +1309,22 @@ def export_symbol(path: str | Path, name: str, pins: Iterable[SymbolPin], *,
     @param pin_names_hidden Pin names kept but not drawn, see `serialize_symbol`.
     @return The written path.
     @throws ValueError When the symbol does not validate; the file is untouched.
+        A SymbolError too for a name holding a character KiCad mis-handles in
+        a symbol name (`core.output_names.KICAD_UNSAFE_NAME_CHARACTERS`, «%»).
     @throws OSError When the temporary file cannot be written or moved in place.
+    @note The «%» guard is here, at the writer of the library file, and not
+        in `serialize_symbol`: kicad-cli 10 crashes on every read of such a
+        symbol, so no file the program writes may hold one (review
+        2026-11-16, R11-7), while the component check still serialises such
+        a name in memory to tell the user which read fails and why.
     """
+    unsafe = kicad_unsafe_characters(name)
+    if unsafe:
+        raise SymbolError(_message(
+            'Il nome del componente non può contenere «{characters}»: KiCad legge questo carattere nei '
+            'nomi di footprint e simboli come un codice di formato e si chiude.',
+            'The component name cannot contain «{characters}»: KiCad reads this character in footprint '
+            'and symbol names as a format code and closes.', characters=' '.join(unsafe)))
     text = serialize_symbol(name, pins, footprint=footprint, reference=reference, body=body,
                             graphics=graphics, metadata=metadata, properties=properties,
                             pin_names_hidden=pin_names_hidden)

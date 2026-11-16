@@ -161,13 +161,20 @@ def take_load_problems() -> list:
     return problems
 
 
-def load_config(report: list | None = None) -> dict:
+def load_config(report: list | None = None, *, require_file: bool = False) -> dict | None:
     """@brief Read config.json merged over the defaults; an unreadable file yields the defaults.
 
     @param report Optional list that also receives the ``(template, values)``
         problems of this call (see `take_load_problems`). Every problem is
         written to the `logging` module too.
-    @return The defaults updated with the valid values of the file.
+    @param require_file True for a caller that must tell «the file as it is
+        now» from «the defaults» (a window merging its own changes over what
+        other windows wrote, `MainWindow._save_config_changes`): it then gets
+        None when the file is missing, unreadable (a sharing violation) or
+        not a valid JSON object, instead of the defaults. A value of the
+        wrong kind for one key is not a failed read (that key keeps its default).
+    @return The defaults updated with the valid values of the file; None
+        only with `require_file` and no file read.
     @note A key that has a default keeps the default when the file holds a
         value of another kind (a list where a string is expected, a string
         where a boolean is expected): one bad value never reaches the widgets
@@ -183,15 +190,24 @@ def load_config(report: list | None = None) -> dict:
         valid JSON for the user and must not be treated as corrupt.
     """
     problems: list = []
-    config = _read_config(problems)
-    _pending_problems[:] = problems
+    read: list = []
+    config = _read_config(problems, read)
+    if not require_file:
+        # A merge read (`require_file`) is not the start-up read: its problems
+        # are not queued for the window's start-up log.
+        _pending_problems[:] = problems
     if report is not None:
         report.extend(problems)
+    if require_file and not read:
+        return None
     return config
 
 
-def _read_config(problems: list) -> dict:
-    """The body of `load_config`; problems are appended to `problems`."""
+def _read_config(problems: list, read: list | None = None) -> dict:
+    """The body of `load_config`; problems are appended to `problems`.
+
+    `read` (optional) receives True when the file was read as a JSON object.
+    """
     config = dict(DEFAULTS)
     path = config_path()
     if not path.is_file():
@@ -214,6 +230,8 @@ def _read_config(problems: list) -> dict:
         else:
             _report(problems, CONFIG_CORRUPT_KEPT_MESSAGE, error=error, backup=backup)
         return config
+    if read is not None:
+        read.append(True)
     for key, value in loaded.items():
         if key in DEFAULTS and not _same_kind(value, DEFAULTS[key]):
             _report(problems, CONFIG_BAD_TYPE_MESSAGE, key=key, found=type(value).__name__,
@@ -249,7 +267,7 @@ def browse_start_dir(config, fallback="") -> str:
     return str(fallback or "")
 
 
-def remember_browse_dir(config, selected) -> None:
+def remember_browse_dir(config, selected, save=None) -> None:
     """@brief Remember the folder of the selected file in `config` and save config.json.
 
     Stores the folder of the chosen file, updating config.json as well.
@@ -261,6 +279,9 @@ def remember_browse_dir(config, selected) -> None:
     @param config Live preferences dict of the window; None does nothing.
     @param selected Chosen file or folder; its parent folder is remembered
         when it is a file. Empty values do nothing.
+    @param save Callable(config) that writes config.json; None = `save_config`
+        (the whole dict). The window passes its per-key writer
+        (`MainWindow._save_config_changes`, several windows, 2026-11-16).
     """
     if config is None or not selected:
         return
@@ -275,7 +296,7 @@ def remember_browse_dir(config, selected) -> None:
     # Convenience preference: if the file is not writable, save_config
     # returns False, the current session uses it anyway and loading is not
     # interrupted.
-    save_config(config)
+    (save or save_config)(config)
 
 
 def save_config(config: dict) -> bool:

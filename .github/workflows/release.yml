@@ -27,22 +27,27 @@ permissions: {}
 jobs:
   build:
     runs-on: windows-latest
-    # The bounded steps add up to 145 min (fetch 30, install 20, two test halves
-    # 45 + 45, place 5); the build step has no limit of its own and took 6.5 min
-    # on 2026-10-28. 180 keeps 35 min for it in the worst case.
-    timeout-minutes: 180
+    # Every step has its own limit (review 2026-11-16, R12-3 and its
+    # follow-up): checkout 10, setup-python with its pip cache 10, tag check 5,
+    # fetch 30, install 20, two test halves 45 + 45, hang-report upload 10,
+    # place 5, build 30 (it took 6.5 min on 2026-10-28), MSI upload 20 (about
+    # 460 MB). They add up to 230 min; 240 stays above the sum, so a step
+    # limit, never the job limit, is what stops a slow step.
+    timeout-minutes: 240
     permissions:
       contents: read
     env:
       TAG: ${{ github.ref_name }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        timeout-minutes: 10
         with:
           persist-credentials: false
 
       # pip's download cache (review 2026-10-29, K5), keyed on every file a
       # pip install of this job reads, build-windows.ps1's build.txt included.
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        timeout-minutes: 10
         with:
           python-version: '3.13'
           cache: pip
@@ -54,6 +59,7 @@ jobs:
 
       - name: Check that the tag matches the program version
         shell: pwsh
+        timeout-minutes: 5
         run: |
           $text = Get-Content kicadgen/__init__.py -Raw
           $version = [regex]::Match($text, '__version__\s*=\s*"(\d+\.\d+\.\d+)"').Groups[1].Value
@@ -63,7 +69,8 @@ jobs:
 
       # Before the 22-minute test run, so an unreachable asset fails the job
       # in minutes (review 2026-10-29, K4), and with a bounded retry for a
-      # transient network error (exit 1). Exit 2 (wrong size or SHA-256, bad
+      # transient network error (exit 1, a transfer cut short included since
+      # review 2026-11-16, R12-6). Exit 2 (wrong size or SHA-256, bad
       # manifest) is permanent and not retried. The weights wait OUTSIDE the
       # checkout: the tests must run without them, exactly as in tests.yml.
       - name: Fetch the model weights
@@ -133,6 +140,7 @@ jobs:
       - name: Upload the test hang report
         if: ${{ failure() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        timeout-minutes: 10
         with:
           name: test-hang-report
           path: ${{ runner.temp }}/kicadgen-test-hang-*.txt
@@ -151,6 +159,7 @@ jobs:
 
       - name: Build the executable and the MSI
         shell: pwsh
+        timeout-minutes: 30
         env:
           # Needed only when WiX 3.14 is not on the runner: SHA-256 of
           # wix314-binaries.zip, set by the maintainer as a repository
@@ -159,6 +168,7 @@ jobs:
         run: ./scripts/build-windows.ps1 -Package msi -IncludeYoloModel
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        timeout-minutes: 20
         with:
           name: windows-msi
           path: dist/*.msi

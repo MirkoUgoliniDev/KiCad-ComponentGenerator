@@ -419,6 +419,10 @@ BLOCKING_CHECK_WORDS = {
     "symbol_error": "la costruzione del simbolo",
     "document_dropped": "la piedinatura del documento",
     "document_unnamed": "la piedinatura del documento",
+    # Added 2026-11-16 (review R8-4/S3): a declared contact total above the
+    # pad limit is a blocking document check of the same family; the guide's
+    # «la piedinatura del documento» item already covers it.
+    "document_count_unusable": "la piedinatura del documento",
     "pin_role_contradiction": "le funzioni dei contatti",
     "step_integrity": "l'integrità del modello STEP",
     "kicad_3d_import": "la sua importazione in KiCad",

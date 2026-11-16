@@ -569,7 +569,9 @@ def test_recovery_edits_invalid_drill_without_ai(window, monkeypatch, no_ai_no_f
     params = _invalid_through_params(window)
     # The default GUI value enters the constructor as None; __post_init__
     # resolves it to an AssumedSize of 1.7 mm, which the editor must preserve.
-    assert gui._declared_size(window.field_cast_thru_pad.value(), 1.7) is None
+    # Since review 2026-11-16 (R2-8) the provenance is a recorded flag, not a
+    # comparison with the reference value: the untouched field is undeclared.
+    assert window._declared_cast_size("field_cast_thru_pad") is None
     def edit(dialog):
         drill = dialog.findChild(QDoubleSpinBox, "recoveryDrill_left")
         assert drill.value() == 2.0
@@ -614,9 +616,13 @@ def test_invalid_hole_recovery_retries_generation_with_same_mode(window, monkeyp
     original_generate = window._generate
     def recover(candidate):
         assert candidate.sides[0].thru_hole_drill == 2.0
-        monkeypatch.setattr(window, "_generate", lambda automatic=False: called.append(automatic))
+        # Since review 2026-11-16 (R2-6) the retry re-enters the applied
+        # generation with the same mode and body, and returns its outcome.
+        monkeypatch.setattr(window, "_generate_applied",
+                            lambda automatic=False, footprint_only=False, body_override=None:
+                            called.append((automatic, footprint_only)) or True)
         return True
     monkeypatch.setattr(window, "_correct_invalid_through_holes", recover)
-    original_generate(automatic=True)
-    assert called == [True]
+    assert original_generate(automatic=True) is True
+    assert called == [(True, False)]
     assert not window._automatic_generation_active

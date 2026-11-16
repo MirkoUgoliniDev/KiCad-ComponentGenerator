@@ -77,6 +77,17 @@ def paint_grid(painter, rect, *, exposed: ExposedRegion, step: float, origin: tu
 def dots_legible(fine_step: float, scale: float, min_px: float) -> bool   # the shared `fine_step * scale >= min_px` rule
 ```
 
+**Line level legibility (review 2026-11-16, R5-3), both tabs.** `paint_grid`
+lays out no line closer than `GRID_LINE_MIN_PX` = 2.0 logical pixels on screen
+(`painter_scale`, the painter's world transform, devicePixelRatio left out):
+two 1 px cosmetic lines need a free pixel between them, below that the grid is
+a uniform tint that showed no position and cost hundreds of ms per repaint at
+the footprint's minimum zoom (0.4 px apart). KiCad skips a grid level below its
+minimum grid spacing (`GAL::DrawGrid`, default 10 px) the same way; 2 px is the
+pen-derived floor, the 10 px default is a user decision still open (it would
+hide the symbol grid at its minimum zoom, 3.81 px). The dots keep their own
+`dots_legible` rule. No golden changed.
+
 Each view keeps its own grid MODEL (symbol: pin grid + drawing grid combo and
 `fine_grid_visible`; footprint: `_grid` tuple, divisor, origin through the first
 pad, `snap_to_grid`) and calls `paint_grid` with its parameters. The pixel

@@ -21,7 +21,9 @@ def _english(monkeypatch):
 def _run_check(tmp_path, monkeypatch, error):
     """Run verify_component with the symbol build failing with `error`."""
     from kicadgen.services import component_check
-    def fail(_rows):
+    def fail(_rows, **_mode):
+        # The check passes the pin-name mode it read at its start
+        # (`primary_names=`, review 2026-11-16, R11-5).
         raise error
     monkeypatch.setattr(component_check, "symbol_inputs", fail, raising=False)
     import kicadgen.generators.symbol as symbol

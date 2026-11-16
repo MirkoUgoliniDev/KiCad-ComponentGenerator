@@ -280,8 +280,10 @@ def test_letterbox_rgb_normalization_and_geometry(setup):
     assert c["_box"] == pytest.approx((0.1, 0.1, 0.4, 0.3))
     assert (c["x_mm"], c["y_mm"], c["length_mm"], c["width_mm"]) == pytest.approx((-10, -6, 12, 4))
     assert c["rotation_deg"] == 0
-    assert c["kind"] == "generic" and c["name"] == "YOLO candidate 1"
-    assert c["_id"] == 1 and c["_source"] == "YOLO local" and c["_uncertain"] is True
+    # Name in the interface language (review 2026-11-16, R8-8); provenance a code.
+    assert c["kind"] == "generic" and c["name"] == yolo.candidate_name(1)
+    assert c["_id"] == 1 and c["_source"] == yolo.LOCAL_SOURCE == "YOLO local"
+    assert c["_uncertain"] is True
     # Contratto aggiornato (26/09): altezza stimata dalla classe e dalla pianta
     # (photo_heights), non piu' 1.0 per tutti; resta una stima dichiarata.
     assert c["height_mm"] == 0.6 and c["_height_estimated"] is True
@@ -360,7 +362,7 @@ def test_a_body_no_view_saw_whole_is_rebuilt_instead_of_lost(setup):
     results = yolo.detect_yolo_components(np.zeros((640, 1000, 3), np.uint8), 100, 64)
     assert len(results) == 1
     row = results[0]
-    assert row["_yolo_clipped_recovery"] and "cucitura" in row["_source"]
+    assert row["_yolo_clipped_recovery"] and row["_source"] == yolo.RECOVERED_SOURCE
     assert not row["_yolo_review_only"]
     # Unione dei due frammenti: 350..640 dalla prima tessera, 360..650 dalla
     # seconda. Restano i bordi esterni, cioe' l'ingombro piu' ampio visto.
@@ -641,11 +643,22 @@ def test_inference_failure_does_not_return_partial_inventory(setup):
 
 
 def test_unwritable_audit_is_reported(setup, tmp_path):
-    """@brief Do not silently omit requested audit evidence when the destination fails."""
+    """@brief Do not silently omit requested audit evidence when the destination fails.
+
+    @note Contract changed by the review of 2026-11-16 (R8-5): the failure is
+        reported as a warning in the log and the detections, complete, are
+        returned -- the audit is evidence, not part of the result, as for
+        photo_audit.write_stage_audit. Before, every detection was lost.
+    """
+    session, _ = setup
+    session.raw = _raw(([200, 200, 100, 100], 10, 0.9))
     blocker = tmp_path / "file-not-directory"
     blocker.write_text("occupied")
-    with pytest.raises(ValueError, match="Cannot write YOLO audit"):
-        yolo.detect_yolo_components(np.zeros((20, 40, 3), np.uint8), 40, 20, audit_dir=blocker)
+    lines = []
+    found = yolo.detect_yolo_components(np.zeros((640, 640, 3), np.uint8), 64, 64,
+                                        audit_dir=blocker, log=lines.append)
+    assert len(found) == 1
+    assert any("Cannot write YOLO audit" in str(line) for line in lines)
 
 
 def test_audit_accounts_for_every_proposal_and_links_components(setup, tmp_path):
@@ -1253,7 +1266,7 @@ def test_an_overlap_doubt_is_a_review_reason_with_its_tolerance_in_mm(setup):
     assert 0 < depth <= tolerance
     assert small['_uncertain'] is True
     reason = small['_review_reason']
-    assert f"YOLO candidate {body['_id']}" in reason
+    assert yolo.candidate_name(body['_id']) in reason
     assert f'{depth:.2f} mm' in reason and f'({tolerance:.2f} mm)' in reason
     assert any('flagged as doubts' in line and f'{tolerance:.2f}' in line and ' mm' in line
                for line in lines)

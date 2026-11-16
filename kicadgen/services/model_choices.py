@@ -3,11 +3,9 @@ from copy import deepcopy
 from collections import Counter
 import hashlib
 import json
-import os
 from pathlib import Path
-import tempfile
 
-from ..fsutil import replace_file
+from ..fsutil import atomic_write_bytes
 
 FILENAME = 'kicad-model-choices.json'
 
@@ -59,15 +57,19 @@ def save_choices(directory, photo_png, components):
                 'model_rotation_delta_deg': c.get('model_rotation_delta_deg') or 0,
             } for c in components]}
     target = directory / FILENAME
-    fd, temporary = tempfile.mkstemp(prefix='.model-choices-', suffix='.json', dir=directory)
-    try:
-        with os.fdopen(fd, 'w', encoding='utf-8') as output:
-            json.dump(data, output, indent=2, ensure_ascii=False, allow_nan=False)
-        replace_file(temporary, target)
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
+    _write_json(target, data, '.model-choices-')
     return target
+
+
+def _write_json(target, data, prefix):
+    """Write `data` as JSON to `target` durably: flushed, fsynced, then atomically replaced.
+
+    Without the fsync a power cut right after the rename could publish an
+    empty file under the final name (review R7-2). The JSON is built before
+    anything is written, so a value it cannot hold leaves the old file as it was.
+    """
+    payload = json.dumps(data, indent=2, ensure_ascii=False, allow_nan=False).encode('utf-8')
+    atomic_write_bytes(target, payload, prefix=prefix)
 
 
 def restore_choices(directory, photo_png, components):
@@ -153,12 +155,5 @@ def save_candidate_report(directory, components):
             'model_rotation_deg': c.get('model_rotation_deg'),
             'render_3d': c.get('render_3d', True),
         } for c in components]}
-    fd, temporary = tempfile.mkstemp(prefix='.model-candidates-', suffix='.json', dir=directory)
-    try:
-        with os.fdopen(fd, 'w', encoding='utf-8') as output:
-            json.dump(data, output, indent=2, ensure_ascii=False, allow_nan=False)
-        replace_file(temporary, target)
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
+    _write_json(target, data, '.model-candidates-')
     return target

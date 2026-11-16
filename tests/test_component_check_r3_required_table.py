@@ -245,9 +245,12 @@ def test_the_new_flags_add_only_their_checks():
     caller of round 2 obtained plus the always-applicable blockers."""
     base = dict(cli_available=True, has_step=True, has_symbol_file=True)
     plain = check.required_for_install(**base)
-    assert not plain & {'document_dropped', 'document_unnamed', 'pin_role_contradiction', 'lead_hole'}
+    assert not plain & {'document_dropped', 'document_unnamed', 'document_count_unusable',
+                        'pin_role_contradiction', 'lead_hole'}
+    # CONTRACT CHANGED 2026-11-16: a document also brings the unusable side
+    # count (pinout_coherence.FINDING_COUNT_UNUSABLE), blocking like the others.
     assert check.required_for_install(**base, has_document=True) - plain == {
-        'document_dropped', 'document_unnamed'}
+        'document_dropped', 'document_unnamed', 'document_count_unusable'}
     assert check.required_for_install(**base, has_contacts=True) - plain == {'pin_role_contradiction'}
     assert check.required_for_install(**base, has_pad_leads=True) - plain == {'lead_hole'}
     assert check.required_reads(cli_available=True, has_symbol_file=True) == check.INSTALLED_FILE_READS

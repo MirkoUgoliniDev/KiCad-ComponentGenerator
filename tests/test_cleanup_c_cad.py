@@ -382,6 +382,11 @@ def write(key, final, text):
     os.replace(target, final)
 write("step", data["step_path"], STEP)
 print("KICADGEN_STEP_OK:" + data["step_path"], flush=True)
+# The WRL is written as the real child does: since the 2026-11-16 review
+# (R10-3) a missing WRL is itself a warning, and this test pins only the
+# warning of the bad preview JSON.
+write("wrl", data["wrl_path"], "#VRML V2.0 utf8\\n")
+print("KICADGEN_WRL_OK:" + data["wrl_path"], flush=True)
 write("mesh", data["mesh_path"], MESH)
 print("KICADGEN_MESH_OK:" + data["mesh_path"], flush=True)
 """

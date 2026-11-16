@@ -52,7 +52,18 @@ def _vp(view, x_mm, y_mm):
 
 
 def _mouse(view, kind, pos, button=LEFT, modifiers=NO_MOD):
-    buttons = button if kind != QEvent.Type.MouseButtonRelease else Qt.MouseButton.NoButton
+    """Deliver a press, move or release; a move carries the left button held, as during a band or drag.
+
+    CONTRACT CHANGED (review 2026-11-16, R5-1): a move without the button that
+    started a band now means its release was lost and drops the band
+    (`RubberBand.lost_release`); the band moves of this file were sent
+    button-less, which no real band is. Every move here happens between a
+    left press and its release.
+    """
+    if kind == QEvent.Type.MouseMove:
+        buttons = LEFT
+    else:
+        buttons = button if kind != QEvent.Type.MouseButtonRelease else Qt.MouseButton.NoButton
     event = QMouseEvent(kind, QPointF(pos), view.viewport().mapToGlobal(QPointF(pos)), button, buttons, modifiers)
     {QEvent.Type.MouseButtonPress: view.mousePressEvent, QEvent.Type.MouseMove: view.mouseMoveEvent,
      QEvent.Type.MouseButtonRelease: view.mouseReleaseEvent}[kind](event)

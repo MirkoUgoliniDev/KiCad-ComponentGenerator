@@ -62,6 +62,25 @@ def _remember_identity(identity, key, value) -> None:
         _RESULTS.setdefault(identity, {})[key] = value
 
 
+def _keep_job_result(kind, examined, result, check_kind) -> None:
+    """Keep a finished job's result for the session, from the job itself.
+
+    Called by the pool thread before the result is emitted, so a window
+    closed meanwhile (`shutdown` disconnects its slot) loses nothing: the
+    next window answers from the session cache instead of hashing or loading
+    the file again (super review 2026-11-16, R4-6). The value is the one the
+    window stores (`_JobResults.store`): a check result as it is, a failed
+    hash as "". Remembered under the identity the job examined: it describes
+    that content, whatever the file became since.
+
+    @param kind Job kind.
+    @param examined `_identity` of the file when the job read it; None keeps nothing.
+    @param result Raw job result.
+    @param check_kind The kind whose result is a dict («check», «smd_check»).
+    """
+    _remember_identity(examined, kind, result if kind == check_kind else (result or ""))
+
+
 #: Marker of "the caller did not say which identity its job examined".
 _NOT_GIVEN = object()
 
@@ -189,10 +208,14 @@ class _Job(QRunnable):
         self.examined = None
 
     def run(self):
-        """@brief QRunnable override: compute and emit (kind, path, result).
+        """@brief QRunnable override: compute, keep for the session, emit (kind, path, result).
 
         @note The file identity is taken before reading it, so the result is
             remembered for the content examined even if the file changes meanwhile.
+        @note The result is kept for the session here, not only by the
+            window's slot: a window closed while the job runs no longer
+            receives it (`shutdown`), and a .pt check is the user's explicit,
+            code-running request -- it must not have to be repeated.
         """
         self.examined = _identity(self.path)
         try:
@@ -212,6 +235,7 @@ class _Job(QRunnable):
             # here. The result is a visible error, as for Exception.
             result = ({"ok": False, "error": type(exc).__name__} if self.kind == "check"
                       else None)
+        _keep_job_result(self.kind, self.examined, result, "check")
         self.signals.ready.emit(self.kind, self.path, result)
 
 
@@ -477,7 +501,7 @@ class YoloModelDialog(QDialog):
             started a model check in the pool long after the window was gone
             (HANDOFF 131: a test crash, and a pointless load of the weights).
             The jobs already running finish in the pool and their results are
-            kept for the session.
+            kept for the session by the jobs themselves (`_keep_job_result`).
         """
         self._closed = True
         self.model_list.blockSignals(True)

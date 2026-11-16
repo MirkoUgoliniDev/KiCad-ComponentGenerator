@@ -275,7 +275,8 @@ def _counting_runner(monkeypatch):
         return subprocess.CompletedProcess(args, 0, stdout="10.0.6\n", stderr="")
 
     monkeypatch.setattr(kicad_library, "_KICAD_CLI_VERSION_CACHE", {})
-    monkeypatch.setattr(kicad_library.subprocess, "run", run)
+    # The probe runs through the tree-killing runner since 2026-11-16 (R9-5).
+    monkeypatch.setattr(kicad_library, "_run_contained", run)
     return kicad_library, spawned
 
 

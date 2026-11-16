@@ -21,6 +21,9 @@ Contract:
   the placeholder «(vari)» (the host passes it translated, `set_mixed_placeholder`)
   and is committed only once the user types, steps or chooses a value;
 * Escape restores the shown value (and the mixed state) without committing;
+  a second Escape, when the field has nothing left to restore, emits
+  `escape_idle`, which `bind_panel_escape` turns into the canvas's own Escape
+  while a drawing tool is armed (user decision 2026-11-16, R5-7, both tabs);
 * a refresh never overwrites the editor that has the keyboard focus while
   the user has typed into it without confirming: the typed text stays, and
   the refreshed value is applied when the edit ends (Enter, focus loss) with
@@ -31,12 +34,12 @@ Contract:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from PyQt6.QtCore import QEvent, QObject, Qt, pyqtSignal
-from PyQt6.QtGui import QFont, QValidator
-from PyQt6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QLabel, QLineEdit,
-                             QSizePolicy, QSpinBox, QVBoxLayout, QWidget)
+from PyQt6.QtGui import QFont, QKeyEvent, QValidator
+from PyQt6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QLabel,
+                             QLineEdit, QSizePolicy, QSpinBox, QVBoxLayout, QWidget)
 
 from .theme import SUBTEXT
 
@@ -261,6 +264,10 @@ class PropertiesPanel(QWidget):
     #: The user changed a field: its key and the new value (float, int,
     #: the choice's data, bool or str by kind).
     committed = pyqtSignal(str, object)
+    #: Escape on a field editor that had nothing to restore (no typed,
+    #: unconfirmed edit): the host may disarm its drawing tool
+    #: (`bind_panel_escape`, user decision 2026-11-16, R5-7).
+    escape_idle = pyqtSignal()
 
     def __init__(self, parent: Optional[QWidget] = None, mixed_placeholder: str = MIXED_PLACEHOLDER) -> None:
         """@brief Create an empty panel showing the «Nessuna selezione» placeholder.
@@ -312,6 +319,8 @@ class PropertiesPanel(QWidget):
         # The host's token of what the fields describe (`set_fields(subject=)`).
         self._subject: Any = _NO_SUBJECT
         self._key_filter = _EscapeFilter(self)
+        # The slot `bind_panel_escape` connected to `escape_idle`, replaced on a new binding.
+        self._escape_forward = None
 
     # ── Host API ──────────────────────────────────────────────────────────
 
@@ -460,11 +469,15 @@ class PropertiesPanel(QWidget):
             for data, label in spec.choices:
                 combo.addItem(label, data)
             combo.activated.connect(lambda _index, k=key: self._choice_activated(k))
+            # Escape on a drop-down has nothing to restore: it reaches `escape_idle`.
+            combo.installEventFilter(self._key_filter)
             return combo
         if spec.kind == "bool":
             check = QCheckBox(spec.label)
             # `clicked` is user-only: a programmatic setChecked never commits.
             check.clicked.connect(lambda _checked=False, k=key: self._check_clicked(k))
+            # Escape on a check box has nothing to restore: it reaches `escape_idle`.
+            check.installEventFilter(self._key_filter)
             return check
         if spec.kind == "text":
             edit = QLineEdit()
@@ -573,6 +586,16 @@ class PropertiesPanel(QWidget):
             return f"{spec.value:.{int(spec.decimals)}f}{spec.suffix}"
         return f"{spec.value}{spec.suffix}"
 
+    def has_unconfirmed_edit(self, key: str) -> bool:
+        """@brief Whether a field holds a typed edit not yet confirmed (what Escape would restore).
+
+        @param key Field key; unknown keys answer False.
+        @return True after the user typed into the field's spin box or line
+            edit since the last refresh, restore or commit, or while a
+            refresh of it is held back for that edit.
+        """
+        return bool(self._text_edited.get(key)) or key in self._pending
+
     def restore(self, key: str) -> None:
         """@brief Put back the last shown value of a field (Escape), without committing.
 
@@ -662,7 +685,7 @@ def _replace_value(spec: FieldSpec, value: Any, mixed: Optional[bool] = None) ->
 
 
 class _EscapeFilter(QObject):
-    """Escape on a panel editor restores its shown value instead of reaching the canvas."""
+    """Escape on a panel editor: restore a typed edit; with nothing to restore, emit `escape_idle` (two-step Escape, R5-7)."""
 
     def __init__(self, panel: PropertiesPanel) -> None:
         """@brief Keep the panel whose fields this filter restores.
@@ -673,16 +696,54 @@ class _EscapeFilter(QObject):
         self._panel = panel
 
     def eventFilter(self, watched, event) -> bool:  # noqa: N802 - Qt override
-        """@brief Swallow Escape on a field editor and restore the field.
+        """@brief Swallow Escape on a field editor: restore the field, or report an idle Escape.
 
         @param watched The editor receiving the event.
         @param event The event.
         @return True when Escape was handled.
+        @note Two steps (user decision 2026-11-16, R5-7, both tabs, as
+            KiCad's property grid for the first): an Escape that finds a
+            typed, unconfirmed edit restores the shown value; one that finds
+            nothing to restore emits `escape_idle`, which the host turns into
+            the canvas's Escape while a drawing tool is armed. Either way the
+            key is consumed here.
         """
         if event.type() == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Escape:
             for key, widget in self._panel._widgets.items():
                 inner = widget.lineEdit() if isinstance(widget, (QDoubleSpinBox, QSpinBox)) else None
                 if widget is watched or inner is watched:
-                    self._panel.restore(key)
+                    if self._panel.has_unconfirmed_edit(key):
+                        self._panel.restore(key)
+                    else:
+                        self._panel.escape_idle.emit()
                     return True
         return False
+
+
+def bind_panel_escape(panel: PropertiesPanel, view: QWidget, armed: Callable[[], bool]) -> None:
+    """@brief Turn the panel's idle Escape into the canvas's own Escape while a drawing tool is armed.
+
+    @param panel The «Proprietà» panel of the tab.
+    @param view The tab's graphics view (symbol editor or footprint preview).
+    @param armed Called at each idle Escape: True while a drawing tool (a
+        click tool, the measuring tool, a glyph placement) is armed.
+    @note The SAME Escape the canvas would receive is sent to the view
+        (through its event filters and `keyPressEvent`), so the tool ends
+        exactly as with Escape on the canvas: one rule for both tabs (user
+        decision 2026-11-16, R5-7). With no tool armed nothing is sent: an
+        Escape on the canvas would also clear the selection, which would
+        empty the very panel the user is in.
+    @note A second call REPLACES the first binding (one forward per panel):
+        a panel bound twice would send two Escapes, the second of which
+        clears the selection once the tool is gone.
+    """
+    def forward() -> None:
+        """Send Escape to the view while a tool is armed (the second step of the panel's Escape)."""
+        if armed():
+            QApplication.sendEvent(view, QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Escape,
+                                                   Qt.KeyboardModifier.NoModifier))
+    previous = panel._escape_forward
+    if previous is not None:
+        panel.escape_idle.disconnect(previous)
+    panel._escape_forward = forward
+    panel.escape_idle.connect(forward)

@@ -1209,6 +1209,12 @@ def main():
     # the metal that is needed to recognise it.
     label_anchors = {}
     metadata = {}
+    # Pin number of every contact object, AS TEXT, keyed like label_anchors on
+    # the name FreeCAD gave the object (2026-11-16 review, R4-2): FreeCAD
+    # rewrites «PinA-1» to «PinA_1» and a duplicate «Pin1» to «Pin001», so the
+    # preview cannot read the number back from the name. Written as the
+    # preview part's `pin` field.
+    pin_numbers = {}
 
     def turned(shape):
         """Turn a piece built in the body frame into the footprint frame."""
@@ -1256,6 +1262,7 @@ def main():
             # already taken ("Pin1" twice -> "Pin001"), so the requested
             # string lost the anchor (2026-11-03 review).
             label_anchors[pin_obj.Name] = features["label"]
+            pin_numbers[pin_obj.Name] = str(contact["number"])
         except Exception as exc:  # noqa: BLE001 - one contact less is not fatal
             _warn("contatto {get} non generato: {exc}", get=contact.get('number'), exc=exc)
 
@@ -1300,6 +1307,10 @@ def main():
                 print(f"KICADGEN_COMPONENT_SKIPPED:{base}; review-only hypothesis", flush=True)
                 continue
             print(f"KICADGEN_COMPONENT_START:{index + 1}/{len(components)}:{base}", flush=True)
+            # Position in the payload, echoed by the import markers: the parent
+            # identifies a crashing import by it, never by the echoed path,
+            # which the output decoding may have altered (2026-11-16 review G).
+            component["_payload_index"] = index
             try:
                 built = freecad_parts.build_component(component, z1)
                 if not built:
@@ -1406,11 +1417,12 @@ def main():
         seating_lift = float(data.get("header_seating_lift_mm") or 0.0)
         shown_pins = []
     for pin_num, x, y in shown_pins:
-        add(f"Pin{pin_num}", Part.makeCylinder(
+        pin_obj = add(f"Pin{pin_num}", Part.makeCylinder(
             pin_radius, pin_length,
             FreeCAD.Vector(x, y, -pin_length),
             FreeCAD.Vector(0, 0, 1),
         ), pin_color)
+        pin_numbers[pin_obj.Name] = str(pin_num)
 
     # Every object and every stored 3D coordinate moves together, before
     # STEP, FCStd, WRL and preview exports: the preview's pin numbers stay on
@@ -1450,21 +1462,31 @@ def main():
     if fcstd_path:
         _export_fcstd(doc, fcstd_path, _staging_path(data, "fcstd", fcstd_path))
 
+    # The STEP is published: from here on every output is best-effort, so a
+    # failing tessellation must not end the script as an uncaught error. It
+    # becomes the reason of KICADGEN_MESH_FAILED and KICADGEN_WRL_FAILED, which
+    # the parent turns into warnings (2026-11-16 review, R10-3).
     tessellated = []
-    with _StepHeartbeat("tessellation") as heartbeat:
-        for obj, color in colored:
-            heartbeat.beat_if_due()
-            face_colors = getattr(color, "face_colors", None)
-            if face_colors:
-                groups = {}
-                for face, rgba in zip(obj.Shape.Faces, face_colors):
-                    rgb = "#" + "".join(f"{round(max(0, min(1, c)) * 255):02x}" for c in rgba[:3])
-                    groups.setdefault(rgb, []).append(face)
-                for rgb, faces in groups.items():
-                    heartbeat.beat_if_due()
-                    tessellated.append((obj, rgb, Part.makeCompound(faces).tessellate(0.03)))
-            else:
-                tessellated.append((obj, color, obj.Shape.tessellate(0.03)))
+    tessellation_error = None
+    try:
+        with _StepHeartbeat("tessellation") as heartbeat:
+            for obj, color in colored:
+                heartbeat.beat_if_due()
+                face_colors = getattr(color, "face_colors", None)
+                if face_colors:
+                    groups = {}
+                    for face, rgba in zip(obj.Shape.Faces, face_colors):
+                        rgb = "#" + "".join(f"{round(max(0, min(1, c)) * 255):02x}"
+                                            for c in rgba[:3])
+                        groups.setdefault(rgb, []).append(face)
+                    for rgb, faces in groups.items():
+                        heartbeat.beat_if_due()
+                        tessellated.append((obj, rgb, Part.makeCompound(faces).tessellate(0.03)))
+                else:
+                    tessellated.append((obj, color, obj.Shape.tessellate(0.03)))
+    except Exception as exc:  # noqa: BLE001 - WRL and preview are best-effort
+        tessellation_error = exc
+        tessellated = []
 
     # Tessellated mesh: the GUI uses it for the preview of the REAL geometry,
     # and the Python generator uses it to colour the STEP (one colour per
@@ -1472,6 +1494,8 @@ def main():
     mesh_path = data.get("mesh_path")
     if mesh_path:
         try:
+            if tessellation_error is not None:
+                raise tessellation_error
             parts = []
             counted = set()
             with _StepHeartbeat("mesh_json") as mesh_heartbeat:
@@ -1483,6 +1507,10 @@ def main():
                         "color": color,
                         "solids": len(obj.Shape.Solids) if obj.Name not in counted else 0,
                         **metadata.get(obj.Name, {}),
+                        # Only on the first piece of an object, like `solids`:
+                        # a contact split by colour gets one number label.
+                        **({"pin": pin_numbers[obj.Name]}
+                           if obj.Name in pin_numbers and obj.Name not in counted else {}),
                         "label": label_anchors.get(obj.Name),
                         "vertices": [[p.x, p.y, p.z] for p in verts],
                         "triangles": [list(f) for f in facets],
@@ -1492,24 +1520,26 @@ def main():
                 with open(mesh_staged, "w", encoding="utf-8") as fh:
                     json.dump({"parts": parts, "step_colors_exported": step_colors_exported}, fh)
                 _publish(mesh_staged, mesh_path)
-            print(f"KICADGEN_MESH_OK:{mesh_path}")
+            print(f"KICADGEN_MESH_OK:{mesh_path}", flush=True)
         except Exception as exc:  # noqa: BLE001 - preview is best-effort
             _discard(_staging_path(data, "mesh", mesh_path))
-            print(f"KICADGEN_MESH_FAILED:{exc}")
+            print(f"KICADGEN_MESH_FAILED:{exc}", flush=True)
 
     if wrl_path:
         wrl_staged = _staging_path(data, "wrl", wrl_path)
         try:
+            if tessellation_error is not None:
+                raise tessellation_error
             with _StepHeartbeat("vrml_export"):
                 _write_vrml(wrl_staged, tessellated)
                 _publish(wrl_staged, wrl_path)
-            print(f"KICADGEN_WRL_OK:{wrl_path}")
+            print(f"KICADGEN_WRL_OK:{wrl_path}", flush=True)
         except Exception as exc:  # noqa: BLE001 - VRML export is best-effort
             # No WRL at all rather than a partial one: the parent removed the
             # previous WRL before the run, and the footprint references the
             # STEP, so the library simply ships without a WRL.
             _discard(wrl_staged)
-            print(f"KICADGEN_WRL_FAILED:{exc}")
+            print(f"KICADGEN_WRL_FAILED:{exc}", flush=True)
 
 
 main()

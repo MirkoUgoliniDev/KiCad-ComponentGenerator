@@ -319,8 +319,16 @@ class BackgroundModel:
     tolerance: float
 
 
+#: Rows converted to L*a*b* at a time by `_background_distance`. The
+#: conversion is per pixel, so the bands give the same values as one whole
+#: conversion (checked bit for bit in tests/test_review_1116_c7.py); they only
+#: bound the float32 temporaries: a 48 MP photo converted at once allocated
+#: about 2 GB (review 2026-11-16, R8-3), a band of 256 rows of 8000 px about 25 MB.
+LAB_BAND_ROWS = 256
+
+
 def _lab(image):
-    """Immagine BGR a 8 bit in L*a*b* float (L 0..100): distanze in Delta E."""
+    """8-bit BGR image to float L*a*b* (L 0..100): distances in Delta E."""
     return cv2.cvtColor(image.astype(np.float32) / 255.0, cv2.COLOR_BGR2Lab)
 
 
@@ -352,21 +360,35 @@ def estimate_background(image) -> Optional[BackgroundModel]:
                                array[ring:-ring, :ring].reshape(-1, 3),
                                array[ring:-ring, -ring:].reshape(-1, 3)])
 
-    samples = frame_pixels(_lab(image))
+    # Only the ring is converted: the conversion is per pixel, so the samples
+    # are the same as those cut from a whole converted image, without the
+    # full-size float copies (review 2026-11-16, R8-3).
+    ring_bgr = frame_pixels(image)
+    samples = _lab(ring_bgr.reshape(-1, 1, 3)).reshape(-1, 3)
     centre = np.median(samples, axis=0)
     distance = np.linalg.norm(samples - centre, axis=1)
     median = float(np.median(distance))
     # MAD scaled to sigma (1.4826): same unit as a standard deviation.
     spread = 1.4826 * float(np.median(np.abs(distance - median)))
     tolerance = max(MIN_BACKGROUND_DELTA_E, median + BACKGROUND_SPREAD_SIGMAS * spread)
-    bgr = tuple(int(v) for v in np.median(frame_pixels(image), axis=0))
+    bgr = tuple(int(v) for v in np.median(ring_bgr, axis=0))
     return BackgroundModel(lab=tuple(float(v) for v in centre), bgr=bgr,
                            tolerance=float(tolerance))
 
 
 def _background_distance(image, background: BackgroundModel):
-    """Delta E of every pixel from the background colour."""
-    return np.linalg.norm(_lab(image) - np.array(background.lab, dtype=np.float32), axis=2)
+    """Delta E (float32, H x W) of every pixel from the background colour.
+
+    Computed in bands of LAB_BAND_ROWS rows: same values as a whole-image
+    conversion, with temporaries bounded by the band instead of the photo.
+    """
+    centre = np.array(background.lab, dtype=np.float32)
+    height = image.shape[0]
+    distance = np.empty(image.shape[:2], dtype=np.float32)
+    for top in range(0, height, LAB_BAND_ROWS):
+        band = image[top:top + LAB_BAND_ROWS]
+        distance[top:top + LAB_BAND_ROWS] = np.linalg.norm(_lab(band) - centre, axis=2)
+    return distance
 
 
 def _clean_mask(mask, shape):

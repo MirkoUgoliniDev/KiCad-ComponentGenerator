@@ -232,6 +232,23 @@ def no_real_uninstall_registry(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def fresh_exit_deadline():
+    """@brief Every test starts with no exit begun and the whole exit budget.
+
+    `kicadgen.gui.quit_wait` keeps one process-wide exit deadline and an
+    irreversible `is_quitting()` flag (review 2026-11-16). A test that runs an
+    exit hook would otherwise leave the next tests with 0 ms to wait and with
+    late worker exceptions filtered out by `main.late_worker_exception`.
+    """
+    from kicadgen.gui import quit_wait
+    quit_wait._deadline = None
+    quit_wait._quitting = False
+    yield
+    quit_wait._deadline = None
+    quit_wait._quitting = False
+
+
+@pytest.fixture(autouse=True)
 def drain_qt_thread_pool(monkeypatch, hang_watchdog):
     """@brief Ogni lavoro del pool globale di Qt finisce dentro il test che lo ha avviato.
 

@@ -32,7 +32,7 @@ from .canvas_hit import (RANK_HANDLE, RANK_PIN, RANK_STROKE, RANK_TEXT, OutlineE
 from .canvas_clicktools import ANGLE_FREE, ANGLE_MODES, ClickToolRouter, PointCollector, ToolSpec
 from .canvas_tool_hints import PROPERTIES_SHORTCUT, SELECT_SHORTCUT, TOOL_SHORTCUTS, step_hint, tooltip as tool_tooltip
 from .canvas_toolpalette import OUTSIDE_KEY, ToolGrid, select_arrow_icon
-from .canvas_properties import EMPTY_TEXT, MIXED_PLACEHOLDER, FieldSpec, PropertiesPanel
+from .canvas_properties import EMPTY_TEXT, MIXED_PLACEHOLDER, FieldSpec, PropertiesPanel, bind_panel_escape
 from .canvas_snap_marker import make_snap_marker_items
 from ..core import object_snap
 from ..core.draw_constraints import constrain_to_grid
@@ -951,6 +951,11 @@ class _SymbolView(QGraphicsView):
         if self.placing and event.button() == Qt.MouseButton.RightButton:
             self.placing = False
             self.place_requested.emit(None)
+            # This right press cancelled the placement: the context-menu event
+            # that follows it must not open the menu of the pin or element
+            # under it, as after a right press that ends a click tool
+            # (review 2026-11-16, R5-4).
+            self._tool_took_right_press = True
             event.accept()
             return
         if event.button() == Qt.MouseButton.LeftButton and self.gesture is None:
@@ -1133,6 +1138,15 @@ class _SymbolView(QGraphicsView):
         return not (self.wiring or self.placing or self.gesture is not None or self.band.active
                     or self.camera.pan_active)
 
+    def tool_armed(self) -> bool:
+        """@brief Whether a drawing tool waits for clicks: a click tool (wire, shape, the measuring tool) or a glyph placement.
+
+        @return True while Escape on the canvas would end such a tool; the
+            «Proprietà» panel's second Escape forwards it then
+            (`canvas_properties.bind_panel_escape`, as `FootprintView.tool_armed`).
+        """
+        return self.wiring or self.placing
+
     def is_idle(self) -> bool:
         """@brief Whether no tool, placement, pan, drag or band owns the pointer (the shared camera-refresh rule).
 
@@ -1186,13 +1200,24 @@ class _SymbolView(QGraphicsView):
         @param event The mouse event.
         """
         self.pointer.moved(event.pos())
+        if self.clicktools is not None:
+            # Not consuming: the readout and the pan/drag below go on. It runs
+            # BEFORE `pointer_changed`, whose readout hovers the tool again
+            # (`ClickToolRouter.hover_at`): that call finds this very point
+            # already snapped and does not snap it twice (review 2026-11-16,
+            # R5-5: two snaps per move, each an object-snap search).
+            self.clicktools.move(event)
         self.pointer_changed.emit(self.mapToScene(event.pos()))
         if self.measure is not None and event.buttons() == Qt.MouseButton.NoButton:
             # Hovering a measure highlights it (Delete / right click remove it).
             self.measure.hover_measure(event.pos())
-        if self.clicktools is not None:
-            # Not consuming: the readout and the pan/drag below go on.
-            self.clicktools.move(event)
+        buttons = event.buttons()
+        if self.band.lost_release(buttons) or self.camera.pan_lost_release(buttons):
+            # The band or the pan lost its release (a dialog, Alt+Tab): the
+            # shared components drop it, as the drag below (review 2026-11-16,
+            # R5-1, as the footprint preview); this move starts nothing.
+            event.accept()
+            return
         if self.band.move(event.pos()):
             event.accept()
             return
@@ -1201,7 +1226,11 @@ class _SymbolView(QGraphicsView):
             event.accept()
             return
         if self.gesture is not None:
-            self.controller.move(self.mapToScene(event.pos()))
+            # A drag whose left button is no longer held lost its release
+            # (a dialog, Alt+Tab): the shared controller cancels it instead of
+            # stepping (review 2026-11-16, R5-1, as the footprint preview).
+            if not self.controller.lost_release(event.buttons()):
+                self.controller.move(self.mapToScene(event.pos()))
             event.accept()
             return
         # The cursor follows the press reach (`ReachFeedback`): three pixels
@@ -1865,6 +1894,10 @@ class SymbolTab(QWidget):
         self.properties_panel = PropertiesPanel(mixed_placeholder=self.tx(MIXED_PLACEHOLDER))
         self.properties_panel.set_empty(self.tx(EMPTY_TEXT))
         self.properties_panel.committed.connect(self._property_committed)
+        # Two-step Escape (user decision 2026-11-16, R5-7, as the footprint
+        # preview): the first restores a typed field, the second ends the
+        # armed drawing tool exactly as Escape on the canvas.
+        bind_panel_escape(self.properties_panel, self.view, self.view.tool_armed)
         side_column.addWidget(self.properties_panel)
         #: What the panel shows: ('none',), ('element', index), ('elements', indices) or ('pins', numbers).
         self._properties_subject = ('none',)
@@ -1906,7 +1939,10 @@ class SymbolTab(QWidget):
         # key filter first, the cancel filter second).
         self._gestures = GestureController(self.view, self, grab_mouse=True)
         self.view.controller = self._gestures
-        install_canvas_filters(self.view, self._keys, CancelOnEscapeAndHide(self._gestures))
+        # A lost release (focus out, window deactivated) also drops the band
+        # and the pan, as in the footprint preview (review 2026-11-16, R5-1).
+        install_canvas_filters(self.view, self._keys, CancelOnEscapeAndHide(
+            self._gestures, band=self.view.band, camera=self.view.camera))
         splitter.addWidget(preview)
         splitter.setSizes([400, 800])
         splitter.setStretchFactor(1, 1)
@@ -4739,7 +4775,21 @@ class SymbolTab(QWidget):
             «Proprietà» panel takes the focus; with a selected pin its dialog
             opens (pins keep their own editing); with nothing selected the
             element under the pointer opens the «Proprietà elemento…» dialog.
+        @note When E has something to edit, a drag in progress is cancelled
+            first (`_end_drag_for_command`, review 2026-11-16, R5-2): E
+            pressed with the button still down opened a dialog over the
+            running drag, which refused every edit with a reason that did
+            not apply, and the drag survived the dialog. The fields then
+            describe the rows the drag started from. With nothing to edit
+            the drag is left alone, as every edit command does (C3).
         """
+        hovered = None
+        if not self.selected_graphics() and self._selected_pin is None:
+            hovered = self._hovered_graphic()
+            if hovered is None:
+                return False
+        if not self._end_drag_for_command():
+            return False
         if self.selected_graphics():
             for key in self.properties_panel.field_keys():
                 widget = self.properties_panel.field_widget(key)
@@ -4750,7 +4800,9 @@ class SymbolTab(QWidget):
         if self._selected_pin is not None:
             self._edit_selected_pin()
             return True
-        index = self._hovered_graphic()
+        # The element found under the pointer BEFORE the cancel: a cancelled
+        # drag puts it back where it began, away from the pointer.
+        index = hovered if hovered is not None else self._hovered_graphic()
         if index is None:
             return False
         self._edit_element_properties(index)

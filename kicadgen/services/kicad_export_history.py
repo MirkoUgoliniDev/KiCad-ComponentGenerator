@@ -13,6 +13,7 @@ from pathlib import Path
 
 from ..app_paths import user_data_dir
 from ..fsutil import replace_file
+from .project_costs import exclusive_lock
 
 
 HISTORY_FILENAME = "kicad_exports.json"
@@ -153,9 +154,23 @@ def record_export(*, component: str, kind: str, source: str,
         "destination": str(destination),
         "timestamp": datetime.now().astimezone().isoformat(timespec="seconds"),
     }
-    temporary = None
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
+        # The read-modify-write runs under an exclusive lock file: two
+        # windows (or two threads) recording at once each read N records and
+        # wrote N + 1, losing one record (review R7-11). A lock kept by
+        # another writer longer than its timeout is a TimeoutError (an
+        # OSError): nothing written, False returned, as for any failed write.
+        with exclusive_lock(target.parent, target.name + ".lock"):
+            return _write_record(target, record)
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def _write_record(target: Path, record: dict) -> bool:
+    """One read-modify-write of the history under the caller's lock (see `record_export`)."""
+    temporary = None
+    try:
         previous = _previous_records(target)
         data = [record, *previous][:MAX_RECORDS]
         payload = json.dumps(data, ensure_ascii=False, indent=2, allow_nan=False).encode("utf-8")
@@ -168,8 +183,6 @@ def record_export(*, component: str, kind: str, source: str,
         replace_file(temporary, target)
         temporary = None
         return True
-    except (OSError, TypeError, ValueError):
-        return False
     finally:
         if temporary is not None:
             try:

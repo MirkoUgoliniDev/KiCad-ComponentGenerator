@@ -48,6 +48,7 @@ from PyQt6.QtWidgets import (
 
 from ..services import credentials, dotenv_keys, openrouter, providers
 from ..services.messages import tx
+from .quit_wait import connect_quit_wait, disconnect_quit_wait
 
 #: Folder of the window icons.
 _ASSETS = Path(__file__).parent / "assets"
@@ -73,7 +74,8 @@ class _KeyCheckWorker(QThread):
     flight: closing the window detaches the worker instead of stopping it.
     Like `model_dialog._ModelsWorker`, the thread belongs to QApplication, so a
     closed window cannot destroy it while it runs; it deletes itself when
-    done and application exit waits for it.
+    done and application exit waits for it at most
+    `quit_wait.QUIT_WAIT_MS`, then lets it go (super review 2026-11-16, R4-5).
     """
 
     checked = pyqtSignal(object, object)
@@ -91,9 +93,8 @@ class _KeyCheckWorker(QThread):
         super().__init__(parent)
         self._key = key
         self._checker = checker
-        application = QApplication.instance()
-        if application is not None:
-            application.aboutToQuit.connect(self.wait)
+        # urllib cannot abort a call in flight: no stop, only a bounded wait.
+        connect_quit_wait(self)
         self.finished.connect(self._release)
 
     def run(self) -> None:
@@ -114,12 +115,7 @@ class _KeyCheckWorker(QThread):
 
     def _release(self) -> None:
         """Drop the exit wait and delete itself once finished (see model_dialog)."""
-        application = QApplication.instance()
-        if application is not None:
-            try:
-                application.aboutToQuit.disconnect(self.wait)
-            except TypeError:
-                pass
+        disconnect_quit_wait(self)
         self.deleteLater()
 
 
@@ -175,6 +171,10 @@ def balance_text(status) -> str:
     amount = getattr(status, "amount", None)
     if isinstance(status, providers.ProviderBalance):
         if amount is None:
+            # None = the provider's answer was unreadable: neither available
+            # nor exhausted is known (review R7-8, 2026-11-16).
+            if status.available is None:
+                return tx("non verificabile")
             return tx("disponibile") if status.available else tx("esaurito")
         return f"{amount:.2f} {status.currency}"
     remaining = getattr(status, "remaining", None)

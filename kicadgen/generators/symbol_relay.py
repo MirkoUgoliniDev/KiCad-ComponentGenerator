@@ -35,6 +35,7 @@ Declared limits:
 """
 from __future__ import annotations
 
+import math
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Optional
@@ -97,12 +98,17 @@ def contact_label(row) -> Optional[str]:
 
     @param row A pinout row (dict).
     @return The label stripped of blanks, case kept; an integral number
-        becomes its text; None when absent, blank or of another type.
+        becomes its text; None when absent, blank or of another type, and
+        for NaN or an infinity (no label is printed as either).
     """
     value = row.get("contact") if isinstance(row, dict) else None
     if isinstance(value, str) and value.strip():
         return value.strip()
-    if isinstance(value, (int, float)) and not isinstance(value, bool) and value == int(value):
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
+    # isfinite first: int() raises on NaN (ValueError) and on an infinity
+    # (OverflowError), which crashed the composition (review 2026-11-16, R11-6).
+    if isinstance(value, float) and math.isfinite(value) and value == int(value):
         return str(int(value))
     return None
 

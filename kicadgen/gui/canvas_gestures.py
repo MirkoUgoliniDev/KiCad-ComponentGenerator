@@ -9,8 +9,12 @@ and committing; what they share is handled here and only here (plan
   live-vs-stepped policy, «the release always passes through a move», exactly
   one `gesture_end` per drag, state cleared BEFORE the host callbacks so a
   host may re-enter (`cancel()`, `press()`) from inside `gesture_end`.
-- `CancelOnEscapeAndHide`: Escape while a drag runs, and the view hidden,
-  cancel the drag.
+- `CancelOnEscapeAndHide`: Escape while a drag runs and the view hidden
+  cancel the drag; the focus leaving the view (not to the menu bar) and its
+  window deactivated also cancel the rubber band and the pan; a move without
+  the button that started them cancels each of them too
+  (`GestureController.lost_release`, `RubberBand.lost_release`,
+  `Camera.pan_lost_release`).
 - `HoverGroups`: the reveal rule of the hover handles (same screen margin at
   any zoom, ring groups, the dragged owner always revealed).
 - `StepMemo` and `Identity`: the identical-step memo of a stepped drag.
@@ -376,6 +380,27 @@ class GestureController(QObject):
         self.move(point)
         return self._finish(True)
 
+    def lost_release(self, buttons) -> bool:
+        """@brief A pointer move reports the buttons held: cancel a drag whose left button is no longer down.
+
+        @param buttons `QMouseEvent.buttons()` of the move.
+        @return True when a drag was running without its left button and was
+            cancelled (the caller must not treat the move as a drag step);
+            False when idle or while the left button is still held.
+        @note Every drag of both tabs starts on a LEFT press and ends on its
+            release. A move without that button means the release went
+            elsewhere (a modal dialog opened mid-drag, Alt+Tab, a capture
+            taken by the system): before, the dragged object went on
+            following a pointer with no button held, was dropped by the next
+            click and the viewport kept its mouse grab (review 2026-11-16,
+            R5-1). The drag is CANCELLED, as Escape and Hide cancel it, not
+            committed: the drop the user never made is not invented, and the
+            object goes back where the drag began.
+        """
+        if self._target is None or (buttons & Qt.MouseButton.LeftButton):
+            return False
+        return self._finish(False)
+
     def cancel(self) -> bool:
         """@brief Abort the running drag without moving anything.
 
@@ -441,8 +466,18 @@ class GestureController(QObject):
         return True
 
 
+#: Events after which the button release of a running drag can no longer
+#: reach the view: the keyboard focus left it (a modal dialog, a panel field
+#: taking the focus) or its window stopped being the active one (Alt+Tab, a
+#: dialog opened over it). Qt propagates WindowDeactivate from the window to
+#: every visible child widget, so the view receives it (review 2026-11-16, R5-1).
+#: A FocusOut to the menu bar (Alt alone) is the exception: see
+#: `CancelOnEscapeAndHide.loses_release`.
+LOST_RELEASE_EVENTS = (QEvent.Type.FocusOut, QEvent.Type.WindowDeactivate)
+
+
 class CancelOnEscapeAndHide(QObject):
-    """@brief Event filter cancelling the controller's drag on Escape (while a drag runs) and on Hide.
+    """@brief Event filter cancelling the controller's drag on Escape (while a drag runs), on Hide and when the release is lost.
 
     @note Install it on the VIEW (the focus widget receives the key, the
         widget receives Hide) AFTER the `KeyRepeatFilter`: Qt runs the
@@ -451,9 +486,19 @@ class CancelOnEscapeAndHide(QObject):
         the repeat flush writes the draft (see `install_canvas_filters`).
         Escape is consumed only when it cancelled a drag; every other event
         goes on to the view.
+    @note The focus leaving the view and its window being deactivated
+        (`LOST_RELEASE_EVENTS`, `loses_release`) cancel a running drag too,
+        and the rubber band and the pan when the view passes them: the
+        release of the button would go to another widget or window, and an
+        interaction left running followed the pointer with no button held
+        (review 2026-11-16, R5-1). A move without the button that started it,
+        the other half of that rule, is `GestureController.lost_release`,
+        `RubberBand.lost_release` and `Camera.pan_lost_release`, called by
+        the views.
     """
 
-    def __init__(self, controller: GestureController, *, escape: bool = True, parent: QObject | None = None):
+    def __init__(self, controller: GestureController, *, escape: bool = True, parent: QObject | None = None,
+                 band=None, camera=None):
         """@brief Bind the filter to a controller.
 
         @param controller The controller whose `cancel()` is called.
@@ -461,13 +506,49 @@ class CancelOnEscapeAndHide(QObject):
             host whose Escape means something else while dragging passes
             False (both tabs pass True: Escape cancels a running drag).
         @param parent Qt parent; the controller's view when None.
+        @param band The view's `canvas_selection.RubberBand`, cancelled too on
+            a lost release (`cancel()`); None leaves bands alone.
+        @param camera The view's `canvas_camera.Camera`, whose pan is
+            cancelled too on a lost release (`pan_cancel()`); None leaves pans alone.
         """
         super().__init__(parent if parent is not None else controller.parent())
         self._controller = controller
         self.escape = bool(escape)
+        self._band = band
+        self._camera = camera
+
+    @staticmethod
+    def loses_release(event) -> bool:
+        """@brief Whether an event means the button release of a running interaction can no longer reach the view.
+
+        @param event Any event.
+        @return True for `LOST_RELEASE_EVENTS`, except a FocusOut whose
+            reason is `MenuBarFocusReason`.
+        @note Alt pressed and released alone puts the menu bar in keyboard
+            mode and takes the focus with MenuBarFocusReason, while the mouse
+            grab still keeps the release for the view: that focus loss must
+            not snap the drag back (canvas-parity review 2026-11-16, L1).
+        """
+        kind = event.type()
+        if kind not in LOST_RELEASE_EVENTS:
+            return False
+        return not (kind == QEvent.Type.FocusOut and event.reason() == Qt.FocusReason.MenuBarFocusReason)
+
+    def cancel_lost_release(self) -> None:
+        """@brief Cancel what a lost release leaves running: the drag, the rubber band and the pan.
+
+        @note The same cleanup the views' `cancel_interaction` gives the band
+            and the pan; the controller tells its host once (`gesture_end`
+            with commit False). Each part is a no-op when idle.
+        """
+        self._controller.cancel()
+        if self._band is not None:
+            self._band.cancel()
+        if self._camera is not None:
+            self._camera.pan_cancel()
 
     def eventFilter(self, watched, event) -> bool:
-        """@brief Qt override: cancel on Escape during a drag (consumed) and on Hide (passed on).
+        """@brief Qt override: cancel on Escape during a drag (consumed), on Hide and on a lost release (passed on).
 
         @param watched The object the event is for.
         @param event The event.
@@ -481,6 +562,8 @@ class CancelOnEscapeAndHide(QObject):
             return False
         if kind == QEvent.Type.Hide:
             self._controller.cancel()
+        elif self.loses_release(event):
+            self.cancel_lost_release()
         return False
 
 

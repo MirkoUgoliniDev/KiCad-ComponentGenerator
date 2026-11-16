@@ -196,8 +196,14 @@ def test_the_build_reads_the_same_variable_and_prints_the_report_on_failure():
     main = _load_main()
     build = (ROOT / "scripts" / "build-windows.ps1").read_text(encoding="utf-8")
     assert f"$env:{main.CHECK_RUNTIME_REPORT_ENV} = $checkReport" in build
-    failure = build.split("if ($check.ExitCode -ne 0) {", 1)[1].split("\n}", 1)[0]
-    assert "Get-Content $checkReport" in failure and "throw" in failure
+    # CONTRACT UNCHANGED, marker renamed 2026-11-16 (review R12-3): the smoke
+    # test is now bounded by Invoke-WithTimeout, which returns the exit code
+    # in $checkExit instead of a Start-Process object. The printing moved
+    # into Show-CheckReport, also called when the check times out.
+    failure = build.split("if ($checkExit -ne 0) {", 1)[1].split("\n}", 1)[0]
+    assert "Show-CheckReport $checkReport" in failure and "throw" in failure
+    printer = build.split("function Show-CheckReport", 1)[1].split("\n}", 1)[0]
+    assert "Get-Content $Path" in printer
 
 
 def test_the_command_line_writes_the_report_file(tmp_path):

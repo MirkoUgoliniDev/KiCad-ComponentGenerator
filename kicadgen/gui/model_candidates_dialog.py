@@ -425,8 +425,9 @@ def _run_preview_child(command, cancel=None):
         descendant is abandoned, never waited for.
     """
     from ..cad3d.process_log import (CANCEL_POLL_INTERVAL_S, EXIT_DRAIN_GRACE_S,
-                                     KILL_REAP_GRACE_S, child_environment, contain_process,
-                                     kill_process_tree, reap_killed_child, release_process)
+                                     KILL_REAP_GRACE_S, awake_clock, child_environment,
+                                     contain_process, kill_process_tree, reap_killed_child,
+                                     release_process)
     flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
     if cancel is not None and cancel.is_set():
         raise PreviewCancelled(command)
@@ -454,11 +455,13 @@ def _run_preview_child(command, cancel=None):
     reader = threading.Thread(target=pump, daemon=True, name='kicadgen-preview-output')
     reader.start()
     try:
-        deadline = time.monotonic() + PREVIEW_TIMEOUT_S
+        # Sleep-excluding clock (2026-11-16 review, R10-2): a PC suspended
+        # during the preview must not use up its limit.
+        deadline = awake_clock() + PREVIEW_TIMEOUT_S
         exited_at = None
         while True:
             reader.join(timeout=CANCEL_POLL_INTERVAL_S)
-            now = time.monotonic()
+            now = awake_clock()
             stopped = cancel is not None and cancel.is_set()
             exited = process.poll() is not None
             if exited and not reader.is_alive():
@@ -624,8 +627,16 @@ def _remember_preview_colors(enabled: bool, owner=None) -> None:
             owner._config[PREVIEW_COLORS_KEY] = bool(enabled)
             owner._save_config_safely()
             return
-        from .app_config import load_config, save_config
-        config = load_config()
+        from .app_config import config_path, load_config, save_config
+        # Only over the file really read (review H, 3): a locked or corrupt
+        # file would turn into the defaults and overwrite every other
+        # preference; the choice then stays for this dialog only. A file that
+        # does not exist yet has nothing to lose: it starts from the defaults.
+        config = load_config(require_file=True)
+        if config is None:
+            if config_path().is_file():
+                return
+            config = load_config()
         config[PREVIEW_COLORS_KEY] = bool(enabled)
         save_config(config)
     except Exception:  # noqa: BLE001 - the choice stays for this window
@@ -1775,8 +1786,15 @@ class ModelCandidatesDialog(QDialog):
             super().accept()
 
     def _stop_previews(self):
-        """Kill the running preview child: the program is quitting."""
+        """Kill the running preview child: the program is quitting.
+
+        Nothing is waited for here (the child runs in the global pool, not in
+        a QThread of this dialog), but the exit is marked as begun and its
+        shared deadline started (`quit_wait.begin_exit`), like every exit hook.
+        """
         self._preview_cancel.set()
+        from . import quit_wait
+        quit_wait.begin_exit()
 
     def done(self, result):
         """@brief Close without waiting for CAD; discard late previews and cancelled choices.

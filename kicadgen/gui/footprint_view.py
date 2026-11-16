@@ -540,7 +540,10 @@ class FootprintView(QGraphicsView):
         self.click_collector = PointCollector(host, self)
         self.click_router = ClickToolRouter(self, self.click_collector, self.camera,
                                             on_arm=self._on_click_tool_arm)
-        self._cancel_filter = CancelOnEscapeAndHide(self.gestures, escape=True)
+        # A lost release (focus out, window deactivated) also drops the band
+        # and the pan, as in the symbol editor (review 2026-11-16, R5-1).
+        self._cancel_filter = CancelOnEscapeAndHide(self.gestures, escape=True, band=self.band,
+                                                    camera=self.camera)
         install_canvas_filters(self, self.key_repeat, self._cancel_filter)
 
     def _on_click_tool_arm(self):
@@ -1101,8 +1104,27 @@ class FootprintView(QGraphicsView):
         @param index Index into the window's drawings list.
         @return False when it has no item or every item is hidden (its layer
             is switched off), True otherwise.
+        @note The hovered drawing, asked on every idle move near it (the
+            hysteresis of `_hover_at`), is looked up only among the items
+            whose bounds meet its remembered bounds (Qt's spatial index):
+            those bounds are the union of its items' bounds
+            (`_drawing_bounds`), so no item of it lies outside. Before, every
+            such move walked the whole scene (review 2026-11-16, R5-6). Only
+            a True answer is taken from the area: when it shows no visible
+            item of the drawing (bounds left stale by a redraw that moved
+            it, or the drawing really hidden) the whole scene is walked as
+            before, so the answer never depends on the bounds being current;
+            a False answer ends the hysteresis, so that walk happens once.
+            Any other index walks the scene (key presses only).
         """
-        return any(item.data(DRAWING_KEY_ROLE) == index and item.isVisible() for item in self.scene().items())
+        scene = self.scene()
+        if index >= 0 and index == self._hovered_drawing and self._hover_bounds is not None:
+            # Grown by one scene unit: a zero-width line's bounds lie on the edge.
+            area = self._hover_bounds.adjusted(-1.0, -1.0, 1.0, 1.0)
+            if any(item.data(DRAWING_KEY_ROLE) == index and item.isVisible()
+                   for item in scene.items(area, Qt.ItemSelectionMode.IntersectsItemBoundingRect)):
+                return True
+        return any(item.data(DRAWING_KEY_ROLE) == index and item.isVisible() for item in scene.items())
 
     def reach_tooltip(self, pos) -> str:
         """@brief The tooltip the hover shows at a viewport point, out to the press margin ("" lets Qt answer).
@@ -1117,6 +1139,15 @@ class FootprintView(QGraphicsView):
         """True when no tool, pan, drag or band owns the pointer: the hover feedback may show."""
         armed = self.click_collector is not None and self.click_collector.armed
         return not (armed or self._dragging() or self.band.active or self.camera.pan_active)
+
+    def tool_armed(self) -> bool:
+        """@brief Whether a drawing tool waits for clicks (a palette tool, «Quota» or the measuring tool).
+
+        @return True while Escape on the canvas would end such a tool; the
+            «Proprietà» panel's second Escape forwards it then
+            (`canvas_properties.bind_panel_escape`, as `_SymbolView.tool_armed`).
+        """
+        return self.click_collector is not None and self.click_collector.armed
 
     def is_idle(self) -> bool:
         """@brief Whether no tool, pan, drag or band owns the pointer (the shared camera-refresh rule).
@@ -1516,7 +1547,18 @@ class FootprintView(QGraphicsView):
         self.pointer.moved(event.pos())
         self.pointer_changed.emit(self.mapToScene(event.pos()))
         if self._dragging():
-            self.gestures.move(self.mapToScene(event.pos()))
+            # A drag whose left button is no longer held lost its release
+            # (a dialog, Alt+Tab): the shared controller cancels it instead of
+            # stepping (review 2026-11-16, R5-1, as the symbol editor).
+            if not self.gestures.lost_release(event.buttons()):
+                self.gestures.move(self.mapToScene(event.pos()))
+            event.accept()
+            return
+        buttons = event.buttons()
+        if self.band.lost_release(buttons) or self.camera.pan_lost_release(buttons):
+            # The band or the pan lost its release (a dialog, Alt+Tab): the
+            # shared components drop it, as the drag above (review 2026-11-16,
+            # R5-1, as the symbol editor); this move starts nothing.
             event.accept()
             return
         if self.band.move(event.pos()):

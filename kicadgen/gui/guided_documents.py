@@ -2,7 +2,7 @@
 from pathlib import Path
 import webbrowser
 
-from PyQt6.QtCore import Qt, QSize, pyqtSignal
+from PyQt6.QtCore import QEventLoop, Qt, QSize, pyqtSignal
 from PyQt6.QtGui import QPixmap, QImageReader
 from PyQt6.QtWidgets import (QApplication, QCheckBox, QDialog, QDialogButtonBox, QFileDialog,
     QFrame, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QMessageBox, QPushButton, QScrollArea,
@@ -180,7 +180,8 @@ class GuidedDocuments(QWidget):
     """
     changed = pyqtSignal()
 
-    def __init__(self, directory, parent=None, *, i18n=None, config=None, body_size=None):
+    def __init__(self, directory, parent=None, *, i18n=None, config=None, body_size=None,
+                 save_config=None):
         """@brief Build the panel and show the current documents.
 
         @param directory Callable returning the docs folder (may raise ValueError
@@ -189,6 +190,10 @@ class GuidedDocuments(QWidget):
         @param i18n Optional translator of the window.
         @param config Live preferences dictionary (last browse folder), or None.
         @param body_size Callable returning the board (length, width) in mm, or None.
+        @param save_config Callable(config) that writes config.json, or None
+            for `app_config.save_config`. The window passes its per-key
+            writer, so a remembered folder never overwrites what another
+            KiCadGen window saved (2026-11-16).
         """
         super().__init__(parent)
         self.directory = directory
@@ -197,6 +202,8 @@ class GuidedDocuments(QWidget):
         # the documents come from. None in tests and in isolated uses of the
         # widget: the dialog then starts from the docs folder.
         self.config = config
+        # The writer of config.json (None: the whole dict, app_config.save_config).
+        self.save_config = save_config
         # Body dimensions (length, width) to check whether a photo can be
         # calibrated. None when they are not known.
         self.body_size = body_size
@@ -360,38 +367,56 @@ class GuidedDocuments(QWidget):
             signal the card stays mute and the button seems to have done
             nothing. The controls are disabled so that a second request is
             not queued.
+        @note One job at a time, and the cursor this widget pushed is always
+            the one it pops (super review 2026-11-16, R4-4): a second «busy»
+            while one runs is ignored, and clearing never depends on the card
+            still existing -- a refresh in between may have dropped it, and
+            the old early return left the busy cursor on for good. The redraw
+            processes no user input, so no click can start a second
+            replacement in the middle of the first.
         """
-        if key == ADD_KEY:
-            controls, label = [self.add_button], self.add_hint
-        else:
-            widgets = self.cards.get(key)
-            if not widgets:
-                return
-            controls = [widgets['replace'], widgets['view'], widgets['remove'],
-                        *widgets['roles'].values()]
-            label = widgets['preview']
-        if busy == (self._busy_role == key):
-            # Restoring a cursor never set -- the case of the user who cancels
-            # the replacement confirmation -- would remove someone else's from
-            # the stack.
-            return
-        for control in controls:
-            control.setEnabled(not busy)
         if busy:
+            if self._busy_role is not None:
+                return
+            if key == ADD_KEY:
+                controls, label = [self.add_button], self.add_hint
+            else:
+                widgets = self.cards.get(key)
+                if not widgets:
+                    return
+                controls = [widgets['replace'], widgets['view'], widgets['remove'],
+                            *widgets['roles'].values()]
+                label = widgets['preview']
+            for control in controls:
+                control.setEnabled(False)
             if key != ADD_KEY:
                 # The previous preview disappears at once: it is already stale.
                 label.setPixmap(QPixmap())
             label.setText(self._tr('Caricamento…'))
             QApplication.setOverrideCursor(Qt.CursorShape.BusyCursor)
+            self._busy_role = key
         else:
+            if self._busy_role != key:
+                # Restoring a cursor never set -- the case of the user who
+                # cancels the replacement confirmation -- would remove someone
+                # else's from the stack.
+                return
+            self._busy_role = None
             QApplication.restoreOverrideCursor()
             if key == ADD_KEY:
-                label.setText(self._tr('Un file può avere più ruoli: dopo averlo aggiunto '
-                                       'spunta tutti quelli che contiene.'))
-        self._busy_role = key if busy else None
+                self.add_button.setEnabled(True)
+                self.add_hint.setText(self._tr('Un file può avere più ruoli: dopo averlo '
+                                               'aggiunto spunta tutti quelli che contiene.'))
+            else:
+                widgets = self.cards.get(key)
+                if widgets:
+                    for control in (widgets['replace'], widgets['view'], widgets['remove'],
+                                    *widgets['roles'].values()):
+                        control.setEnabled(True)
         # The work blocks the GUI thread: without this the card would not be
-        # redrawn before the end, and the wait would not be visible.
-        QApplication.processEvents()
+        # redrawn before the end, and the wait would not be visible. User
+        # input stays queued: handled here it would re-enter the actions.
+        QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
 
     def _calibration_verdict(self, roles, path):
         """@brief Verdict for a document's card: (icon, text, explanation, colour).
@@ -583,11 +608,13 @@ class GuidedDocuments(QWidget):
             self, self._tr(title), browse_start_dir(self.config, self.directory()),
             self._tr('Immagini e PDF (*.png *.jpg *.jpeg *.webp *.gif *.pdf)'))
         if source:
-            remember_browse_dir(self.config, source)
+            remember_browse_dir(self.config, source, save=self.save_config)
         return source
 
     def _add(self):
         """Copy a new document into the project; its roles are ticked afterwards."""
+        if self._busy_role is not None:
+            return  # one copy at a time (see set_busy)
         self._notice = ''
         source = self._choose_file('Aggiungi documento')
         if not source:
@@ -609,6 +636,8 @@ class GuidedDocuments(QWidget):
 
     def _replace(self, name):
         """Replace the file of one card, keeping its roles; the old copy goes to docs/.history."""
+        if self._busy_role is not None:
+            return  # one copy at a time (see set_busy)
         self._notice = ''
         source = self._choose_file('Sostituisci documento')
         if not source:

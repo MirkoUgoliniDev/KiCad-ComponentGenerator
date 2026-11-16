@@ -226,6 +226,24 @@ class Camera(QObject):
             return False
         return self._finish_pan()
 
+    def pan_lost_release(self, buttons) -> bool:
+        """@brief A pointer move reports the buttons held: cancel a pan whose button is no longer down.
+
+        @param buttons `QMouseEvent.buttons()` of the move.
+        @return True when a pan was running without the button that started
+            it (`pan_button`, left or middle) and was cancelled; False when
+            idle or while that button is still held.
+        @note The release went elsewhere (a dialog opened mid-pan, Alt+Tab):
+            before, the picture went on following a pointer with no button
+            held and the symbol editor kept its mouse grab (review
+            2026-11-16, R5-1, the drag's rule in `GestureController.lost_release`).
+            The pan is cancelled as Escape cancels it: the picture stays
+            where the last move put it.
+        """
+        if self._pan_last is None or (buttons & self._pan_button):
+            return False
+        return self.pan_cancel()
+
     def _finish_pan(self) -> bool:
         """Clear the pan state, release the mouse (only if grabbed) and restore the cursor."""
         grabbed = self._pan_grab

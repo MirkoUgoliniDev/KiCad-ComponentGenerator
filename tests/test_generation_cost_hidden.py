@@ -34,6 +34,17 @@ def _bill(cost=0.05):
                                         "cost": cost}})
 
 
+def _bill_run(window, cost=0.05):
+    """@brief One paid call of the run's worker, made inside the run's usage scope.
+
+    @note Review 2026-11-16, R6-8: each run has its own tally
+        (`MainWindow._usage_scope`) and the worker runs its job inside it; the
+        process-wide tally is no longer what the analysis cost reads.
+    """
+    with window._usage_scope.active():
+        _bill(cost)
+
+
 def test_automatic_generation_modal_has_no_cost(window, monkeypatch):  # noqa: F811
     """@brief Positivo: la generazione automatica parte con la modale senza costo.
 
@@ -41,7 +52,7 @@ def test_automatic_generation_modal_has_no_cost(window, monkeypatch):  # noqa: F
     un dato vero e va tenuto (la label sotto il pulsante e' stata tolta).
     """
     begin(window, monkeypatch)
-    _bill()
+    _bill_run(window)
     window._on_extracted(acquired('castellated'))
     window._on_extract_finished()
     assert window._automatic_generation_active
@@ -62,7 +73,7 @@ def test_a_late_extraction_finish_does_not_bring_the_cost_back(window, monkeypat
     della generazione no.
     """
     begin(window, monkeypatch)
-    _bill()
+    _bill_run(window)
     window._on_extracted(acquired('castellated'))
     window._on_extract_finished()
     window._on_extract_finished()

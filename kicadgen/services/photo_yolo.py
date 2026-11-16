@@ -39,12 +39,14 @@ try:
     from ..core.validation import covered_fraction
     from .messages import end_sentence, tx, warning
     from .photo_audit import AUDIT_RETENTION_PER_KIND, prune_audits
+    from .photo_cancel import raise_if_cancelled
     from .photo_heights import estimate_body_height
     from .yolo_models import LoadedModelCache
 except ImportError:  # loaded as a standalone file (import isolation test)
     from kicadgen.core.validation import covered_fraction
     from kicadgen.services.messages import end_sentence, tx, warning
     from kicadgen.services.photo_audit import AUDIT_RETENTION_PER_KIND, prune_audits
+    from kicadgen.services.photo_cancel import raise_if_cancelled
     from kicadgen.services.photo_heights import estimate_body_height
     from kicadgen.services.yolo_models import LoadedModelCache
 
@@ -1187,6 +1189,18 @@ def _on_body_surface(retained, others, container_confidence):
     return links
 
 
+def candidate_name(identifier) -> str:
+    """@brief Default name of a detector proposal in the review and the inventory.
+
+    @param identifier The proposal's review id (`_id`).
+    @return «Candidato YOLO <id>» in the interface language (review
+        2026-11-16, R8-8: it was an English literal stored as data). Nothing
+        decides on this text: the detector identity is `_yolo_proposal_id`
+        (kicad_models._is_yolo_only_hypothesis), the name is only shown.
+    """
+    return tx("Candidato YOLO {n}", n=identifier)
+
+
 def _overlap_doubt_fields(row, review_ids, mm_per_px_x, mm_per_px_y):
     """Component fields of an overlap doubt: the other body, depth and tolerance in mm, and a review reason.
 
@@ -1199,7 +1213,7 @@ def _overlap_doubt_fields(row, review_ids, mm_per_px_x, mm_per_px_y):
     reason = tx("Si sovrappone al corpo {other} di {depth:.2f} mm, entro l'incertezza dei "
                 "bordi del rilevatore ({tolerance:.2f} mm): può essere un corpo separato o una "
                 "sua piazzola, da verificare sulla foto.",
-                other=(f"YOLO candidate {other}" if other is not None
+                other=(candidate_name(other) if other is not None
                        else str(row["overlap_doubt_with"])),
                 depth=depth, tolerance=tolerance)
     return {"_yolo_overlap_doubt_with": row["overlap_doubt_with"],
@@ -1433,9 +1447,19 @@ def detector_review_only(proposal) -> bool:
     return bool(proposal.get("_yolo_review_only"))
 
 
+#: Provenance code of a body proposed by the local detector (`_source`).
+LOCAL_SOURCE = "YOLO local"
+#: Provenance code of a body rebuilt from fragments cut by tile seams.
+RECOVERED_SOURCE = "YOLO local, rebuilt from tile seams"
+
 #: Declared provenance of a box the user has moved, resized or drawn: the
 #: same string for all three cases, because downstream they are the same
 #: thing -- the eye of the person looking.
+#: A declared exception to the English codes sent to the paid reconciliation
+#: (LOCAL_SOURCE, RECOVERED_SOURCE): the Italian text stays because saved
+#: projects carry it and the reconciliation cache keys are built from it, so
+#: an English code would make every cached reconciliation with a manual body
+#: paid again (user decision 2026-11-16).
 MANUAL_SOURCE = "revisione manuale"
 
 #: «interno» (inner) handle of mark_manual_box: a move, no side looked at.
@@ -1531,7 +1555,7 @@ def manual_proposal(box, identifier, length_mm, width_mm):
     """
     x0, y0, x1, y1 = box
     return {
-        "name": f"Corpo aggiunto {identifier}", "kind": "generic",
+        "name": tx("Corpo aggiunto {n}", n=identifier), "kind": "generic",
         **box_geometry_mm(box, length_mm, width_mm), "height_mm": 1.0,
         "_height_source": "estimated_placeholder_not_measured", "_height_estimated": True,
         "color_hex": "#303030", "marking": "", "confidence": "low",
@@ -1590,7 +1614,7 @@ def _write_audit(audit_dir, document, keep=AUDIT_RETENTION_PER_KIND):
 
 def detect_yolo_components(photo, length_mm, width_mm, model_path=None, log=None,
                            audit_dir=None, include_review_candidates=False,
-                           confidence=None, settings=None) -> list[dict]:
+                           confidence=None, settings=None, cancel=None) -> list[dict]:
     """@brief Detect generic mechanical candidates on an already calibrated photo.
 
     @param photo Nonempty H x W x 3 uint8 NumPy image in OpenCV BGR order.
@@ -1606,6 +1630,10 @@ def detect_yolo_components(photo, length_mm, width_mm, model_path=None, log=None
         it overrides settings["confidence"].
     @param settings Detector settings chosen by the user (see yolo_settings);
         None keeps every default. Recorded in the log and the audit recipe.
+    @param cancel Optional cancellation channel (event, predicate or None),
+        checked before the model is loaded and before every view (review
+        2026-11-16, R8-2: 66 views of a 48 MP photo ran 165 s with
+        «Interrompi» ignored). None checks nothing.
     @param include_review_candidates Also return the sub-threshold body
         hypotheses, deduplicated against the retained bodies, even without an
         audit directory. Defaults to False for standalone detector
@@ -1617,8 +1645,12 @@ def detect_yolo_components(photo, length_mm, width_mm, model_path=None, log=None
         extra NMS (quadratic worst case).
     @return photo_grounding-compatible dictionaries ordered top-to-bottom then
         left-to-right, with normalized _box and board-centered mm coordinates.
-    @throws ValueError For invalid photo/dimensions/model/runtime, failed inference
-        or an unwritable audit directory. Partial inference is never returned.
+    @throws ValueError For invalid photo/dimensions/model/runtime or failed
+        inference. Partial inference is never returned.
+    @throws CallCancelled When `cancel` is set: nothing is returned.
+    @note An unwritable audit directory is logged as a warning and the
+        detections are returned (review 2026-11-16, R8-5): the audit is
+        evidence, not part of the result, as for photo_audit.write_stage_audit.
     @note X points right and Y down. Long/short dimensions determine rotation
         0/90. height_mm is an ESTIMATE from the detector class and the plan
         (photo_heights.estimate_body_height; 1.0 mm placeholder for an
@@ -1656,6 +1688,7 @@ def detect_yolo_components(photo, length_mm, width_mm, model_path=None, log=None
         chosen["confidence"] = operating_confidence(confidence)
     threshold, nms_iou = chosen["confidence"], chosen["nms_iou"]
     overlap = chosen["tile_overlap"]
+    raise_if_cancelled(cancel)
     session, input_name, np, cv2, info = _setup(model_path)
     expected_shape = tuple(info["output_shape"])
     emit(f"YOLO local model: {Path(info['model_path']).name} "
@@ -1678,6 +1711,8 @@ def detect_yolo_components(photo, length_mm, width_mm, model_path=None, log=None
     row_cap = info.get("per_view_row_cap")
     capped_views = []
     for view, bounds in views:
+        # Between two views: an inference is never cut in half.
+        raise_if_cancelled(cancel)
         x, y, x1, y1 = bounds
         tensor, ratio, left, top = _letterbox(photo[y:y1, x:x1], np, cv2)
         try:
@@ -1732,6 +1767,7 @@ def detect_yolo_components(photo, length_mm, width_mm, model_path=None, log=None
                      "tessere più piccole o riesporta il modello con un max_det più alto.",
                      n_views=len(capped_views), total=len(views), cap=row_cap,
                      floor=_AUDIT_CONFIDENCE, views=", ".join(capped_views)))
+    raise_if_cancelled(cancel)
     retained = _nms(candidates, np, nms_trace, "global", nms_iou)
     # What no view saw whole comes back into play: above threshold as a
     # candidate, below threshold as a hypothesis to review, like any other.
@@ -1829,7 +1865,7 @@ def detect_yolo_components(photo, length_mm, width_mm, model_path=None, log=None
         body_height, height_basis = estimate if estimate is not None else (
             1.0, "estimated_placeholder_not_measured")
         components.append({
-            "name": f"YOLO candidate {identifier}", "kind": "generic",
+            "name": candidate_name(identifier), "kind": "generic",
             "x_mm": ((x0 + x1) / 2 - 0.5) * length_mm,
             "y_mm": ((y0 + y1) / 2 - 0.5) * width_mm,
             "length_mm": max(sx, sy), "width_mm": min(sx, sy),
@@ -1839,8 +1875,11 @@ def detect_yolo_components(photo, length_mm, width_mm, model_path=None, log=None
             "_height_basis": height_basis, "_height_estimated": True,
             "color_hex": "#303030", "marking": "", "confidence": "low",
             "_box": (x0, y0, x1, y1),
-            "_source": ("YOLO local, ricomposto da cucitura" if row.get("recovered_from")
-                        else "YOLO local"),
+            # A provenance CODE, not a sentence: it is sent to the paid
+            # reconciliation (photo_global_inventory, `source`), whose prompts
+            # are all in English; the Italian half of the rebuilt-body code
+            # broke that rule (review 2026-11-16, R8-8).
+            "_source": (RECOVERED_SOURCE if row.get("recovered_from") else LOCAL_SOURCE),
             "_uncertain": True, "_id": identifier,
             "_yolo_class": row["class"], "_yolo_confidence": row["confidence"],
             "_yolo_proposal_id": row["proposal_id"],
@@ -1912,7 +1951,13 @@ def detect_yolo_components(photo, length_mm, width_mm, model_path=None, log=None
                      on_body_surface=[{"proposal_id": child, "on_body_of": parent}
                                       for child, parent in on_body],
                      retained_detector_results=retained, components=components)
-        emit(f"YOLO local audit: {_write_audit(audit_dir, audit)}")
+        try:
+            emit(f"YOLO local audit: {_write_audit(audit_dir, audit)}")
+        except ValueError as exc:
+            # The detections are complete and already paid for in time: an
+            # audit that cannot be written is said, never a reason to lose them.
+            emit(warning("YOLO locale: registro di controllo non scritto ({exc}); le "
+                         "rilevazioni restano valide.", exc=exc))
     if audit_dir is not None or include_review_candidates:
         if include_review_candidates:
             emit(tx("YOLO locale: {n_review_proposals} ipotesi sotto la soglia operativa "

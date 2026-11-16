@@ -384,7 +384,12 @@ def test_prepare_photo_records_the_deskew_beside_the_source_fingerprint(monkeypa
     path = tmp_path / "board.png"
     path.write_bytes(b"not decoded: read_photo is stubbed")
     monkeypatch.setattr(inv, "read_photo", lambda _p: source)
-    frames = iter([None, SimpleNamespace(cx=45, cy=30, width_px=60, height_px=40)])
+    # The search on the photo as taken is `locate_board` (done once, its
+    # reason kept for the user: review 2026-11-16, R8-3); the search on the
+    # straightened photo is `find_board`.
+    monkeypatch.setattr(photo_refine, "locate_board", lambda *a: photo_refine.BoardSearch(
+        None, photo_refine.BOARD_NOT_FOUND))
+    frames = iter([SimpleNamespace(cx=45, cy=30, width_px=60, height_px=40)])
     monkeypatch.setattr(photo_refine, "find_board", lambda *a: next(frames))
     monkeypatch.setattr(photo_refine, "deskew_board_report", lambda *a: (straight, -3.0))
     boxes = []
