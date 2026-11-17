@@ -233,7 +233,7 @@ checkbox, one review window in two stages with the detector's reading kept besid
 three-section «Parametri» modal, phantom sides excluded by the photo, pulsing running mark,
 unread row spacing ignored, pad width at the pitch downgraded, lands measured on the photo)
 is 16476 passed,
-13 skipped and 19 subtests (2026-11-18, branch `FOOTPRINT-ADVANCE` merged into `main`, halves 9886/9/19 and 6590/4, no red, after release v1.0.10:
+13 skipped and 19 subtests (2026-11-18, branch `FOOTPRINT-ADVANCE` commit `43b67f8` merged into `main` as `a3b91e6`, halves 9886/9/19 and 6590/4, no red, after release v1.0.10:
 queued items closed -- KiCad's kicad_common.json read for the 3D and footprint libraries, review outcome told by the
 service (unreviewed weak proposals left out, truthful paid-request log), detector pre-flight off the GUI thread,
 imported library parts in document order (WRL and preview byte-stable), pypdf 6.21.4; see HANDOFF.md «STATO 18/11/2026»);
