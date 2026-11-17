@@ -1191,7 +1191,12 @@ def _inline_detail(text):
     return ' '.join(str(text).replace(';', ',').split())
 
 
-def paid_request_message(images, proposals, enumerating, detector_ran=False):
+def _count(value) -> int:
+    """A non-negative count from an optional caller value (anything else counts as 0)."""
+    return value if type(value) is int and value > 0 else 0
+
+
+def paid_request_message(images, proposals, enumerating, detector_ran=False, unapproved=0):
     """@brief The one progress line that announces the paid inventory request.
 
     @param images Number of images travelling in the request.
@@ -1200,6 +1205,11 @@ def paid_request_message(images, proposals, enumerating, detector_ran=False):
         model enumerates the bodies by itself.
     @param detector_ran True when the local detector DID run and found no
         body: the line then says so instead of «no local detector».
+    @param unapproved Proposals the detector DID make and that were left out
+        because nobody approved them (weak ones after a review that was not
+        done, low-confidence ones nobody kept). With `enumerating` and
+        `detector_ran` the line then says that, and not that the detector
+        found nothing, which would be false.
     @return One line stating that exactly one paid call is made and what it is
         for, with the count and the noun in agreement.
     @note The model identifier is deliberately absent: the modal already shows
@@ -1220,7 +1230,11 @@ def paid_request_message(images, proposals, enumerating, detector_ran=False):
                if images == 1 else
                tx("Inventario globale: una sola richiesta a pagamento con {images} immagini.",
                   images=images))
-    if enumerating and detector_ran:
+    if enumerating and detector_ran and unapproved:
+        work = tx("Proposte deboli del rilevatore locale che nessuno ha approvato: "
+                  "{unapproved}, lasciate fuori. È il modello di visione a elencare i corpi "
+                  "da zero.", unapproved=unapproved)
+    elif enumerating and detector_ran:
         work = tx("Il rilevatore locale non ha trovato corpi: è il modello di visione a "
                   "elencarli.")
     elif enumerating:
@@ -1588,7 +1602,8 @@ def _call_once(call, kwargs) -> dict:
 def review_global_inventory(photo, components, length, width, model, call, log, cache_dir=None,
                             *, verification_prompt=None, extra_instructions=None,
                             detector_ran=False, prompt=None, enumerate_prompt=None,
-                            enumerate_empty_prompt=None, step_models=None):
+                            enumerate_empty_prompt=None, step_models=None,
+                            unapproved_weak=0):
     """@brief Make one global semantic request, or replay a validated versioned cache.
     @param photo Calibrated BGR top photograph.
     @param components All YOLO candidates with unique integer IDs and global boxes.
@@ -1616,6 +1631,11 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
     @param detector_ran True when a local detector ran on this photograph. With
         no components it selects the enumeration prompt that says the detector
         ran and found nothing, instead of «NO local detector ran».
+    @param unapproved_weak Number of detector proposals the CALLER already
+        left out because a review was asked for and nobody answered it
+        (photo_inventory.extract_inventory). Only the progress line uses it,
+        together with the proposals withheld here: it never reaches the
+        request, the prompt or the cache key.
     @param prompt Profile field 'inventory_prompt' (request WITH detector
         candidates); None or blank sends PROMPT.
     @param enumerate_prompt Profile field 'inventory_enumerate_prompt' (no
@@ -1719,6 +1739,14 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
     # Without candidates there is nothing to reconcile: the prompt changes and
     # the numbered overlay drops, since it would be an empty copy of the photo.
     enumerating = not candidates
+    # When the detector did propose bodies but all of them were left out as
+    # unapproved (`withheld` here, `unapproved_weak` from the caller), the
+    # enumeration prompt chosen below still tells the model that «the
+    # detector left nothing». That is inexact, and deliberately kept: the
+    # model is asked the same thing either way (list the bodies from
+    # scratch), and another prompt would be a new entry of the prompt
+    # registry and would invalidate every cached answer. The LOG line tells
+    # the user the truth (`paid_request_message(unapproved=...)`).
     empty_detector = enumerating and detector_ran is True
     version = (ENUMERATION_AFTER_EMPTY_DETECTOR_PROMPT_VERSION if empty_detector
                else ENUMERATION_PROMPT_VERSION if enumerating else PROMPT_VERSION)
@@ -1782,7 +1810,8 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
             pass
     if data is None:
         images = sum(1 for block in content if block.get('type') == 'image_url')
-        log(paid_request_message(images, len(candidates), enumerating, empty_detector))
+        log(paid_request_message(images, len(candidates), enumerating, empty_detector,
+                                 unapproved=len(withheld) + _count(unapproved_weak)))
         data = _call_once(call, kwargs)
         # At most ONE extra paid call per run (user, 28/09:
         # «un solo nuovo tentativo» (a single new attempt); audit 138, A6):

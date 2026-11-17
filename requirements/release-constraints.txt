@@ -4,7 +4,7 @@
 # release build (Python 3.13.12). A constraint only pins a package that is
 # installed anyway; it never adds one. Pillow and certifi raised on
 # 2026-10-27 for the Dependabot advisories; pypdf added the same day (PDF
-# metadata stripping). Update it deliberately, together with the versions in
+# metadata stripping) and raised to 6.21.4 on 2026-11-17 (three advisories). Update it deliberately, together with the versions in
 # THIRD_PARTY_NOTICES.md, when a dependency changes.
 
 altgraph==0.17.5
@@ -38,7 +38,7 @@ Pygments==2.21.0
 pyinstaller==6.22.3
 pyinstaller-hooks-contrib==2026.7
 pyparsing==3.3.3
-pypdf==6.21.3
+pypdf==6.21.4
 PyQt6==6.11.0
 PyQt6-Qt6==6.11.2
 PyQt6_sip==13.12.0

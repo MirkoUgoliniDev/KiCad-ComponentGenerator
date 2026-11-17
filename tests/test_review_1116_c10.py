@@ -590,9 +590,10 @@ class _ReviewWorker:
         self._analysis_revision = revision
         self.delivered = "nothing"
 
-    def deliver_review(self, kept):
-        """@brief Record what the window delivered."""
+    def deliver_review(self, kept, reviewed=True):
+        """@brief Record what the window delivered, and whether as reviewed."""
         self.delivered = kept
+        self.reviewed = reviewed
 
 
 PROPOSALS = [{"name": "U1", "x_mm": 0.0}, {"name": "C1", "x_mm": 1.0, "_yolo_review_only": True}]
@@ -611,7 +612,16 @@ def _review_setup(window, monkeypatch):
 
 
 def test_r1_2_a_review_view_that_fails_delivers_an_unreviewed_set(window, monkeypatch):
-    """@brief Positive: weak proposals are dropped, the bundle is unreviewed, the mark not set."""
+    """@brief Positive: every proposal is delivered as NOT reviewed, the bundle is unreviewed.
+
+    @note CONTRACT CHANGED 2026-11-17 (R1-2, service side): the window no
+        longer drops the weak proposals nor marks the worker
+        `_review_unreviewed` for a later correction of the result. It
+        delivers the whole set with `reviewed=False` and the service treats
+        it as it does without a reviewer (`photo_inventory.review_outcome`;
+        the weak ones are left out by `yolo_only_components`, or judged by
+        the paid reconciliation). Service side: tests/test_review_1117_b.py.
+    """
     from kicadgen.gui import photo_review_dialog
     worker, bundles = _review_setup(window, monkeypatch)
 
@@ -620,12 +630,12 @@ def test_r1_2_a_review_view_that_fails_delivers_an_unreviewed_set(window, monkey
     monkeypatch.setattr(photo_review_dialog, "PhotoReviewDialog", broken)
     try:
         window._on_review_requested(b"png", PROPOSALS, 10.0, 10.0)
-        assert [p["name"] for p in worker.delivered] == ["U1"]
+        assert [p["name"] for p in worker.delivered] == ["U1", "C1"]
+        assert worker.reviewed is False                # the service is told
         assert len(bundles) == 1
         rows, reviewed = bundles[0]
         assert reviewed is False and [p["name"] for p in rows] == ["U1", "C1"]
         assert window._reviewed_this_extraction is False
-        assert worker._review_unreviewed is True       # the run's result is corrected
     finally:
         window._extract_worker = None
 
@@ -648,7 +658,7 @@ def test_r1_2_an_answered_review_delivers_the_users_choice(window, monkeypatch):
         assert [p["name"] for p in worker.delivered] == ["C1"]
         assert bundles[0][1] is True
         assert window._reviewed_this_extraction is True
-        assert not getattr(worker, "_review_unreviewed", False)
+        assert worker.reviewed is True
     finally:
         window._extract_worker = None
 
@@ -1401,20 +1411,18 @@ def test_r1_6_a_real_failure_stays_a_failure(monkeypatch, qapp):
     worker.deleteLater()
 
 
-def test_r1_2_a_failed_review_run_never_claims_user_reviewed_bodies(window):
-    """@brief Positive: the bodies of a run whose review failed lose «reviewed by the user»."""
-    worker = SimpleNamespace(_review_unreviewed=True)
-    bodies = [{"name": "U1", "_presence_reviewed_by_user": True}, {"name": "C1"}]
-    assert window._unmark_user_reviewed_presence(worker, bodies) == 1
-    assert bodies[0]["_presence_reviewed_by_user"] is False and "_presence_reviewed_by_user" not in bodies[1]
+def test_r1_2_the_window_no_longer_corrects_the_result_of_a_failed_review(window):
+    """@brief The window-side correction of «reviewed by the user» is gone: the service never stamps it.
 
-
-def test_r1_2_a_reviewed_run_keeps_its_bodies_as_reviewed(window):
-    """@brief Negative: a run the user reviewed (or a direct call) is left alone."""
-    bodies = [{"name": "U1", "_presence_reviewed_by_user": True}]
-    assert window._unmark_user_reviewed_presence(SimpleNamespace(), bodies) == 0
-    assert window._unmark_user_reviewed_presence(None, bodies) == 0
-    assert bodies[0]["_presence_reviewed_by_user"] is True
+    @note CONTRACT CHANGED 2026-11-17 (R1-2, service side): the two tests of
+        `_unmark_user_reviewed_presence` (a failed-review run loses the
+        stamp, a reviewed run keeps it) tested a patch on the result that
+        no longer exists. The same pair is now tested where the stamp is
+        written, in tests/test_review_1117_b.py
+        (`test_r1_2_a_review_that_raises_marks_nothing_reviewed`,
+        `test_r1_2_an_answered_review_marks_the_kept_bodies_reviewed`).
+    """
+    assert not hasattr(window, "_unmark_user_reviewed_presence")
 
 
 # ── Final review follow-up ───────────────────────────────────────────────────

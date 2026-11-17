@@ -14,6 +14,7 @@ import re
 import time
 import uuid
 from collections import deque
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -87,6 +88,65 @@ class ReviewCancelled(Exception):
         carrying on anyway, that is, paying for the reconciliation of the
         proposals that were just rejected.
     """
+
+
+@dataclass(frozen=True)
+class ProposalReview:
+    """@brief What a detector-proposal review answered, and whether a person really looked.
+
+    The richer return value of the `review_proposals` callback of
+    `extract_inventory` (review 2026-11-16, R1-2).
+    @note `kept` None cancels the extraction, whatever `reviewed` says.
+    @note `reviewed` False means nobody looked at the proposals (the review
+        view could not open, or the reviewer declined). `kept` is then only
+        «not cancelled»: its rows are NOT a selection and are not used. The
+        service goes on with the detector's own proposals, the confident
+        ones unreviewed (nothing is stamped «reviewed by the user») and the
+        ones left for a person (`left_for_review`) left out.
+    """
+
+    #: Proposals to keep; None cancels the extraction.
+    kept: Optional[list]
+    #: True only when a person answered the review.
+    reviewed: bool = True
+
+
+def review_outcome(answer):
+    """@brief Normalise what a `review_proposals` callback returned.
+
+    @param answer None (cancelled), a ProposalReview, a `(kept, reviewed)`
+        pair, or -- the contract before 2026-11-17, still valid -- a plain
+        sequence of the proposals kept, which counts as reviewed.
+    @return ProposalReview; `kept` is None for a cancellation, a list
+        otherwise; `reviewed` is a plain bool (the truth value of the flag
+        given, so a numpy.bool_ counts like a bool).
+    @note The pair is told from a legacy two-proposal tuple by STRUCTURE,
+        not by the flag's type: a proposal is a mapping, so a 2-tuple whose
+        items are both mappings is two proposals; one whose first item is
+        None or a non-mapping collection and whose second is not a mapping
+        is `(kept, reviewed)`.
+    """
+    if isinstance(answer, ProposalReview):
+        kept, reviewed = answer.kept, answer.reviewed
+    elif (isinstance(answer, tuple) and len(answer) == 2
+          and not isinstance(answer[1], Mapping)
+          and (answer[0] is None or (isinstance(answer[0], (list, tuple))))):
+        kept, reviewed = answer
+    else:
+        kept, reviewed = answer, True
+    return ProposalReview(None if kept is None else list(kept), bool(reviewed))
+
+
+def left_for_review(proposal) -> bool:
+    """@brief Whether a detector proposal still waits for a person before anything uses it.
+
+    @param proposal Detector proposal.
+    @return True for a weak proposal (`_yolo_review_only`) or a
+        low-confidence one nobody kept (`photo_yolo.awaiting_user_keep`).
+    """
+    from .photo_yolo import awaiting_user_keep
+    return isinstance(proposal, Mapping) and (
+        bool(proposal.get('_yolo_review_only')) or awaiting_user_keep(proposal))
 
 
 @dataclass
@@ -2131,7 +2191,16 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
     @param review_proposals Optional callable(photo_png, proposals, length_mm,
         width_mm) -> proposals kept. Runs between the local detector and the
         paid reconciliation, so a body removed here is never sent nor paid for.
-        Returning None aborts. The board extents travel with the call because
+        Returning None aborts. It may also return a ProposalReview or a
+        `(kept, reviewed)` pair (see `review_outcome`): `reviewed` False says
+        that nobody looked, and then -- as when the callback raises or
+        returns no answer, which is reported with one warning -- the rows
+        handed back are ignored: of the detector's own proposals, those
+        left for a person (`left_for_review`) stay out and the others go on
+        unreviewed: no body is stamped `_presence_reviewed_by_user`,
+        `reviewed_proposal_count` is not recorded, and an empty set is not
+        taken for «the reviewer removed everything». A plain sequence counts
+        as reviewed. The board extents travel with the call because
         they are the calibration the boxes were measured against: a reviewer
         that read them elsewhere would place a hand-drawn body on a different
         scale than the detector's.
@@ -2531,6 +2600,13 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
                 photo, proposals, [row for i, row in enumerate(before_filter) if i in dropped])
             save_inventory_evidence(cache_dir, None, detector_png, proposals, log,
                                     label='detector')
+        # True only when a person answered the review of THESE proposals:
+        # a callback that exists but failed or declined is not a review (R1-2).
+        proposals_reviewed = False
+        # Weak proposals left out because a requested review was not done:
+        # the paid step's progress line must not say «the detector found
+        # nothing» for them.
+        unapproved_weak = 0
         if proposals and review_proposals is not None:
             # Prune here, not later: the reconciliation that follows is paid,
             # and receiving it cleaner costs less and gives it less noise to
@@ -2540,31 +2616,93 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
             # open the review window (review 2026-11-16, R8-2), and pressed
             # while it was open it must not let the paid calls start.
             check_cancel()
-            kept = review_proposals(report.photo_png, proposals, length, width)
+            failure = None
+            try:
+                outcome = review_outcome(
+                    review_proposals(report.photo_png, proposals, length, width))
+            except (ReviewCancelled, CallCancelled):
+                # A decision to stop, never a failure of the review.
+                raise
+            except Exception as exc:  # noqa: BLE001 - a broken review must not lose the run
+                # Review 2026-11-16, R1-2: a review that raised (or returned
+                # something that is not an answer) is not a review.
+                failure = exc
+                outcome = ProposalReview(list(proposals), False)
+            kept = outcome.kept
             if kept is None:
                 raise ReviewCancelled(tx("Revisione dei corpi rilevati annullata."))
             check_cancel()
-            log(tx("Revisione dei corpi: {n_kept} proposte tenute su {n_proposals}.",
-                   n_kept=len(kept),
-                   n_proposals=len(proposals)))
-            report.calibration['reviewed_proposal_count'] = len(kept)
-            if not kept and detector in ('yolo', 'yolo_smd'):
-                # The reviewer removed EVERYTHING, on purpose: it is not
-                # «nessun rilevatore» (no detector), and paying for an
-                # enumeration from scratch would redo the work just rejected.
-                # It stops here, without calls, and says so; the photo
-                # inventory stays empty.
-                warn(tx("Revisione dei corpi: tutte le {n_proposals} proposte sono state "
-                        "tolte; nessuna richiesta a pagamento, l'inventario fotografico "
-                        "resta vuoto.", n_proposals=len(proposals)))
-                report.calibration['detector'] = detector
-                report.calibration['proposal_count'] = 0
-                report.calibration['inventory_strategy'] = 'review-kept-none'
-                announce('', '')
-                return report
+            proposals_reviewed = outcome.reviewed
+            if proposals_reviewed:
+                log(tx("Revisione dei corpi: {n_kept} proposte tenute su {n_proposals}.",
+                       n_kept=len(kept),
+                       n_proposals=len(proposals)))
+                report.calibration['reviewed_proposal_count'] = len(kept)
+                if not kept and detector in ('yolo', 'yolo_smd'):
+                    # The reviewer removed EVERYTHING, on purpose: it is not
+                    # «nessun rilevatore» (no detector), and paying for an
+                    # enumeration from scratch would redo the work just rejected.
+                    # It stops here, without calls, and says so; the photo
+                    # inventory stays empty. Only a PERSON removes everything:
+                    # an unreviewed empty set never comes here.
+                    warn(tx("Revisione dei corpi: tutte le {n_proposals} proposte sono state "
+                            "tolte; nessuna richiesta a pagamento, l'inventario fotografico "
+                            "resta vuoto.", n_proposals=len(proposals)))
+                    report.calibration['detector'] = detector
+                    report.calibration['proposal_count'] = 0
+                    report.calibration['inventory_strategy'] = 'review-kept-none'
+                    announce('', '')
+                    return report
+            else:
+                # A review was asked for and nobody answered it: what the
+                # detector left for a person to approve stays out, on every
+                # route, so that nobody pays for (or builds on) proposals
+                # that were not approved; the confident ones go on, never
+                # stamped as reviewed. Stated here and not left to the later
+                # steps: `yolo_only_components` leaves out the same rows for
+                # an unreviewed set, and the paid reconciliation withholds
+                # only the ones flagged `_yolo_low_confidence`
+                # (split_ai_candidates) -- the detector sets both flags
+                # together, a saved or hand-built row may carry only
+                # `_yolo_review_only`.
+                # With NO review callback this block does not run and nothing
+                # changes: nobody was promised a look, and the paid step's own
+                # filter (split_ai_candidates) is the declared rule there.
+                # Counted on the DETECTOR's set, never on what the callback
+                # handed back (review 2026-11-17, round 4): an answer nobody
+                # reviewed is not a selection. Whatever rows it carries, the
+                # detector's confident proposals go on and its weak ones stay
+                # out, so «left out» is always exactly the weak ones and the
+                # paid step is never told that the detector found nothing
+                # when it did.
+                strong = [row for row in proposals if not left_for_review(row)]
+                n_weak = len(proposals) - len(strong)
+                kept = strong
+                unapproved_weak = n_weak
+                # One warning per failed review (report and log, like the
+                # sibling «tutte le proposte sono state tolte»): why, how
+                # many go on, how many stay out, and -- before the call --
+                # that the paid route will now enumerate from scratch.
+                # Whole sentences per count, so each translates on its own.
+                cause = (tx("Revisione dei corpi non riuscita ({exc}).", exc=failure)
+                         if failure is not None else tx("Revisione dei corpi non eseguita."))
+                going = (tx(" Nessuna proposta prosegue.") if not kept else
+                         tx(" 1 proposta prosegue come NON rivista.") if len(kept) == 1 else
+                         tx(" {n_kept} proposte proseguono come NON riviste.", n_kept=len(kept)))
+                out = ("" if not n_weak else
+                       tx(" 1 proposta debole (sotto la soglia operativa) resta fuori: "
+                          "nessuno l'ha approvata.") if n_weak == 1 else
+                       tx(" {n_weak} proposte deboli (sotto la soglia operativa) restano "
+                          "fuori: nessuno le ha approvate.", n_weak=n_weak))
+                # User decision 2026-11-17 («Prosegui con l'AI»): with nothing
+                # left the paid route still asks the model to list the bodies
+                # from scratch; it is said here, before the request.
+                scratch = (tx(" L'AI elencherà i corpi da zero con una richiesta a pagamento.")
+                           if not kept and detector == 'yolo' else "")
+                warn(cause + going + out + scratch)
             proposals = list(kept)
         if detector == 'yolo_smd':
-            rows = yolo_only_components(proposals, reviewed=review_proposals is not None, log=log)
+            rows = yolo_only_components(proposals, reviewed=proposals_reviewed, log=log)
             if rows:
                 if source_frame is None:
                     raise ValueError(tx("Foto completa non disponibile per i ritagli SMD"))
@@ -2593,7 +2731,7 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
             # No paid reconciliation: what the detector proposed and the
             # review kept is the inventory. Only free steps on the crop pixels.
             report.components = yolo_only_components(
-                proposals, reviewed=review_proposals is not None, log=log)
+                proposals, reviewed=proposals_reviewed, log=log)
             sample_body_colors(photo, report.components, log)
             report.calibration['detector'] = detector
             report.calibration['proposal_count'] = len(proposals)
@@ -2627,6 +2765,9 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
             cache_dir, verification_prompt=verification_prompt,
             extra_instructions=extra_instructions,
             **({'detector_ran': True} if detector in LOCAL_DETECTORS else {}),
+            # Only when there is something to say: a replacement that predates
+            # the keyword (a test double) keeps working.
+            **({'unapproved_weak': unapproved_weak} if unapproved_weak else {}),
             **_inventory_prompt_kwargs(prompts))
         flag_ai_bodies_on_edge_contacts(photo, report.components, declared, length, width, log,
                                         enumerated=not _sent_to_ai(proposals))

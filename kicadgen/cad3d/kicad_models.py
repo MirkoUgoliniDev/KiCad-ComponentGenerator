@@ -39,6 +39,7 @@ import math
 import os
 import re
 import sqlite3
+import sys
 import threading
 import time
 from contextlib import contextmanager
@@ -356,19 +357,275 @@ _INSTALL_BASES = (r"C:\Program Files\KiCad", r"C:\Program Files (x86)\KiCad")
 #: it here (2026-11-16 review, R10-5).
 _VERSIONED_MODEL_ENV = re.compile(r"KICAD(\d+)_3DMODEL_DIR", re.IGNORECASE)
 _VERSIONED_THIRD_PARTY_ENV = re.compile(r"KICAD(\d+)_3RD_PARTY", re.IGNORECASE)
+#: The footprint libraries of one KiCad major: the footprints have their own
+#: variable, so moving the 3D models does not move them (2026-11-17 review).
+_VERSIONED_FOOTPRINT_ENV = re.compile(r"KICAD(\d+)_FOOTPRINT_DIR", re.IGNORECASE)
+
+
+#: Minor number KiCad gives its development builds (``9.99`` is the nightly
+#: that becomes 10). A KiCad fact, not a tuned value: such a build reads the
+#: path variables of the NEXT major (``KICAD10_...``) and keeps its settings
+#: in a ``9.99`` folder.
+_NIGHTLY_MINOR = 99
+
+#: KiCad's settings file, one per ``<major>.<minor>`` configuration folder.
+#: «Configure Paths» stores the user's path variables under
+#: ``environment.vars`` (a mapping name -> path, or null when none is set).
+KICAD_COMMON_FILENAME = "kicad_common.json"
+
+#: Bytes of a settings file worth parsing: a real one is a few kilobytes. A
+#: resource budget against a wrong or damaged file, not a measurement.
+_KICAD_COMMON_MAX_BYTES = 4 * 1024 * 1024
+
+#: Source ranks of the library candidates, most explicit first; they decide
+#: only between candidates of the same version (`_newest_first`).
+_RANK_ENVIRONMENT, _RANK_SETTINGS, _RANK_SETTINGS_UNVERSIONED = 0, 1, 2
+_RANK_PROGRAM_ROOT, _RANK_REGISTRY = 3, 4
+
+
+def _series_version(major: int) -> tuple:
+    """Version of a path variable ``KICAD<major>_...``: every release of that major.
+
+    A variable names a major only, while an installation is read as
+    ``10.0`` (folder) or ``10.0.1`` (registry). Compared as (10,), the
+    variable lost to the default library of the same KiCad as soon as the
+    registry declared a patch number, which is the normal case. It therefore
+    ranks above every stable release of its major and below the nightly of
+    the next one (minor `_NIGHTLY_MINOR`), which reads other variables.
+    """
+    return (int(major), _NIGHTLY_MINOR - 0.5)
+
+
+def _series_of(version) -> int:
+    """KiCad major whose path variables a version reads (``10.0.1`` -> 10, nightly ``9.99`` -> 10)."""
+    return int(version[0]) + (1 if tuple(version[1:2]) == (_NIGHTLY_MINOR,) else 0)
+
+
+#: Seconds after which a FAILED folder probe is remembered.
+#: A resource budget, not a measurement: a missing local folder answers in
+#: well under a millisecond, an unreachable network share after a second or
+#: more, and the search runs on the GUI thread at every lookup outside a
+#: `listing_scope`. A fast failure is never remembered, so a KiCad installed
+#: while the program runs is still found.
+_SLOW_PROBE_S = 0.5
+
+#: Seconds a folder stays remembered as unreachable before it is probed
+#: again. A resource budget, not a tuned value: the order of a user who
+#: reconnects a share or a VPN and repeats the action, so a library that
+#: came back is found without restarting the program, while a share that is
+#: still down costs one slow probe per interval instead of one per lookup.
+_UNREACHABLE_RETRY_S = 30.0
+
+#: Folders whose probe failed slowly (normalised spelling -> monotonic time
+#: of the last slow failure). Process memory only, like `_UNSTARTED_READERS`.
+#: An entry stays until the folder answers again, also past its expiry, so
+#: one outage is logged once and not at every retry.
+_UNREACHABLE_ROOTS: dict = {}
+_UNREACHABLE_ROOTS_LOCK = threading.Lock()
+
+
+def _monotonic() -> float:
+    """The clock of the unreachable-folder memo (one seam for the tests' fake clock)."""
+    return time.monotonic()
+
+
+def forget_unreachable_roots() -> None:
+    """@brief Forget the folders remembered as unreachable, so the next search probes them again.
+
+    @note For tests and for a caller that knows the network came back; the
+        memo otherwise expires by itself after `_UNREACHABLE_RETRY_S`.
+    """
+    with _UNREACHABLE_ROOTS_LOCK:
+        _UNREACHABLE_ROOTS.clear()
+
+
+def _reachable_dir(path) -> bool:
+    """Whether `path` is a folder, paying a slow failed probe once per retry interval.
+
+    A probe that fails (not a folder, or an OSError) after `_SLOW_PROBE_S`
+    or more is remembered and answered False without touching the disk
+    (2026-11-17 review: a stored path on an unreachable share cost over a
+    second at every lookup). The memory EXPIRES: `_UNREACHABLE_RETRY_S`
+    after the failure the folder is probed again, so a share that came back
+    is found without a restart. Successes and fast failures are never
+    remembered; the first slow failure of an outage is logged, once.
+    """
+    key = os.path.normcase(os.path.normpath(str(path)))
+    with _UNREACHABLE_ROOTS_LOCK:
+        failed_at = _UNREACHABLE_ROOTS.get(key)
+    if failed_at is not None and _monotonic() - failed_at < _UNREACHABLE_RETRY_S:
+        return False
+    started = _monotonic()
+    try:
+        found = Path(path).is_dir()
+    except OSError:
+        found = False
+    finished = _monotonic()
+    slow_failure = not found and finished - started >= _SLOW_PROBE_S
+    with _UNREACHABLE_ROOTS_LOCK:
+        known = key in _UNREACHABLE_ROOTS
+        if slow_failure:
+            _UNREACHABLE_ROOTS[key] = finished
+        else:
+            # It answered (a folder, or a fast «not there»): the outage is over.
+            _UNREACHABLE_ROOTS.pop(key, None)
+    if slow_failure and not known:
+        logging.getLogger(__name__).warning(
+            "folder %s did not answer within %.1f s: not searched again for %.0f s",
+            path, _SLOW_PROBE_S, _UNREACHABLE_RETRY_S)
+    return found
 
 
 def _versioned_env_folders(pattern) -> list:
     """(version, folder) named by the environment variables matching `pattern`.
 
-    The version is the variable's own suffix (``KICAD9_...`` -> (9,)).
+    The version is the variable's own suffix, as a whole major series
+    (``KICAD9_...`` -> `_series_version(9)`).
     """
     found = []
     for name, value in os.environ.items():
         match = pattern.fullmatch(name)
         if match and value.strip():
-            found.append(((int(match.group(1)),), Path(value.strip())))
+            found.append((_series_version(int(match.group(1))), Path(value.strip())))
     return found
+
+
+def _kicad_config_homes() -> list:
+    """Folders holding one ``<major>.<minor>`` settings folder per KiCad version.
+
+    Mirrors KiCad's own rule (the one `kicad_library.resolve_global_fp_lib_table`
+    follows): ``KICAD_CONFIG_HOME`` alone when it is set, otherwise the
+    platform default -- ``%APPDATA%/kicad``, ``~/Library/Preferences/kicad``
+    or ``$XDG_CONFIG_HOME/kicad``.
+    """
+    override = (os.environ.get("KICAD_CONFIG_HOME") or "").strip()
+    try:
+        if override:
+            return [Path(override).expanduser()]
+        if sys.platform == "win32":
+            base = os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming"
+        elif sys.platform == "darwin":
+            base = Path.home() / "Library" / "Preferences"
+        else:
+            base = os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config"
+        return [Path(base) / "kicad"]
+    except (RuntimeError, OSError, ValueError):
+        # No resolvable home folder: there is no settings folder to read.
+        return []
+
+
+def _settings_path_variables(folder: Path) -> dict:
+    """``environment.vars`` of one settings folder: name -> path text, {} when unusable.
+
+    Never raises: a missing, oversized, unreadable or malformed file, a
+    document that is not an object, ``environment`` or ``vars`` null or of
+    another type all give {}; inside a valid mapping only the entries whose
+    name and value are both non-blank strings are kept.
+    """
+    path = Path(folder) / KICAD_COMMON_FILENAME
+    try:
+        if not path.is_file() or path.stat().st_size > _KICAD_COMMON_MAX_BYTES:
+            return {}
+        document = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError, RecursionError):
+        # ValueError covers both a broken encoding and broken JSON.
+        return {}
+    environment = document.get("environment") if isinstance(document, dict) else None
+    variables = environment.get("vars") if isinstance(environment, dict) else None
+    if not isinstance(variables, dict):
+        return {}
+    return {name: value.strip() for name, value in variables.items()
+            if isinstance(name, str) and isinstance(value, str) and value.strip()}
+
+
+def _settings_folders(pattern, unversioned: Optional[str] = None) -> list:
+    """(version, rank, folder) of the folders set in KiCad's «Configure Paths» for `pattern`.
+
+    Every ``<major>.<minor>`` settings folder is read (`_settings_path_variables`).
+    What counts in the folder of KiCad N:
+
+    * the variable matching `pattern` whose number is N (``KICAD<N>_3DMODEL_DIR``),
+      the one that KiCad reads (for a nightly ``N-1.99`` folder it is the
+      next major's). A variable of ANOTHER major found there is a leftover
+      that no KiCad resolves for its library, and is ignored;
+    * the variable named `unversioned`, when given, one rank below.
+
+    Precedence, as in KiCad: a variable of the same name set in the process
+    environment replaces the stored one, which is dropped here and not
+    merely outranked. Only ABSOLUTE paths are accepted: a stored value is
+    never expanded, so a relative one would resolve against this program's
+    working folder and ``~``, ``$HOME/...``, ``%USERPROFILE%\\...`` would be
+    taken literally; a value that refers to another variable (``${...}``)
+    is skipped as well, resolving it would need KiCad's whole variable
+    table. Folders without a numeric name are skipped: their KiCad version,
+    hence the variable they read, is unknown.
+    """
+    def read():
+        """Scan every settings folder once (per `_listing_scope`)."""
+        in_environment = {name.upper() for name, value in os.environ.items() if value.strip()}
+        found = []
+        for home in _kicad_config_homes():
+            for version, folder in _version_folders(home):
+                if not version:
+                    continue
+                series = _series_of(version)
+                for name, value in _settings_path_variables(folder).items():
+                    if name.upper() in in_environment or "${" in value:
+                        continue
+                    match = pattern.fullmatch(name)
+                    if match and int(match.group(1)) == series:
+                        rank = _RANK_SETTINGS
+                    elif unversioned and name.upper() == unversioned.upper():
+                        rank = _RANK_SETTINGS_UNVERSIONED
+                    else:
+                        continue
+                    try:
+                        if not Path(value).is_absolute():
+                            continue
+                    except (OSError, ValueError):
+                        continue
+                    found.append((_series_version(series), rank, Path(value)))
+        return found
+    return _scope_lookup(("kicad_settings_folders", pattern.pattern, unversioned), read)
+
+
+def _settings_model_folders() -> list:
+    """(version, rank, folder) of the 3D libraries set in «Configure Paths» (`_settings_folders`)."""
+    return _settings_folders(_VERSIONED_MODEL_ENV, LIBRARY_ENV)
+
+
+def _library_candidates(pattern, subfolder: str, unversioned: Optional[str] = None) -> tuple:
+    """Candidates (version, rank, folder) of one KiCad library kind: (ranked, last resort).
+
+    `pattern` is the kind's versioned variable and `subfolder` its folder
+    under an installation's ``share/kicad`` (``3dmodels``, ``footprints``).
+    Ranked: the variables of the process environment, the ones stored in
+    the settings files and the installations (program roots, registry).
+
+    A stored variable ranks with its KiCad only when a KiCad of that major
+    is actually found among the installations (2026-11-17 review). KiCad
+    never deletes the settings folder of a version that was uninstalled:
+    without this check a path left in an old folder beat an installed KiCad
+    whose version cannot be read (a folder without a numeric name and no
+    declared version, or the unversioned Unix/macOS defaults). The other
+    stored variables are returned apart, to be tried after every installed
+    library. Declared limit: where NO installation shows a version (a
+    plain Linux/macOS install), every stored variable is a last resort,
+    also the one of the KiCad in use; the process environment still wins.
+    """
+    ranked = [(version, _RANK_ENVIRONMENT, folder)
+              for version, folder in _versioned_env_folders(pattern)]
+    installed = []
+    for root in _install_bases():
+        installed.extend((version, _RANK_PROGRAM_ROOT, folder / "share" / "kicad" / subfolder)
+                         for version, folder in _version_folders(root))
+    installed.extend((version, _RANK_REGISTRY, folder.parent / subfolder)
+                     for version, folder in _registered_model_roots())
+    series = {_series_of(version) for version, _rank, _folder in installed if version}
+    last_resort = []
+    for entry in _settings_folders(pattern, unversioned):
+        (ranked if _series_of(entry[0]) in series else last_resort).append(entry)
+    return ranked + installed, last_resort
 
 
 def _version_key(version) -> tuple:
@@ -388,6 +645,9 @@ def _newest_first(candidates) -> list:
         decides; at equal version the more explicit source (lower rank: a
         variable, then a program root, then the registry) wins; folders
         without a readable version come after every versioned one.
+    @note 2026-11-17 review: a path variable carries `_series_version`, so
+        it outranks every stable release of its major (``10.0``, ``10.0.1``)
+        whatever the patch number the registry declares.
     """
     indexed = list(enumerate(candidates))
     versioned = [(index, item) for index, item in indexed if item[0] is not None]
@@ -509,21 +769,23 @@ def _candidate_roots() -> Iterable[Path]:
 
     Order: the program's own override (`LIBRARY_ENV`, unversioned and
     explicit), then every KiCad library found -- KiCad's versioned variables
-    (``KICAD<ver>_3DMODEL_DIR``), the installations under every declared
-    program root, those declared in the registry -- ordered NEWEST KICAD
-    FIRST whatever the source (`_newest_first`); then the user's 3rd-party
+    (``KICAD<ver>_3DMODEL_DIR``) in the process environment, the same
+    variables stored by «Configure Paths» in each version's
+    ``kicad_common.json`` (`_settings_folders`), the installations
+    under every declared program root, those declared in the registry --
+    ordered NEWEST KICAD FIRST whatever the source (`_newest_first`). Within
+    one KiCad major: environment, then settings file, then the default
+    installation path -- the environment overrides the file as in KiCad, and
+    a path the user set outranks the default one. Then the user's 3rd-party
     repositories (``KICAD<ver>_3RD_PARTY`` and the Documents folder Windows
-    declares), newest first too, and the Unix/macOS defaults.
+    declares), newest first too, the Unix/macOS defaults, and last the
+    paths stored in the settings folder of a KiCad that is not found
+    installed (`_library_candidates`).
     """
     override = os.environ.get(LIBRARY_ENV)
     if override:
         yield Path(override)
-    libraries = [(version, 0, folder)
-                 for version, folder in _versioned_env_folders(_VERSIONED_MODEL_ENV)]
-    for root in _install_bases():
-        libraries.extend((version, 1, folder / "share" / "kicad" / "3dmodels")
-                         for version, folder in _version_folders(root))
-    libraries.extend((version, 2, folder) for version, folder in _registered_model_roots())
+    libraries, last_resort = _library_candidates(_VERSIONED_MODEL_ENV, "3dmodels", LIBRARY_ENV)
     yield from _newest_first(libraries)
     # KiCad keeps the 3rd-party libraries installed by the user outside
     # Program Files. Every repository can have its own
@@ -539,6 +801,73 @@ def _candidate_roots() -> Iterable[Path]:
     for base in ("/usr/share/kicad/3dmodels", "/usr/local/share/kicad/3dmodels",
                  "/Applications/KiCad/KiCad.app/Contents/SharedSupport/3dmodels"):
         yield Path(base)
+    yield from _newest_first(last_resort)
+
+
+def _candidate_footprint_roots() -> Iterable[Path]:
+    """Folders to search for KiCad's footprint libraries, most explicit first.
+
+    The footprints have their OWN sources and are not «the folder beside
+    the 3D library»: ``KICAD<ver>_FOOTPRINT_DIR`` (process environment,
+    then «Configure Paths», same rules as the 3D variable) and the
+    ``footprints`` folder of every installation. The folder beside a 3D
+    library named by a variable is still offered, right after the footprint
+    variable of the same source: whoever moved the whole ``share/kicad``
+    tree moved both. Newest KiCad first (`_newest_first`); the folder beside
+    the program's own override (`LIBRARY_ENV`) comes before everything, the
+    Unix/macOS defaults and the last-resort stored paths at the end.
+    """
+    override = os.environ.get(LIBRARY_ENV)
+    if override:
+        yield Path(override).parent / "footprints"
+    footprints, last_resort = _library_candidates(_VERSIONED_FOOTPRINT_ENV, "footprints")
+    models, models_last = _library_candidates(_VERSIONED_MODEL_ENV, "3dmodels", LIBRARY_ENV)
+
+    def beside(entries):
+        """Folders beside the 3D libraries named by a variable, half a rank after it."""
+        return [(version, rank + 0.5, folder.parent / "footprints")
+                for version, rank, folder in entries if rank < _RANK_PROGRAM_ROOT]
+    yield from _newest_first(footprints + beside(models))
+    for base in ("/usr/share/kicad/footprints", "/usr/local/share/kicad/footprints",
+                 "/Applications/KiCad/KiCad.app/Contents/SharedSupport/footprints"):
+        yield Path(base)
+    yield from _newest_first(last_resort + beside(models_last))
+
+
+def footprints_root(library: Optional[Path] = None) -> Optional[Path]:
+    """@brief Find KiCad's ``footprints`` folder, or return None.
+
+    @param library 3D model root the footprints are wanted for. Its sibling
+        ``footprints`` folder is used when it exists (the layout of an
+        installation, and of a caller's own tree). When it does not, the
+        search below is used only if `library` is the library this machine
+        found (`find_library`): the footprints of the installed KiCad say
+        nothing about the models of an arbitrary folder. None searches.
+    @return The first folder of `_candidate_footprint_roots` holding at least
+        one ``*.pretty`` library, or None.
+    @note 2026-11-17 review: the folder used to be the parent of the primary
+        3D root only, so a 3D library moved in «Configure Paths» to a folder
+        without a sibling ``footprints`` silently lost the footprint
+        witnesses and the land-pattern evidence.
+    """
+    if library is not None:
+        sibling = Path(library).parent / "footprints"
+        if _reachable_dir(sibling):
+            return sibling
+        primary = find_library()
+        if primary is None or _path_key(primary) != _path_key(library):
+            return None
+
+    def search():
+        """First candidate that holds footprint libraries."""
+        for root in _candidate_footprint_roots():
+            try:
+                if _reachable_dir(root) and any(root.glob("*.pretty")):
+                    return root
+            except OSError:
+                continue
+        return None
+    return _scope_lookup(("kicad_footprints_root",), search)
 
 
 def _search_roots(library: Optional[Path]) -> list[Path]:
@@ -559,7 +888,7 @@ def _search_roots(library: Optional[Path]) -> list[Path]:
         if root in result:
             continue
         try:
-            if root.is_dir() and (index == 0 or any(root.glob("*.3dshapes"))):
+            if _reachable_dir(root) and (index == 0 or any(root.glob("*.3dshapes"))):
                 result.append(root)
         except OSError:
             continue
@@ -576,7 +905,7 @@ def find_library() -> Optional[Path]:
     """
     for root in _candidate_roots():
         try:
-            if root.is_dir() and any(root.glob("*.3dshapes")):
+            if _reachable_dir(root) and any(root.glob("*.3dshapes")):
                 return root
         except OSError:
             continue
@@ -1680,7 +2009,8 @@ def footprint_sizes(paths, library: Optional[Path] = None, log=None, *, cancel=N
     """@brief Read copper land-pattern envelopes linked to candidate solids.
 
     @param paths Candidate STEP paths (only explicit model links are accepted).
-    @param library Model root; footprints are read from its sibling directory.
+    @param library Model root; footprints are read from the folder
+        `footprints_root` finds for it (its sibling directory first).
     @param log Optional diagnostic callback.
     @param cancel Optional cancellation channel (`is_set()`), None = not
         interruptible; it is checked between two footprint files of an
@@ -1694,8 +2024,8 @@ def footprint_sizes(paths, library: Optional[Path] = None, log=None, *, cancel=N
     result = {str(p): [] for p in paths}
     if library is None:
         return result
-    root = library.parent / "footprints"
-    if not root.is_dir():
+    root = footprints_root(library)
+    if root is None:
         if log:
             log(tx("Footprint KiCad non disponibili: confronto solo corpo/reofori."))
         return result
@@ -3659,8 +3989,8 @@ def _declared_land_pattern(path: Path, library: Optional[Path] = None):
         # Layout of a KiCad installation: 3dmodels/<Lib>.3dshapes/<Name>.step
         # beside footprints/<Lib>.pretty/<Name>.kicad_mod.
         library = Path(path).parent.parent
-    root = library.parent / "footprints"
-    if not root.is_dir():
+    root = footprints_root(library)
+    if root is None:
         return None
     target = Path(path).resolve()
     found = set()

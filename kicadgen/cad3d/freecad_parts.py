@@ -1316,6 +1316,26 @@ class _ImportHeartbeat:
         return False
 
 
+def _in_document_order(imported, doc):
+    """The importer's (object, colours) pairs in the order the document created the objects.
+
+    `Import.insert` returns the pairs in a different order on every call
+    (measured on FreeCAD 1.1, 2026-11-17: a 231-part module differed in 5
+    processes out of 5 and between two imports of one process, also with a
+    fixed PYTHONHASHSEED), while `doc.Objects` is stable. The part index
+    becomes the object name `Cmp<i>_<name>_<j>`, hence the order of the
+    solids in the STEP, of the WRL blocks and of the preview parts: without
+    this, two builds of the same payload wrote the same geometry in a
+    different order. The key is the creation order, no name or threshold; a
+    pair whose object the document does not list keeps its place after the
+    listed ones (stable sort), and a document without `Objects` changes
+    nothing.
+    """
+    order = {getattr(obj, "Name", None): index
+             for index, obj in enumerate(getattr(doc, "Objects", None) or [])}
+    return sorted(imported, key=lambda pair: order.get(getattr(pair[0], "Name", None), len(order)))
+
+
 def _read_library_parts(path, color, heartbeat=None):
     """Copy shapes and face colors out of an isolated headless import document."""
     import Import
@@ -1326,6 +1346,7 @@ def _read_library_parts(path, color, heartbeat=None):
         imported = Import.insert(str(path), doc.Name, merge=False)
         if not imported:
             raise _CheckFailed("no_colored_shapes", "headless importer returned no colored shapes")
+        imported = _in_document_order(imported, doc)
         parts = []
         for obj, colors in imported:
             # Copying the shapes of a large assembly is as slow as reading it:

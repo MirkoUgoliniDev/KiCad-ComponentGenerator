@@ -315,7 +315,11 @@ def test_preview_leaves_user_tables_untouched(tmp_path, monkeypatch):
     for path in tables.values():
         path.write_text('(x (lib (name "Keep")(uri "/keep")))\n', encoding="utf-8")
     before = {name: path.read_bytes() for name, path in tables.items()}
-    monkeypatch.setenv("APPDATA", str(tmp_path / "cfg"))
+    # KiCad's settings home is <KICAD_CONFIG_HOME>/<version>: the variable
+    # the program and kicad-cli read first (the suite sets it for every test
+    # since 2026-11-17, so APPDATA alone no longer pointed anything here, and
+    # its layout was <APPDATA>/kicad/<version> anyway).
+    monkeypatch.setenv("KICAD_CONFIG_HOME", str(tmp_path / "cfg"))
     artifacts = _component(tmp_path)
     preview = create_preview_project(artifacts)
     assert {name: path.read_bytes() for name, path in tables.items()} == before

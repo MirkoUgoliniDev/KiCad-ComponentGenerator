@@ -188,9 +188,9 @@ def test_i5_pypdf_is_a_declared_pinned_and_noticed_dependency():
     requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
     assert re.search(r"^pypdf\s*$", requirements, re.MULTILINE)
     pins = _pins()
-    assert pins["pypdf"] == "6.21.3"
+    assert pins["pypdf"] == "6.21.4"
     notices = (ROOT / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
-    assert re.search(r"^\| pypdf \| 6\.21\.3 \| BSD-3-Clause \|", notices, re.MULTILINE)
+    assert re.search(r"^\| pypdf \| 6\.21\.4 \| BSD-3-Clause \|", notices, re.MULTILINE)
 
 
 @pytest.mark.parametrize("package", [

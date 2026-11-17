@@ -1,11 +1,12 @@
 """@brief «Estrai parametri con AI» shows at once that the click was taken (user, 2026-10-02).
 
-The checks before the progress modal load YOLO and the SMD network on the GUI
-thread (~7 s measured): the button must switch to «Preparazione…» with an
-hourglass and be disabled before them, ignore a second click, and come back
-to rest when the run does not start.
+The checks before the progress modal load YOLO and the SMD network (~7 s
+measured; since 2026-11-17 in a worker thread, review R1-8): the button must
+switch to «Preparazione…» with an hourglass and be disabled before them,
+ignore a second click, and come back to rest when the run does not start.
 """
 import sys
+import threading
 from types import ModuleType
 
 import pytest
@@ -26,13 +27,30 @@ def _prepare(window, monkeypatch, validate):
 
 
 def test_the_button_shows_the_preparation_before_the_slow_checks(window, monkeypatch):
+    # CONTRACT CHANGED 2026-11-17 (R1-8): the checks run in a worker thread,
+    # so the fake check no longer reads the button nor clicks it itself (a
+    # widget is touched only from the GUI thread). It holds the check open
+    # while a timer, on the GUI thread, reads the button and clicks again.
+    from PyQt6.QtCore import QTimer
     seen = {}
+    started, release = threading.Event(), threading.Event()
 
     def validate(path):
-        button = window.btn_extract_ai
-        seen.update(enabled=button.isEnabled(), text=button.text())
-        # A second click while the checks run is ignored.
-        window._extract_with_ai()
+        started.set()
+        assert release.wait(20), "the GUI thread never looked at the button"
+
+    def look():
+        if not started.is_set():
+            QTimer.singleShot(5, look)
+            return
+        try:
+            button = window.btn_extract_ai
+            seen.update(enabled=button.isEnabled(), text=button.text())
+            # A second click while the checks run is ignored.
+            window._extract_with_ai()
+        finally:
+            release.set()
+    QTimer.singleShot(0, look)
     _prepare(window, monkeypatch, validate)
     calls = []
     monkeypatch.setattr(window, "_selected_documents",

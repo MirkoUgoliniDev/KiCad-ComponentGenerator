@@ -232,7 +232,12 @@ contradicts the measure; point 150, `FIX` only: profile field «Modello lettura 
 checkbox, one review window in two stages with the detector's reading kept beside the AI's,
 three-section «Parametri» modal, phantom sides excluded by the photo, pulsing running mark,
 unread row spacing ignored, pad width at the pitch downgraded, lands measured on the photo)
-is 16389 passed,
+is 16476 passed,
+13 skipped and 19 subtests (2026-11-18, branch `FOOTPRINT-ADVANCE` merged into `main`, halves 9886/9/19 and 6590/4, no red, after release v1.0.10:
+queued items closed -- KiCad's kicad_common.json read for the 3D and footprint libraries, review outcome told by the
+service (unreviewed weak proposals left out, truthful paid-request log), detector pre-flight off the GUI thread,
+imported library parts in document order (WRL and preview byte-stable), pypdf 6.21.4; see HANDOFF.md «STATO 18/11/2026»);
+before that, 16389 passed,
 13 skipped and 19 subtests (2026-11-17 evening, branch `FOOTPRINT-ADVANCE` commit `e982c84` merged into main as `7a42f18`, halves 9886/9/19 and 6503/4,
 no red: castellated edge-land overhang resolved per side -- undeclared half-hole gives way first (reference or AI estimate,
 user decision), clamped at the smallest estimable size, then the assumed overhang, then 0 with the contradiction named;

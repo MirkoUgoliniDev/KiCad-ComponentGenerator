@@ -204,7 +204,7 @@ packages the installer bundles with them.
 | Pillow | 13.0.0 | MIT-CMU | images; included in the installer |
 | ONNX Runtime | 1.30.0 | MIT | `.onnx` YOLO models; included in the installer |
 | python-dotenv | 1.2.3 | BSD-3-Clause | settings; included in the installer |
-| pypdf | 6.21.3 | BSD-3-Clause | PDF datasheets rewritten without their metadata before upload; included in the installer |
+| pypdf | 6.21.4 | BSD-3-Clause | PDF datasheets rewritten without their metadata before upload; included in the installer |
 | Ultralytics | 8.4.163 | AGPL-3.0 | `.pt` YOLO models (optional, `requirements/yolo-pt.txt`); **not** in the installer |
 | PyTorch | 2.14.0 | BSD-3-Clause and others | `.pt` YOLO models (optional); **not** in the installer |
 | pytest | 9.1.1 | MIT | tests only |

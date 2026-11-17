@@ -168,9 +168,11 @@ from .kicad_text_item import REFERENCE_PX as _KICAD_TEXT_REFERENCE_PX, cap_heigh
 from .tooltips import install_tooltip_filter
 # Workers and call-contract helpers: moved to gui/workers.py
 # (HANDOFF 130, T6/G5) and re-exported here, where callers and tests look for them.
+from .quit_wait import disconnect_quit_wait
 from .workers import (
     Cad3DWorker, ExtractWorker, GenerateWorker, ReconcileWorker, TerminalDetailWorker,
     PreviewRenderWorker, UpdateCheckWorker, YoloPretestWorker, _announce_freecad_measuring,
+    DetectorPreflightWorker,
     _photo_scale_kwargs,
     accepted_kwargs, accepts_keyword, cancel_kwargs, freecad_progress, matching_cancel_kwargs,
     phase_kwargs,
@@ -2150,6 +2152,14 @@ class MainWindow(QMainWindow):
 
         self._worker: GenerateWorker | None = None
         self._extract_worker: ExtractWorker | None = None
+        #: The detector pre-flight of an analysis being started, while it
+        #: runs (`_detector_preflight`, review 2026-11-16 R1-8), and the
+        #: nested event loop that waits for it.
+        self._preflight_worker: DetectorPreflightWorker | None = None
+        self._preflight_loop: QEventLoop | None = None
+        #: True while the «Interrompi» question about the pre-flight is open:
+        #: the one modal whose answer decides the continuation itself.
+        self._preflight_question_open = False
         self._cad3d_worker: Cad3DWorker | None = None
         self._terminal_worker: TerminalDetailWorker | None = None
         self._reconcile_worker: ReconcileWorker | None = None
@@ -3260,7 +3270,8 @@ class MainWindow(QMainWindow):
             return True
         return any(worker is not None and worker.isRunning() for worker in
                    (self._worker, self._extract_worker, self._cad3d_worker, self._terminal_worker,
-                    self._reconcile_worker, getattr(self, "_reread_worker", None)))
+                    self._reconcile_worker, getattr(self, "_reread_worker", None),
+                    getattr(self, "_preflight_worker", None)))
 
     def showEvent(self, event):  # noqa: N802 - firma Qt
         """@brief Centre the window on its screen the first time it is shown.
@@ -4255,7 +4266,15 @@ class MainWindow(QMainWindow):
         The editor has no toolbar button any more (HANDOFF 152), so the
         shortcut opens it directly under the same condition the button had:
         bodies to edit. Without them there is nothing to open.
+        @note Refused while an analysis is being prepared or any work runs,
+            and while the tabs are off (review 2026-11-17): the button it
+            replaced lived on a tab, which is disabled then; the key was not,
+            and the modal editor opened over a pre-flight held its
+            continuation, the paid analysis starting when the editor closed.
         """
+        if (getattr(self, "_extract_preparing", False) or self._background_work_running()
+                or not self.tabs.isEnabled()):
+            return
         if getattr(self, "_photo_rows", None):
             self._edit_components()
 
@@ -6883,8 +6902,9 @@ class MainWindow(QMainWindow):
         """@brief «Estrai parametri con AI»: show at once that the click was taken, then start.
 
         @note The checks before the progress modal (YOLO and SMD network
-            loaded on this thread) take several seconds (~7 s measured on
-            2026-10-02), and an unchanged button invited a second click. The
+            loaded, since 2026-11-17 in a worker thread: `_detector_preflight`)
+            take several seconds (~7 s measured on 2026-10-02), and an
+            unchanged button invited a second click. The
             button is switched to «Preparazione…» with an hourglass and
             disabled before them; if the run does not start, it goes back
             to rest (see _finish_extract_preparation).
@@ -6898,6 +6918,8 @@ class MainWindow(QMainWindow):
             return
         self._extract_preparing = True
         try:
+            # Synchronous for its callers: the detector pre-flight waits in a
+            # nested event loop (`_detector_preflight`), it does not return early.
             self._extract_with_ai_prepared()
         finally:
             self._finish_extract_preparation()
@@ -6974,19 +6996,16 @@ class MainWindow(QMainWindow):
             )
             return
         if photo_detector in ("yolo", "yolo_only", "yolo_smd"):
-            try:
-                # Optional runtime stays lazy: AI-only sessions do not require it.
-                # Validate before paid requests or clearing any previous results.
-                from ..services.photo_yolo import validate_yolo_setup
-                validate_yolo_setup(yolo_model_path)
-                if photo_detector == "yolo_smd":
-                    from ..services.smd_component_classifier import validate_smd_setup
-                    validate_smd_setup(self._smd_model_option())
-            except Exception as exc:
+            # Validate before paid requests or clearing any previous results;
+            # the model load runs off this thread (R1-8).
+            problem = self._detector_preflight(photo_detector, yolo_model_path)
+            if problem is self._PREFLIGHT_STOPPED:
+                return
+            if problem is not None:
                 self._reveal_ai_tools()
                 QMessageBox.warning(
                     self, self._photo_detector_text("error_title"),
-                    self._photo_detector_text("error", error=str(exc)),
+                    self._photo_detector_text("error", error=problem),
                 )
                 return
 
@@ -7487,6 +7506,222 @@ class MainWindow(QMainWindow):
         # KiCad commands off while the analysis runs (audit 2026-10-15, M3).
         self._track_background_work(self._extract_worker)
 
+    #: Returned by `_detector_preflight` when the pre-flight did not reach an
+    #: outcome the caller may act on (abandoned with «Interrompi», or the
+    #: application is exiting): the analysis does not start and nothing is said.
+    _PREFLIGHT_STOPPED = object()
+
+    def _detector_preflight(self, photo_detector, yolo_model_path):
+        """@brief Validate the local detector models without blocking the GUI thread.
+
+        @param photo_detector 'yolo', 'yolo_only' or 'yolo_smd'.
+        @param yolo_model_path Session YOLO weights, or None for the default.
+        @return None when the setup is valid, the error text (str) when a
+            check failed, `_PREFLIGHT_STOPPED` when the user abandoned the
+            pre-flight or the wait ended without an outcome.
+        @note Review 2026-11-16, R1-8: the model load (about 7 s) ran on the
+            GUI thread. It now runs in `DetectorPreflightWorker` while this
+            method waits in a nested event loop, so the window repaints, the
+            card announces the phase and «Interrompi» works; the caller stays
+            synchronous, so everything it does after the checks (documents,
+            key, profile, start) keeps its order and its messages.
+        @note The card and the disabled tabs are the same guard a run uses;
+            `_extract_preparing` (still set by the caller) and
+            `_background_work_running()` (the worker's slot) refuse a second
+            start, and `closeEvent` refuses the close while the worker runs.
+        @note A model load cannot be interrupted. A confirmed «Interrompi»
+            is recorded on the worker (`_stop_preflight`) and ends the wait
+            here: the window goes back at once and nothing starts, whether
+            the checks are still running or ended while the question was
+            open. A worker still loading is kept as abandoned work; its
+            late end is handled by `_on_preflight_finished`.
+        @note Nothing of an analysis has started yet, so nothing of one is
+            reset on a stop: unlike `_abort_ai_run`, the run state
+            (`_auto_after_extraction`, the pending pause, the revision) is
+            left as it was.
+        @note The menu bar and the window shortcuts (`_shortcuts`) are off
+            for the wait, as the menu bar is during a generation: a dialog
+            opened from them and left open would hold this method, and the
+            paid analysis would start by itself when it closed. Each is put
+            back as it was on every way out. The card's own «Apri log AI»
+            button, which opens a modal and has the focus, is off too.
+        @note Whatever modal still gets over the wait (the «Operazione in
+            corso» box of a refused close, any box of a slot served by the
+            nested loop): when the checks END under it (`held_by_modal`,
+            noted by `_on_preflight_finished`), the analysis is NOT started
+            when it closes. The user was doing something else by then, and a
+            paid run must start from a click, not from closing an unrelated
+            window: the window goes back to rest and says so. The stop
+            question is the exception, its answer being the decision.
+        """
+        check_smd = photo_detector == "yolo_smd"
+        try:
+            smd_model_path = self._smd_model_option() if check_smd else None
+        except Exception as exc:  # noqa: BLE001 - reported like a failed check, as before
+            return str(exc)
+        worker = DetectorPreflightWorker(yolo_model_path, smd_model_path, check_smd=check_smd)
+        loop = QEventLoop()
+        worker.finished.connect(loop.quit)
+        worker.finished.connect(self._on_preflight_finished)
+        self._preflight_worker = worker
+        self._preflight_loop = loop
+        self._analysis_tabs_enabled = self.tabs.isEnabled()
+        self.tabs.setEnabled(False)
+        menu_enabled = self.menuBar().isEnabled()
+        self.menuBar().setEnabled(False)
+        shortcuts = [(shortcut, shortcut.isEnabled())
+                     for shortcut in getattr(self, "_shortcuts", ())]
+        for shortcut, _was_enabled in shortcuts:
+            shortcut.setEnabled(False)
+        log_button = self.analysis_overlay.log_button
+        log_enabled = log_button.isEnabled()
+        try:
+            self.analysis_overlay.start(
+                "Pretest YOLO in corso" if photo_detector == "yolo_only" else "Analisi AI in corso",
+                "Verifica del rilevatore locale…", abortable=True)
+            # The phase at work: the local detector, with the file being loaded.
+            self.analysis_overlay.set_tool(
+                "yolo", Path(yolo_model_path).name if yolo_model_path else "")
+            # After `start`, which gives this button the focus: Space or
+            # Enter must not open the modal log over the wait.
+            log_button.setEnabled(False)
+            worker.start()
+            if not (worker.isRunning() or worker.isFinished()):
+                # The thread did not start (Qt reports nothing when it
+                # cannot): the checks run here, on this thread, as they did
+                # before the move -- slower to look at, never skipped.
+                worker.run()
+                # No `finished` will come from a thread that never ran.
+                disconnect_quit_wait(worker)
+            else:
+                # KiCad commands off while the pre-flight runs, as for a run.
+                self._track_background_work(worker)
+                if not worker.isFinished():
+                    loop.exec()
+        except Exception as exc:  # noqa: BLE001 - any failure brings the UI back to rest
+            # Nothing may escape a Qt slot, and the tabs must not stay off: a
+            # worker that did start is abandoned (never left running under a
+            # window at rest), and the failure is reported like a failed check.
+            if not worker.isRunning():
+                # It will never emit `finished` (it may not have started at
+                # all): its exit hook is dropped here.
+                disconnect_quit_wait(worker)
+            self._give_window_back_after_preflight(worker)
+            return str(exc)
+        finally:
+            # Every way out of the wait: stop, failure, success, exception.
+            self._preflight_loop = None
+            self.menuBar().setEnabled(menu_enabled)
+            for shortcut, was_enabled in shortcuts:
+                shortcut.setEnabled(was_enabled)
+            log_button.setEnabled(log_enabled)
+        if worker.stop_confirmed or worker.isRunning():
+            # Stopped by the user (even after the checks ended, review
+            # 2026-11-17), or the wait ended without an outcome (the
+            # application is exiting): nothing starts and nothing is said.
+            self._give_window_back_after_preflight(worker)
+            return self._PREFLIGHT_STOPPED
+        if worker.held_by_modal and not worker.failed:
+            # The checks ended well, but under another modal window: no paid
+            # run starts by itself now that it has closed. Said, not silent.
+            self._give_window_back_after_preflight(worker)
+            message = tx("La verifica del rilevatore locale è terminata mentre era aperta "
+                         "un'altra finestra: l'analisi non è stata avviata. Premi di nuovo "
+                         "il pulsante per avviarla.")
+            self._append_log(message)
+            QMessageBox.information(self, self.i18n.text("Analisi non avviata"), message)
+            return self._PREFLIGHT_STOPPED
+        self._preflight_worker = None
+        # The card goes away before the caller's messages and before the run
+        # starts its own: the tabs are back as they were, as on the old path.
+        self._hide_analysis_overlay()
+        return worker.error if worker.failed else None
+
+    def _give_window_back_after_preflight(self, worker) -> None:
+        """@brief Bring the window back to rest after a pre-flight that will not be followed by a run.
+
+        @param worker The pre-flight worker, still loading or already ended.
+        @note The light counterpart of `_abort_ai_run`: no analysis started,
+            so no run state is touched. A worker still loading stays in its
+            slot as abandoned work (it counts for the close guard and for
+            `_background_work_running`, and is no longer offered to
+            «Interrompi»); the button goes back to its idle look now and is
+            re-enabled by `_on_preflight_finished`. A worker already ended
+            frees the slot at once and the caller's
+            `_finish_extract_preparation` restores the button.
+        """
+        running = worker.isRunning()
+        if running:
+            worker.cancel_event.set()
+            if not any(worker is other for other in self._abandoned_workers):
+                self._abandoned_workers.append(worker)
+        else:
+            self._abandoned_workers = [
+                other for other in self._abandoned_workers if other is not worker]
+            if self._preflight_worker is worker:
+                self._preflight_worker = None
+        self._hide_analysis_overlay()
+        if running:
+            self._restore_extract_button_icon()
+            self._refresh_extract_button()
+            self._apply_component_name_gate()
+
+    def _stop_preflight(self, worker, phase: str) -> None:
+        """@brief Record a confirmed «Interrompi» on the detector pre-flight and end its wait.
+
+        @param worker The DetectorPreflightWorker the question was about.
+        @param phase What was being done, for the log.
+        @note Recorded whatever `isRunning()` says (review 2026-11-17): the
+            question runs a nested event loop inside the wait, the checks
+            can end while it is open, and a «Sì» given then used to be
+            answered «niente da fermare» while the paid analysis started.
+            What the user stopped is the start of the analysis, and that is
+            still pending until `_detector_preflight` returns.
+        """
+        worker.stop_confirmed = True
+        worker.cancel_event.set()
+        self.analysis_overlay.set_abortable(False)
+        self._append_log(
+            tx("INTERRUZIONE chiesta dall'utente durante: {phase}. L'analisi non viene "
+               "avviata: nessuna richiesta è partita, nessun costo.", phase=phase))
+        self._end_preflight_wait()
+
+    def _end_preflight_wait(self) -> None:
+        """@brief End the wait of `_detector_preflight`, if one is open (abandoned pre-flight)."""
+        loop = getattr(self, "_preflight_loop", None)
+        if loop is not None:
+            loop.quit()
+
+    def _on_preflight_finished(self) -> None:
+        """@brief End of a detector pre-flight: note a modal over it; release an abandoned one (Qt slot).
+
+        @note The end of a pre-flight still in force is handled by
+            `_detector_preflight` itself, after its wait: here it is only
+            noted whether a modal window was open over the wait at that
+            moment (`held_by_modal`), which only this slot can see -- by the
+            time the wait returns that window has closed.
+            An abandoned one already gave the window back; as for an
+            abandoned pretest (`_on_yolo_pretest_finished`), its end frees
+            the slot and re-enables the commands that were off because it
+            was running.
+        """
+        worker = self.sender()
+        if (worker is not None and worker is self._preflight_worker
+                and self._preflight_loop is not None
+                and not self._preflight_question_open
+                and QApplication.activeModalWidget() is not None):
+            # The checks ended under a modal window that is not the stop
+            # question: `_detector_preflight` must not start the analysis
+            # when that window closes.
+            worker.held_by_modal = True
+        if worker is None or not any(worker is other for other in self._abandoned_workers):
+            return
+        self._forget_abandoned_worker(worker)
+        self._release_orphan_overlay()
+        self._apply_component_name_gate()
+        self._refresh_reopen_review_button()
+        self._retry_pending_regen_3d()
+
     #: Photo extensions that the inventory tries as the top view
     #: (same filter as `photo_inventory.extract_inventory`).
     _PRETEST_PHOTO_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp", ".gif")
@@ -7621,8 +7856,6 @@ class MainWindow(QMainWindow):
         if report is None:
             self._on_ai_progress(tx("Pretest YOLO annullato nella revisione: nulla salvato."))
             return
-        # A failed review delivered an unreviewed set (R1-2): never «reviewed by the user».
-        self._unmark_user_reviewed_presence(self.sender(), getattr(report, "components", None))
         found = len(report.components)
         self._on_ai_progress(tx("Pretest YOLO concluso: {found} riquadri tenuti; nessuna chiamata AI.",
                                 found=found))
@@ -8943,6 +9176,9 @@ class MainWindow(QMainWindow):
         ("ai", "_extract_worker", "Analisi AI dei documenti"),
         ("ai", "_reconcile_worker", "Rilancio dell'inventario"),
         ("ai", "_reread_worker", "Rilettura parziale dei documenti"),
+        # The detector pre-flight (R1-8): local and free like the pretest, and
+        # like it only abandoned -- a model load cannot be interrupted.
+        ("local", "_preflight_worker", "Verifica del rilevatore locale"),
     )
     #: Name of the operation when the YOLO-only pretest runs in the extraction
     #: slot (see _abortable_operation).
@@ -8953,8 +9189,10 @@ class MainWindow(QMainWindow):
 
         @return (kind, worker, phase) with kind in {'cad', 'ai', 'local'}, or
             None when there is nothing to stop. 'local' is the YOLO-only
-            pretest: it is abandoned like an AI run, but it costs nothing, and
-            the phase is `_PRETEST_LABEL`, not the label of the slot.
+            pretest, or the detector pre-flight of an analysis being started
+            (`_preflight_worker`): it is abandoned like an AI run, but it
+            costs nothing; the pretest's phase is `_PRETEST_LABEL`, not the
+            label of the slot.
         @note A worker already abandoned is NO longer a candidate: it keeps
             running (and counting for the close guard) but the window has
             already been handed back to the user, so there is nothing left to
@@ -9051,9 +9289,23 @@ class MainWindow(QMainWindow):
             return
         kind, worker, label = operation
         phase = self._abort_phase_text(label)
-        if not self._confirm_abort(kind, phase):
+        # The question about a pre-flight is the pre-flight's own modal: its
+        # answer decides what follows («Sì» stops, «No» lets the start go
+        # on), so it is not a window that «held» the continuation.
+        self._preflight_question_open = isinstance(worker, DetectorPreflightWorker)
+        try:
+            confirmed = self._confirm_abort(kind, phase)
+        finally:
+            self._preflight_question_open = False
+        if not confirmed:
             # Refusing touches nothing: the work goes on and the button
             # stays where it was, to think it over.
+            return
+        if isinstance(worker, DetectorPreflightWorker):
+            # Before the «already ended» exit below: the checks may have
+            # ended while the question was open, and the analysis they
+            # prepared must still not start (see `_stop_preflight`).
+            self._stop_preflight(worker, phase)
             return
         if self._abort_pending or not worker.isRunning():
             self._append_log(
@@ -9581,8 +9833,10 @@ class MainWindow(QMainWindow):
             Cancelling delivers None, and the extraction stops without paying
             for the reconciliation -- which is why this view comes before that
             call and not after. If instead the view does not open at all, the
-            run goes on with all the proposals: a defect of the review must
-            not throw away the analysis already paid for so far.
+            run goes on with all the proposals, delivered as NOT reviewed
+            (`deliver_review(kept, reviewed=False)`, R1-2): a defect of the
+            review must not throw away the analysis already paid for so far,
+            and must not pass the proposals as approved by the user either.
         @note The answer goes to the SENDER of the signal, not to the
             `_extract_worker` slot: after «Interrompi» the slot may already
             host another run (or none), and unblocking the wrong one would
@@ -9634,18 +9888,14 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001 - an error here must not hang the worker
             self._append_log(tx("ATTENZIONE revisione dei corpi non disponibile: {exc}", exc=exc))
             # Review 2026-11-16, R1-2: nobody looked at the proposals, so they
-            # go on as an UNREVIEWED set -- the weak ones, which only a user
-            # may keep (`_yolo_review_only`), are left out, as the service
-            # does for an unreviewed bundle (`yolo_only_components`).
+            # go on, ALL of them, as an UNREVIEWED set (`deliver_review(...,
+            # reviewed=False)` below). The service then handles them as it
+            # does without a reviewer: nothing is stamped «reviewed by the
+            # user» and the weak ones (`_yolo_review_only`) are left out by
+            # `yolo_only_components` or judged by the paid reconciliation.
             # A failure after the answer (the log line) keeps the answer.
             if not reviewed:
-                kept = [dict(p) for p in proposals
-                        if not (isinstance(p, dict) and p.get("_yolo_review_only"))]
-                if worker is not None:
-                    # The service counts any delivered set as reviewed; the
-                    # result of this run is corrected when it arrives
-                    # (`_unmark_user_reviewed_presence`).
-                    worker._review_unreviewed = True
+                kept = [dict(p) for p in proposals]
         finally:
             # The view runs a nested event loop: if in the meantime the run
             # has been declared expired, nothing is saved and the modal is not
@@ -9653,7 +9903,11 @@ class MainWindow(QMainWindow):
             if kept is not None and self._review_request_is_stale(worker):
                 kept = None
             if worker is not None:
-                worker.deliver_review(kept)
+                if reviewed or kept is None:
+                    worker.deliver_review(kept)
+                else:
+                    # The service is told that nobody looked (R1-2).
+                    worker.deliver_review(kept, reviewed=False)
             if kept is not None:
                 # The package in the component folder must contain the KEPT
                 # proposals, not the raw ones: the detector-*.json in the cache
@@ -9664,8 +9918,7 @@ class MainWindow(QMainWindow):
                 # included, so a later «Revisione componenti…» still shows the
                 # weak ones (R1-2).
                 self._store_reviewed_proposals(
-                    kept if reviewed else [dict(p) for p in proposals],
-                    photo_png, length_mm, width_mm,
+                    kept, photo_png, length_mm, width_mm,
                     detector=getattr(worker, 'photo_detector', 'yolo'), pretest=pretest,
                     reviewed=reviewed)
                 self.analysis_overlay.show()
@@ -12247,8 +12500,6 @@ class MainWindow(QMainWindow):
             self._append_log(tx("Risultato di un'analisi interrotta dall'utente: scartato, i campi "
                                 "restano come sono."))
             return
-        # A run whose detector review failed delivered an UNREVIEWED set (R1-2).
-        self._unmark_user_reviewed_presence(self.sender(), getattr(params, "components_3d", None))
         self._inventory_pause_pending = bool(getattr(params, "components_3d", None))
         # From here the fields may change (even if applying fails half way):
         # the run owns the output, see `_on_extract_finished`.
@@ -12270,33 +12521,6 @@ class MainWindow(QMainWindow):
                 # the full paid analysis (review 2026-11-16, R2-3).
                 self._on_extract_error(tx("Impossibile applicare i dati estratti: {exc}", exc=exc),
                                        reread_field=getattr(self, "_reread_applying_field", None))
-
-    @staticmethod
-    def _unmark_user_reviewed_presence(worker, components) -> int:
-        """@brief Clear «reviewed by the user» on the bodies of a run whose detector review failed.
-
-        @param worker The worker that produced `components` (the signal
-            sender), or None for a direct call.
-        @param components Body dicts (mutated), or None.
-        @return How many bodies were corrected.
-        @note Review 2026-11-16, R1-2 (follow-up): when the review view
-            fails, the window delivers the unreviewed set
-            (`_on_review_requested` drops the weak proposals and marks the
-            worker `_review_unreviewed`), but `photo_inventory` counts any
-            delivered set as reviewed and stamps every body
-            `_presence_reviewed_by_user=True`, which the model matching
-            trusts (`kicad_models`). The stamp is corrected here, on the
-            result of that run only. A service-side channel (the review
-            callback returning «not reviewed») would make this unnecessary.
-        """
-        if worker is None or getattr(worker, "_review_unreviewed", False) is not True:
-            return 0
-        corrected = 0
-        for component in components or ():
-            if isinstance(component, dict) and component.get("_presence_reviewed_by_user") is True:
-                component["_presence_reviewed_by_user"] = False
-                corrected += 1
-        return corrected
 
     @contextmanager
     def _extraction_apply_guard(self):
