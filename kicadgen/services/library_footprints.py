@@ -103,15 +103,14 @@ class LibraryCheck:
 def footprints_root() -> Optional[Path]:
     """@brief The installed KiCad ``footprints`` folder, or None when KiCad is not found.
 
-    @return The sibling ``footprints`` folder of the 3D model library found by
-        cad3d.kicad_models.find_library.
+    @return The folder found by cad3d.kicad_models.footprints_root: KiCad's
+        own footprint variable (``KICAD<ver>_FOOTPRINT_DIR``) or the
+        ``footprints`` folder of an installation. It is NOT derived from the
+        3D model library: a 3D library moved elsewhere does not hide the
+        footprints (2026-11-17 review).
     """
-    from ..cad3d.kicad_models import find_library
-    library = find_library()
-    if library is None:
-        return None
-    root = Path(library).parent / "footprints"
-    return root if root.is_dir() else None
+    from ..cad3d import kicad_models
+    return kicad_models.footprints_root()
 
 
 def _segments(text: str) -> tuple:

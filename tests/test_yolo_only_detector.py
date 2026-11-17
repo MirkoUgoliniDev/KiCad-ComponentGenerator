@@ -191,7 +191,10 @@ def test_a_castellated_pretest_uses_the_castellated_body_fields(window, monkeypa
 def test_without_body_dimensions_the_pretest_does_not_start(window, monkeypatch):  # noqa: F811
     _fake_validation(monkeypatch)
     monkeypatch.setattr(window, "_selected_documents", lambda: ([Path("hires.jpg")], None))
-    monkeypatch.setattr(gui.QThread, "start", lambda self: pytest.fail("must not start"))
+    # CONTRACT CHANGED 2026-11-17 (R1-8): the detector pre-flight now runs in
+    # a thread of its own, which does start; what must not start is the
+    # pretest worker. Before, no QThread at all was allowed to start.
+    monkeypatch.setattr(gui.YoloPretestWorker, "start", lambda self: pytest.fail("must not start"))
     monkeypatch.setattr(window, "_body_size", lambda: None)
     # Dal 26/09 le quote ignote si chiedono (prima un messaggio rimandava a
     # campi che non esistono piu'); chi annulla non avvia il pretest.

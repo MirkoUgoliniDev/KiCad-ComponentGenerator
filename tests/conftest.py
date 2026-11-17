@@ -232,6 +232,62 @@ def no_real_uninstall_registry(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def no_real_kicad_settings(monkeypatch, tmp_path_factory):
+    """@brief No test sees the path variables of this machine's KiCad settings.
+
+    Since 2026-11-17 the 3D library search also reads `environment.vars` of
+    KiCad's `kicad_common.json` (`kicad_models._settings_model_folders`). A
+    test that means «no library on this machine» would otherwise find the
+    one the developer set in KiCad's «Configure Paths». `KICAD_CONFIG_HOME`
+    points at an empty folder; a test of the settings file sets its own, or
+    deletes the variable to exercise the per-platform default.
+    @note ONE folder for the whole run, like `isolated_install_locks`: a
+        `mktemp` per test numbers its folder by scanning the base temp, which
+        the suite fills with thousands of folders (measured 2026-11-17: 19 ms
+        per call at 8000 entries, 47 ms at 16000, minutes over a half).
+    @note Emptied after each test that left something in it: a real
+        kicad-cli started by a test inherits the variable and writes its own
+        settings there (`10.0/kicad_common.json` and others), which every
+        later test would otherwise see as an installed KiCad's settings --
+        on the developer's PC only, the GitHub runner has no kicad-cli.
+    """
+    import shutil
+    folder = tmp_path_factory.getbasetemp() / "kicad-config-home"
+    folder.mkdir(exist_ok=True)
+    monkeypatch.setenv("KICAD_CONFIG_HOME", str(folder))
+    yield
+    # Best effort: a file a lingering kicad-cli still holds, or a folder a
+    # test removed, must not turn into an error of an unrelated test.
+    try:
+        entries = list(folder.iterdir())
+    except OSError:
+        entries = []
+    for entry in entries:
+        try:
+            if entry.is_dir():
+                shutil.rmtree(entry, ignore_errors=True)
+            else:
+                entry.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+@pytest.fixture(autouse=True)
+def fresh_unreachable_library_roots():
+    """@brief No test inherits a library folder another test found unreachable.
+
+    `kicad_models._reachable_dir` remembers, for a while, a folder whose
+    probe failed slowly; on a loaded machine a genuinely slow probe in one
+    test would hide that folder from the next. Only when the module is
+    already loaded: importing it for every test would cost more than it saves.
+    """
+    import sys
+    module = sys.modules.get("kicadgen.cad3d.kicad_models")
+    if module is not None and hasattr(module, "forget_unreachable_roots"):
+        module.forget_unreachable_roots()
+
+
+@pytest.fixture(autouse=True)
 def isolated_install_locks(monkeypatch, tmp_path_factory):
     """@brief Install lock files go under the run's base temp folder, never the user's %TEMP%.
 

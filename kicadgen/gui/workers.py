@@ -1083,6 +1083,8 @@ class ExtractWorker(QThread):
         self.cancel_event = threading.Event()
         self._review_answered = threading.Event()
         self._review_result = None
+        #: False when the last delivered set was never looked at by a person.
+        self._review_was_reviewed = True
 
     #: Seconds between two checks of `cancel_event` while the worker waits
     #: for the photo review to be answered (see `_review_proposals`).
@@ -1095,8 +1097,11 @@ class ExtractWorker(QThread):
         @param proposals Proposals of the local detector.
         @param length_mm Board extent along X, in mm.
         @param width_mm Board extent along Y, in mm.
-        @return The proposals to keep, or None when the review is cancelled
-            or the extraction is stopped while the review is open.
+        @return The proposals to keep (a plain list: the user answered), a
+            `photo_inventory.ProposalReview` with `reviewed` False when the
+            interface delivered them without anybody having looked (the view
+            failed, see `deliver_review`), or None when the review is
+            cancelled or the extraction is stopped while the review is open.
         @note Runs on the worker thread: the signal crosses the threads and
             the answer comes back through deliver_review. The wait is
             deliberate -- the paid call must not start before someone has
@@ -1109,22 +1114,33 @@ class ExtractWorker(QThread):
             seen as soon as it is delivered.
         """
         self._review_result = None
+        self._review_was_reviewed = True
         self._review_answered.clear()
         self.review_requested.emit(photo_png or b"", [dict(p) for p in proposals],
                                    float(length_mm), float(width_mm))
         while not self._review_answered.wait(self.REVIEW_WAIT_SLICE_S):
             if self.cancel_event.is_set():
                 return None
-        return self._review_result
+        kept = self._review_result
+        if kept is not None and self._review_was_reviewed is not True:
+            # Nobody looked (review 2026-11-16, R1-2): the service is told,
+            # so that it stamps nothing «reviewed by the user».
+            from ..services.photo_inventory import ProposalReview
+            return ProposalReview(list(kept), False)
+        return kept
 
-    def deliver_review(self, kept) -> None:
+    def deliver_review(self, kept, reviewed: bool = True) -> None:
         """@brief Deliver the outcome of the review to the worker and unblock it.
 
         @param kept Proposals to keep, or None to cancel the extraction.
+        @param reviewed False when `kept` is delivered without a person
+            having answered the review (the view could not open): the
+            service then treats the proposals as never reviewed.
         @note It must ALWAYS be called, even when something goes wrong: a
             worker left waiting never finishes.
         """
         self._review_result = kept
+        self._review_was_reviewed = reviewed is True
         self._review_answered.set()
 
     def _forward_phase(self, tool: str, detail: str = "", done: int = 0, total: int = 0) -> None:
@@ -1298,6 +1314,75 @@ class YoloPretestWorker(ExtractWorker):
                 self.done.emit(None)
             else:
                 self.error.emit(str(exc))
+
+
+class DetectorPreflightWorker(QThread):
+    """@brief Load and validate the local detector models off the GUI thread.
+
+    The pre-flight of an analysis that uses a local detector
+    (`photo_yolo.validate_yolo_setup`, then
+    `smd_component_classifier.validate_smd_setup` for the SMD route): the
+    same checks, in the same order, that used to run on the GUI thread and
+    froze the window for the model load (about 7 s measured on 2026-10-02;
+    review 2026-11-16, R1-8).
+    @note No signal of its own: the outcome is read from `failed` and
+        `error` once `finished` has been emitted, on the GUI thread.
+    @note The validation functions are looked up on their modules when the
+        thread runs, so a replacement made there (tests) reaches this code.
+    @note A model load cannot be interrupted: `cancel_event` only skips the
+        check not yet started. The window abandons the worker instead
+        (see `main_window._detector_preflight`) and discards its outcome.
+    @note The application exit waits for the load at most
+        `quit_wait.QUIT_WAIT_MS` (`connect_quit_wait`).
+    """
+
+    def __init__(self, yolo_model_path, smd_model_path=None, *, check_smd=False):
+        """@brief Snapshot what to validate.
+
+        @param yolo_model_path YOLO weights path, or None for the service default.
+        @param smd_model_path SMD network weights, or None for the default in
+            models/smd; read only with `check_smd`.
+        @param check_smd True to validate the SMD network too (detector
+            'yolo_smd').
+        """
+        super().__init__()
+        self.yolo_model_path = yolo_model_path
+        self.smd_model_path = smd_model_path
+        self.check_smd = bool(check_smd)
+        #: Set by the window when the pre-flight is abandoned or the
+        #: application exits: the check not yet started is skipped.
+        self.cancel_event = threading.Event()
+        #: True when a check raised; `error` is then the text for the user.
+        self.failed = False
+        #: str(exception) of the failed check, "" otherwise.
+        self.error = ""
+        #: True once the user confirmed «Interrompi» for this pre-flight,
+        #: whether or not the checks had already ended: the analysis it
+        #: prepared must not start (set by the window, on the GUI thread).
+        self.stop_confirmed = False
+        #: True when the checks ended while a modal window other than the
+        #: stop question was open over the wait: the analysis must not start
+        #: by itself when that window closes (set by the window).
+        self.held_by_modal = False
+        connect_quit_wait(self, stop=self.cancel_event.set)
+        self.finished.connect(self._drop_quit_hook)
+
+    def _drop_quit_hook(self) -> None:
+        """Drop the exit-time wait once the thread has finished (see `quit_wait`)."""
+        disconnect_quit_wait(self)
+
+    def run(self) -> None:
+        """@brief QThread override: run the checks and record the outcome, never raise."""
+        try:
+            # Optional runtime stays lazy: AI-only sessions do not require it.
+            from ..services.photo_yolo import validate_yolo_setup
+            validate_yolo_setup(self.yolo_model_path)
+            if self.check_smd and not self.cancel_event.is_set():
+                from ..services.smd_component_classifier import validate_smd_setup
+                validate_smd_setup(self.smd_model_path)
+        except Exception as exc:  # noqa: BLE001 - reported by the window, as before the move
+            self.failed = True
+            self.error = str(exc)
 
 
 class ReconcileWorker(QThread):
