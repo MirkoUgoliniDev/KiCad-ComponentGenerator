@@ -6,14 +6,15 @@ the next component. The rule is general, not for one board: an estimated hole
 of a side fits its MEASURED (or declared) pad with MIN_HOLE_WALL_MM of copper
 on each part, an estimated drill leaves room for a ring. Declared holes are
 never reduced, and nothing changes where the pad is only the reference guess
-or the module-wide default: only the side's own measured or declared land is
-evidence of copper (adversarial review of the same evening).
+or the module-wide default: only a measured or declared land is evidence of
+copper (adversarial review of the same evening) -- the side's own, or since
+2026-11-17 (user decision) the module-wide one the user declared.
 """
 import pytest
 
 from kicadgen.generators.castellated_module import (
     AssumedSize, CONTACT_HALF_AND_THROUGH, CONTACT_HALF_HOLE, CastellatedModuleParams,
-    CastellatedSide, MIN_ESTIMATED_DRILL_MM, MIN_HOLE_WALL_MM, SIZE_ESTIMATE_PAD,
+    CastellatedSide, MIN_ESTIMATED_DRILL_MM, MIN_HOLE_WALL_MM, SIZE_ESTIMATE_MIN, SIZE_ESTIMATE_PAD,
     SIZE_ESTIMATE_RING)
 
 
@@ -108,11 +109,25 @@ def test_the_rule_follows_provenance_not_whether_the_ai_estimated_the_side():
     assert any("piazzola larga" in note for note in params.geometry_notes())
 
 
-def test_a_module_wide_pad_width_is_not_evidence_of_the_side_copper():
-    """@brief Negative: the module default (reset to the reference by the GUI) changes nothing."""
-    params = CastellatedModuleParams(name="T", body_length=30.0, body_width=20.0, pad_width=1.2,
-                                     sides=[_side("left", 4, 2.54)])
-    geometry = params.side_geometry(params.sides[0])
+def test_a_module_wide_pad_width_is_evidence_only_when_declared():
+    """@brief CONTRACT CHANGED 2026-11-17 (user decision «una regola sola»).
+
+    Positive: a module-wide DECLARED width (a plain float: since review
+    2026-11-16 R2-8 the window passes one only when the user typed it) is the
+    land drawn on every side without its own, so it bounds the assumed
+    half-hole like a side's own width. Negative: the same 1.2 mm left ASSUMED
+    (AssumedSize, the window's untouched module field, which this test used
+    to stand for when the window still passed it as a plain float) changes
+    nothing.
+    """
+    declared = CastellatedModuleParams(name="T", body_length=30.0, body_width=20.0, pad_width=1.2,
+                                       sides=[_side("left", 4, 2.54)])
+    geometry = declared.side_geometry(declared.sides[0])
+    assert geometry.half_hole_source == SIZE_ESTIMATE_PAD
+    assert geometry.half_hole == pytest.approx(1.2 - 2 * MIN_HOLE_WALL_MM)
+    assumed = CastellatedModuleParams(name="T", body_length=30.0, body_width=20.0,
+                                      pad_width=AssumedSize(1.2), sides=[_side("left", 4, 2.54)])
+    geometry = assumed.side_geometry(assumed.sides[0])
     assert geometry.half_hole == pytest.approx(1.7)
     assert geometry.half_hole_source != SIZE_ESTIMATE_PAD
 
@@ -141,13 +156,37 @@ def test_an_estimated_drill_is_capped_to_the_land_without_a_contradiction_note()
 
 
 def test_an_estimate_is_never_reduced_below_the_fabrication_minimum():
-    """@brief Finding C-H2: a 0.45 mm land does not turn a hole into 0.05 mm."""
+    """@brief Finding C-H2: a 0.45 mm land does not turn a hole into 0.05 mm.
+
+    CONTRACT CHANGED 2026-11-17 (second generality audit): the estimate is
+    clamped AT the fabrication minimum instead of going back to its unreduced
+    1.0 mm, which made a narrower land give a larger half-hole; the note still
+    says the measured land and the hole estimate contradict each other.
+    """
     params = _params(_side("left", 4, 2.54, half=1.0, pad_width=0.45))
     geometry = params.side_geometry(params.sides[0])
-    assert geometry.half_hole == pytest.approx(1.0)
-    assert geometry.half_hole_source != SIZE_ESTIMATE_PAD
+    assert geometry.half_hole == pytest.approx(MIN_ESTIMATED_DRILL_MM)
+    # Clamped, so it still does not fit: its own provenance, never «reduced to fit».
+    assert geometry.half_hole_source == SIZE_ESTIMATE_MIN
     assert any("piazzola misurata o la stima del foro" in note
                for note in params.geometry_notes())
+
+
+@pytest.mark.parametrize("hole_inset", [None, 0.1, 0.3])
+def test_a_narrower_land_never_gives_a_larger_estimated_half_hole(hole_inset):
+    """@brief Positive, swept over land widths 0.80-0.40 mm across the floor at 0.70 mm: the
+    estimated half-hole never grows when the land narrows, and never drops below the smallest
+    estimated half-hole (the fabrication minimum, or what a declared centre needs)."""
+    previous = None
+    for step in range(80, 39, -1):
+        width = step / 100
+        params = _params(_side("left", 4, 2.54, half=1.0, pad_width=width))
+        params.hole_inset = hole_inset
+        half = params.side_geometry(params.sides[0]).half_hole
+        assert half >= params._smallest_estimated_half_hole() - 1e-9
+        if previous is not None:
+            assert half <= previous + 1e-9
+        previous = half
 
 
 def test_a_reduction_above_the_minimum_is_still_made():

@@ -124,9 +124,15 @@ def test_each_contact_is_one_plated_stadium_pad(name):
     placements = list(pad_positions(params))
     assert len(fp.pads) == len(placements)
     assert sorted(p.number for p in fp.pads) == sorted(p.number for p in placements)
+    by_number = {p.number: p for p in placements}
     for pad in fp.pads:
         assert pad.pad_type == "thru_hole" and pad.shape == "oval"
-        assert pad.drill == params.thru_hole_drill
+        # CONTRACT CHANGED 2026-11-17: the drill is the one resolved for the
+        # contact's side (side_geometry), not the raw module field. rs485
+        # declares a 1.2 mm module land width, which since then bounds the
+        # assumed ring (and so the assumed 1.0 mm drill, now 0.80) like a
+        # side's own width does: one land lookup on both axes.
+        assert pad.drill == params.contact_geometry(by_number[pad.number]).drill
         assert list(pad.layers) == ["*.Cu", "*.Mask", "F.Paste"]
 
 
@@ -379,10 +385,17 @@ def test_without_a_declared_through_hole_the_edge_land_is_kept():
 #: della versione precedente, tolto quell'elemento, ha esattamente questi
 #: hash. Valori precedenti, per traccia: 37b3028b..., f5603278...,
 #: 2c853adb..., 8ad269c7..., 4810a717...
+#: CONTRACT CHANGED 2026-11-17 (rs485_half, rs485_nohole: 3D payload and features
+#: only, footprint unchanged): the undeclared 1.7 mm half-hole was wider than
+#: the DECLARED 1.2 mm module land and reached past the 1.30 mm of it under the
+#: module. «The hole fits in its copper» now reads the module's declared land
+#: like a side's own, on both axes (`_declared_land`), so it is estimated
+#: 0.80 mm (SIZE_ESTIMATE_PAD, 1.2 - 2 x MIN_HOLE_WALL_MM), which also fits
+#: under the land. Previous values: 20233a9d..., a1ae1dd7...
 UNCHANGED = {
     "rs485_half": ("68b398ea85d13078729a4851d5b8da0b192ad989a24270e6f989af0f62e2bb58",
-                   "20233a9d628f799fd067a2735f610d354b228d90a09deec20e8d6fffa015ae9e",
-                   "a1ae1dd7b034ffd728352774b07c5a99eeb74878b500f41a7f8a8f4de533536b"),
+                   "a2b863690d4dc1d434e0dca16f91ff831dc6dbe57adb1988e6b56ecfbaee470d",
+                   "7ab658d078fb888dc185e895c2421803b573bef665a34abc2d092f05ccdd7bad"),
     "four_half": ("03d98fad773efa0771ec6058037719f2d78a4eeaa579eb68212f2b5ee860541e",
                   "beb7f9726f143a5ce56ce5fb83dd1f4f1a64c3efd5e8f1e0245fa99069ca7332",
                   "7b6b36b511151cd0868a68f34109511283296f3fb8d4ddf5c7a5b46a570f2f43"),
@@ -393,8 +406,8 @@ UNCHANGED = {
                      "3c8e021086481606de65ffd0549291308f03fc9d2a90e3d6c82e8990e066deed",
                      "e70d82826c1db32dbe648c0e83bf07b756c09cd322feadcbf8d0708a7fac0d30"),
     "rs485_nohole": ("68b398ea85d13078729a4851d5b8da0b192ad989a24270e6f989af0f62e2bb58",
-                     "20233a9d628f799fd067a2735f610d354b228d90a09deec20e8d6fffa015ae9e",
-                     "a1ae1dd7b034ffd728352774b07c5a99eeb74878b500f41a7f8a8f4de533536b"),
+                     "a2b863690d4dc1d434e0dca16f91ff831dc6dbe57adb1988e6b56ecfbaee470d",
+                     "7ab658d078fb888dc185e895c2421803b573bef665a34abc2d092f05ccdd7bad"),
     "rs485_through": ("5dc1789ff219e83442d5b8dd9d5d96e2024bd0e1fa5f767fd4b25ce0daf0c429",
                       "a97089016aa7d57568e765fabe7975c892af2917ad62d341b43870b8f473515b",
                       "ae697d04ee6ef2765e6072246dc043b6193c41b033e501bcff073ec8e5cf9f85"),

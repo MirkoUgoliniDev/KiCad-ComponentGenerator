@@ -345,26 +345,36 @@ def test_the_contract_names_and_default_are_the_agreed_ones():
 #: rame. Con il posizionamento vecchio (legacy_pin_one_marker) l'uscita torna
 #: identica ai valori precedenti, PINNED_FOOTPRINT_BEFORE_C3, come prova
 #: test_undoing_the_marker_clearance_fix_gives_the_previous_pinned_output.
+#: CAMBIATO DI NUOVO il 2026-11-17 (rs485 only; user decision «una regola sola»):
+#: the module-wide DECLARED 1.8 x 1.2 mm land of rs485 now bounds its ASSUMED
+#: holes like a side's own land (`_declared_land`): ring 1.7 -> 1.2 (the land
+#: width), drill 1.0 -> 0.8, half-hole 1.7 -> 0.8, so the continuous pads,
+#: the through-hole distance from the edge, the labels, the silk clipping and
+#: the pin-1 dot follow. Checked line by line against the previous output
+#: before re-pinning; every rs485 digest below was re-pinned on that output
+#: (the "undo" transforms still checked structurally), "four" (no declared
+#: land) keeps its whole history. Previous rs485 values: 05baf86f...,
+#: 7eaa34e7..., 0b97e456..., 6f7d1df0..., and in test_fixG_generators 701474f9...
 PINNED_FOOTPRINT = {
-    "rs485": "05baf86feea71685eb02c9fa03a28d5a95c832bfd3bc4588c2ff327641c63b09",
+    "rs485": "2ad9a6cb6fcbfbd03942d2235ca7c4417f54084cb2280dc4f62055fc61390f3f",
     "four": "040190545a3ce9d2a9ccdc0eb1ddeeb01e7b87b5537ca889c4671b64bd13508e",
 }
 #: Impronte prima di C3 (2026-09-27): stesso file con il segno del pin 1
 #: posizionato senza contare lo spessore del tratto.
 PINNED_FOOTPRINT_BEFORE_C3 = {
-    "rs485": "7eaa34e7cf07d35d9d60b50b3812a1200cd3adcc0e1a76101ba0967d85159576",
+    "rs485": "9cbef995aec96c04820c1ba875e2236d07ec0da98e51facfb6c9417557f67779",
     "four": "82bc177fcf3c5b7b0c2052fe546c446ce34def025b952cc5d617bf883684525c",
 }
 #: Impronte del 2026-09-24, prima di G1 e G9: il riferimento di
 #: test_undoing_the_offset_fix_and_the_silk_clipping_gives_the_pinned_output.
 PINNED_FOOTPRINT_2026_09_24 = {
-    "rs485": "701474f9d7cafc34bb029b814e365a43f0ebfdd0472ac141b004d36018f503e8",
+    "rs485": "b24f572ec41a4af7fa4cb64caa0e04d9797ac1fb279a714d95e1e74a96cc5c6c",
     "four": "cb4ba41dda8425847de81f9097c107c9730ba215ccebfd4124f848b6810ac894",
 }
 #: Stesse impronte senza la frase sul tipo SMD (valori del 2026-09-23 prima
 #: di G1 e G9: rs485 ab8e4527..., four 87c86d6b...).
 PINNED_FOOTPRINT_BEFORE_SMD_NOTE = {
-    "rs485": "0b97e456eb66dd3e7f4bc37e0c1b3330ee360ee3a7d0c32ab87a744a3065b011",
+    "rs485": "f8eb887b82900cf7c6a673ec9fbc83dc69918a235fd905735bcb7df59b340873",
     "four": "28ad0a912b02dc5e218bdb5fa8ad359f18fa93478a8e9e2beadf320fb053a692",
 }
 #: sha256 di notches/edge_contacts/extra_boxes/extra_payload, tolte le voci
@@ -380,7 +390,7 @@ PINNED_FOOTPRINT_BEFORE_SMD_NOTE = {
 #: payload vecchio SENZA quella chiave ha esattamente gli hash qui sotto.
 #: Valori precedenti, per traccia: rs485 f7ad6446..., four ba8a6bc6...
 PINNED_PAYLOAD = {
-    "rs485": "6f7d1df01ec4fd08a5e7d4ae057a7a4de5c3b48b1cbe5da7d84d2679ee962db0",
+    "rs485": "6d3806969c1e7f714d279a056f12453ca6fcfae93f6a0c5d934f93b39d81baef",
     "four": "d52f2a1a64da7b2d45ce8e8069146ee7b23bf3d288e6c594b0d95b903c8a0435",
 }
 BUILDERS = {"rs485": rs485, "four": four_sided}
@@ -456,8 +466,11 @@ def test_default_3d_payload_is_the_pinned_one_plus_only_the_plated_ring(name, mo
     assert len(header_pitches) == len(rings), "un passo dichiarato per ogni pin"
     for ring, stadium, placement in zip(rings, stadiums, pad_positions(params)):
         assert (ring["x"], ring["y"]) == params.thru_hole_centre(placement)
-        assert ring["radius"] == params.thru_hole_drill / 2
-        assert ring["pad_diameter_mm"] == params.thru_pad_diameter
+        # The side's resolved drill and ring (2026-11-17: rs485's declared
+        # land bounds its assumed ring and drill).
+        geometry = params.contact_geometry(placement)
+        assert ring["radius"] == geometry.drill / 2
+        assert ring["pad_diameter_mm"] == geometry.ring
         land = continuous_pad(params, placement)
         assert stadium == {"length_mm": land.inner_reach, "width_mm": land.across}
     # Nessuna cornice serigrafica della scheda (utente, 2026-09-26).
@@ -466,7 +479,8 @@ def test_default_3d_payload_is_the_pinned_one_plus_only_the_plated_ring(name, mo
     # sigla oltre la fine del rame continuo.
     if name == "rs485":
         first = continuous_pad(params, next(pad_positions(params)))
-        label_gap = params.hole_diameter / 2 + 0.55
+        # The side's resolved half-hole (2026-11-17: fitted to the declared land).
+        label_gap = params.side_geometry(params.sides[0]).half_hole / 2 + 0.55
         pe = next(t for t in captured["extra_payload"]["silk_texts"] if t["text"] == "PE")
         assert pe["x"] == pytest.approx(-params.body_length / 2 + first.inner_reach + label_gap)
 
@@ -697,7 +711,10 @@ def test_row_spacing_moves_the_hole_of_a_double_contact_too():
     # file proprio dove la regola storica metteva i fori, l'impronta e'
     # identica byte per byte a quella senza distanza dichiarata.
     same = rs485()
-    same.row_spacing = 42.8 - 2 * plain.thru_hole_centre_offset
+    # CONTRACT CHANGED 2026-11-17: the rows go where the SIDE's rule puts
+    # the holes (side_geometry), which since then fits the assumed holes into
+    # rs485's declared land; the module-wide property above does not see sides.
+    same.row_spacing = 42.8 - 2 * plain.side_geometry(plain.sides[0]).thru_inset
     assert same.side_geometry(same.sides[0]).thru_inset_source == "row_spacing"
     assert _uuidless(build_castellated_module(same)) == _uuidless(build_castellated_module(plain))
 
@@ -736,7 +753,11 @@ def test_the_keyhole_check_applies_only_where_both_holes_exist():
     double = rs485()
     double.body_width = 20.0
     double.thru_hole_offset = 1.27
-    with pytest.raises(ValueError, match="si toccano"):
+    # CONTRACT CHANGED 2026-11-17: rs485's assumed holes now fit its declared
+    # 1.2 mm land (0.8 mm drill and half-hole), so at 1.27 mm they no longer
+    # overlap: the same keyhole check refuses them for the wall left between
+    # them, below MIN_HOLE_WALL_MM.
+    with pytest.raises(ValueError, match="parete minima"):
         double.validate()
     through = rs485(CONTACT_THROUGH_HOLE)
     through.body_width = 20.0

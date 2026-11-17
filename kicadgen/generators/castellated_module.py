@@ -105,11 +105,13 @@ MIN_COPPER_GAP_MM = 0.2
 #: fits in the copper around it. Declared HEURISTIC, from manufacturing
 #: practice and not from a module: 0.3 mm is the minimum mechanical drill of
 #: the standard specifications of PCB manufacturers (0.2 mm only in advanced
-#: services). Below this value the estimate is not reduced: either the
-#: measured land or the hole estimate is wrong, and the note says so instead
-#: of drawing a hole that nobody would drill (adversarial check of
-#: 2026-10-02: land 0.45 -> hole 0.05). A declared hole size would make it
-#: unnecessary.
+#: services). An estimated HALF-HOLE that would need less is clamped at it
+#: (SIZE_ESTIMATE_MIN, since 2026-11-17; it used to stay unreduced, so a
+#: narrower land gave a larger half-hole) and an estimated DRILL is not
+#: reduced below it: either the measured land or the hole estimate is wrong,
+#: and the note says so instead of drawing a hole that nobody would drill
+#: (adversarial check of 2026-10-02: land 0.45 -> hole 0.05). A declared hole
+#: size would make it unnecessary.
 MIN_ESTIMATED_DRILL_MM = 0.3
 
 #: DECLARED HEURISTIC: centre of an undeclared half-hole measured inward from
@@ -200,10 +202,11 @@ REFERENCE_PAD_WIDTH_MM = AssumedSize(1.8)
 #: stimati» check (user decision 2026-11-16: no editor for it, so that row
 #: would have no remedy).
 REFERENCE_PAD_OVERHANG_MM = AssumedSize(1.4)
-#: Shortest part of an edge land kept under the module when nothing else
-#: bounds it (`CastellatedModuleParams.resolved_pad_overhang` without a
-#: half-hole), mm: the validator's own floor (a land longer than its
-#: overhang by at least 0.01 mm) and the 3D's CASTELLATED_PAD_MIN_INNER_MM.
+#: Shortest part of an edge land kept under the module, mm: the validator's
+#: own floor (an edge land longer than its overhang by at least 0.01 mm), the
+#: floor of the clearance shortening and the 3D's CASTELLATED_PAD_MIN_INNER_MM;
+#: also what `_inward_reach` reports for a side with no half-hole to cover
+#: (its callers then leave the overhang alone).
 MIN_INNER_LAND_MM = 0.01
 
 #: Provenance of a land size resolved for a side (PadSize).
@@ -221,13 +224,21 @@ SIZE_ESTIMATE_ROWS = "estimate_rows"    # estimated: the reference did not fit b
 SIZE_ESTIMATE_DRILL = "estimate_drill"  # estimated: the assumed ring did not surround the hole
 SIZE_ESTIMATE_PAD = "estimate_pad"      # estimated: the half-hole did not fit in the side's land
 SIZE_ESTIMATE_RING = "estimate_ring"    # estimated: the hole left no room for a ring
-SIZE_ESTIMATE_LENGTH = "estimate_length"  # estimated: the assumed overhang left a declared land too short under the module
+SIZE_ESTIMATE_LENGTH = "estimate_length"  # estimated: the assumed overhang left a declared land too short to cover its half-hole
+SIZE_ESTIMATE_SHORT_LAND = "estimate_short_land"  # estimated 0: a declared land shorter than its half-hole's reach, a contradiction the notes name
+SIZE_ESTIMATE_PAD_LENGTH = "estimate_pad_length"  # estimated: the half-hole did not fit under the side's declared land length
+SIZE_ESTIMATE_MIN = "estimate_min"      # estimated: half-hole clamped at the smallest estimable, still too large for its copper (the notes say so)
+
+#: The overhang provenances of an assumed overhang the program shortened for
+#: one side's DECLARED land (`CastellatedModuleParams.resolved_pad_overhang`).
+OVERHANG_ESTIMATE_SOURCES = (SIZE_ESTIMATE_LENGTH, SIZE_ESTIMATE_SHORT_LAND)
 
 #: The hole provenances that mean "an assumed size changed by the program to
 #: fit" (reduced to the pitch, the rows, the land or the ring, or enlarged
 #: around a hole): estimates, recorded in the footprint description.
 ESTIMATED_SIZE_SOURCES = (SIZE_ESTIMATE_PITCH, SIZE_ESTIMATE_ROWS, SIZE_ESTIMATE_DRILL,
-                          SIZE_ESTIMATE_PAD, SIZE_ESTIMATE_RING)
+                          SIZE_ESTIMATE_PAD, SIZE_ESTIMATE_RING, SIZE_ESTIMATE_PAD_LENGTH,
+                          SIZE_ESTIMATE_MIN)
 #: The land provenances that mean "an assumed size reduced by the program".
 ESTIMATED_PAD_SOURCES = (PAD_ESTIMATE_PITCH, PAD_ESTIMATE_CLEARANCE)
 
@@ -250,6 +261,9 @@ ESTIMATE_REASON_FILE_TEXTS = {
     SIZE_ESTIMATE_DRILL: "enlarged around the drill",
     PAD_ESTIMATE_CLEARANCE: "shortened to clear another side's copper",
     SIZE_ESTIMATE_LENGTH: "reduced so the declared pad covers the half-hole",
+    SIZE_ESTIMATE_SHORT_LAND: "set to 0, the declared pad is shorter than the half-hole",
+    SIZE_ESTIMATE_PAD_LENGTH: "reduced to fit under the declared pad",
+    SIZE_ESTIMATE_MIN: "reduced to the smallest estimable, still too large for its copper",
     INSET_FALLBACK: "smallest that fits",
     INSET_HALF_HOLE_ROWS: "smallest that fits",
 }
@@ -756,6 +770,12 @@ class CastellatedSide:
     hole_diameter: Optional[float] = None       # half-hole on the edge
     thru_hole_drill: Optional[float] = None     # closed through hole
     thru_pad_diameter: Optional[float] = None   # ring of the through hole
+    # Edge-land overhang beyond the board edge declared for this side, in mm
+    # (None = the module's `pad_overhang`). A plain float is declared and
+    # outranks the module's value; an AssumedSize is ignored like None. It
+    # lets a side carry its own resolved overhang (the clearance probe
+    # freezes each side's value through it, review 2026-11-17).
+    pad_overhang: Optional[float] = None
 
     def numbers(self) -> List[str]:
         """@brief Return the pad numbers in the order they are met along the edge.
@@ -864,72 +884,70 @@ class CastellatedModuleParams:
             if getattr(self, name) is None:
                 setattr(self, name, reference)
 
-    def _inward_reach(self, side) -> float:
-        """How far inside the module edge a side's land must reach, mm.
+    def _declared_overhang(self, side) -> Optional[float]:
+        """The overhang DECLARED for `side` (its own, else the module's), mm, or None."""
+        own = getattr(side, "pad_overhang", None)
+        if own is not None and is_declared_size(own):
+            return own
+        return self.pad_overhang if is_declared_size(self.pad_overhang) else None
+
+    def _is_continuous(self, side) -> bool:
+        """True when the side's contacts are one continuous pad (half_and_through with a through-hole)."""
+        if getattr(side, "contact_style", None) != CONTACT_HALF_AND_THROUGH:
+            return False
+        try:
+            return self.side_geometry(side).has_thru_holes
+        except (ArithmeticError, KeyError, TypeError, ValueError):
+            return False
+
+    def _half_hole_length_room(self, side, overhang_given_way: bool = False) -> Optional[float]:
+        """How far under the module an undeclared half-hole may reach on a side's DECLARED land, mm, or None.
+
+        The declared length (`_declared_land`) minus the declared overhang;
+        with an assumed overhang, minus that reference (the module's
+        AssumedSize): the undeclared half-hole gives way before it
+        (side_geometry). With `overhang_given_way`, minus nothing for an
+        assumed overhang: the room once the overhang has given way too, down
+        to 0. None when the land length is not declared, or a value is not
+        a usable number (validate() says why).
+        """
+        length = self._declared_land(side, "pad_length")
+        if length is None:
+            return None
+        overhang = self._declared_overhang(side)
+        if overhang is None:
+            overhang = 0.0 if overhang_given_way else self.pad_overhang
+        if (isinstance(overhang, bool) or not isinstance(overhang, (int, float))
+                or not math.isfinite(overhang)):
+            return None
+        return length - max(float(overhang), 0.0)
+
+    def _inward_reach(self, side) -> tuple:
+        """(how far inside the module edge a side's land must reach, mm; whether a half-hole sets it).
 
         The far side of the side's half-hole (its centre's inset plus its
         radius): the land under a castellation must cover the plated
-        half-hole the solder wets. MIN_INNER_LAND_MM when the side has no
-        usable half-hole geometry.
+        half-hole the solder wets. MIN_INNER_LAND_MM (and False) when the
+        side has no usable half-hole geometry, or when its contacts are one
+        continuous pad (half_and_through with a through-hole): that copper
+        runs on to the ring, so it covers the half-hole whatever the edge
+        land's length.
         """
         try:
             geometry = self.side_geometry(side)
             reach = geometry.half_hole_inset + geometry.half_hole / 2
         except (ArithmeticError, KeyError, TypeError, ValueError):
-            return MIN_INNER_LAND_MM
-        if not style_has_half_hole(side.contact_style) or not _finite_positive(reach):
-            return MIN_INNER_LAND_MM
-        return max(float(reach), MIN_INNER_LAND_MM)
+            return MIN_INNER_LAND_MM, False
+        if (not style_has_half_hole(side.contact_style) or not _finite_positive(reach)
+                or (side.contact_style == CONTACT_HALF_AND_THROUGH and geometry.has_thru_holes)):
+            return MIN_INNER_LAND_MM, False
+        return max(float(reach), MIN_INNER_LAND_MM), True
 
-    def _overhang_bound(self) -> Optional[tuple]:
-        """(largest overhang every DECLARED edge land allows, the declared length that sets it), or None.
-
-        For each side with an edge land and a DECLARED length L, the land
-        keeps L - overhang under the module, which must reach the far side of
-        its half-hole (`_inward_reach`): overhang <= L - reach, floored to
-        0.01 mm and at 0. None without a declared edge-land length.
-        """
-        bound = None
-        for side in self.sides:
-            if getattr(side, "contact_style", None) == CONTACT_THROUGH_HOLE:
-                continue
-            value, declared = self._raw_pad(side, "pad_length")
-            if not (declared and _finite_positive(value)):
-                continue
-            allowed = max(_floor_hundredth(float(value) - self._inward_reach(side)), 0.0)
-            if bound is None or allowed < bound[0]:
-                bound = (allowed, float(value))
-        return bound
-
-    def resolved_pad_overhang(self) -> tuple:
-        """@brief The edge-land overhang beyond the module edge the footprint uses, with its provenance.
-
-        @return (value mm, source): the declared `pad_overhang` as it is
-            (SIZE_MODULE); an assumed one as it is when every DECLARED edge
-            land still reaches past its half-hole under the module
-            (SIZE_REFERENCE); otherwise min over those lands of
-            (declared length - inward reach), floored to 0.01 mm and at 0
-            (SIZE_ESTIMATE_LENGTH).
-        @note An estimate never overrides a measure (review 2026-11-16, I-3):
-            the 1.4 mm reference overhang used to make validate() refuse a
-            DECLARED 1.2 mm land, as if the land were wrong.
-        @note DECLARED HEURISTIC, continuous in the declared length (final
-            review 2026-11-16: the former «half the length when the overhang
-            is not shorter» jumped from 0.70 to 1.40 mm between a 1.40 and a
-            1.41 mm land, leaving 0.01 mm under the module). It rests on one
-            physical fact: the land under a castellation must cover the
-            plated half-hole the solder wets, so the part under the module
-            reaches at least the far side of the half-hole (inset + radius,
-            `_inward_reach`; MIN_INNER_LAND_MM without a half-hole). The
-            reference overhang is kept whenever that holds, and shortened
-            just enough when it does not. Module-wide like `pad_overhang`,
-            so the most constraining declared land decides it. A declared
-            overhang makes it unnecessary; a declared overhang not shorter
-            than a declared length is still refused by validate().
-        @note Every reader of the overhang inside the generator uses this
-            value (pad_positions, continuous_pad, the checks); the raw field
-            stays the caller's input.
-        """
+    def _resolve_side_overhang(self, side) -> tuple:
+        """(value mm, SIZE_* source) of one side's overhang, uncached (see `resolved_pad_overhang`)."""
+        own = getattr(side, "pad_overhang", None)
+        if own is not None and is_declared_size(own):
+            return own, SIZE_SIDE
         overhang = self.pad_overhang
         if is_declared_size(overhang):
             return overhang, SIZE_MODULE
@@ -937,36 +955,208 @@ class CastellatedModuleParams:
                 or not math.isfinite(overhang)):
             # validate() refuses it with its own message.
             return overhang, SIZE_REFERENCE
-        bound = self._overhang_bound()
-        if bound is not None and overhang > bound[0] + 1e-9:
-            return bound[0], SIZE_ESTIMATE_LENGTH
+        if getattr(side, "contact_style", None) == CONTACT_THROUGH_HOLE or self._is_continuous(side):
+            # No edge land (through_hole), or one continuous pad whose copper
+            # runs on to the ring whatever the edge land's length: nothing
+            # for a declared length to bound (review 2026-11-17, they were
+            # shortened for nothing).
+            return overhang, SIZE_REFERENCE
+        length = self._declared_land(side, "pad_length")
+        reach, half_hole = self._inward_reach(side)
+        if length is None or not half_hole:
+            return overhang, SIZE_REFERENCE
+        room = length - reach
+        if room < -1e-9:
+            # Not even a zero overhang lets the declared land cover its
+            # half-hole, already reduced as far as it may be (side_geometry):
+            # the notes name the declared values in conflict.
+            return 0.0, SIZE_ESTIMATE_SHORT_LAND
+        allowed = max(_floor_hundredth(room), 0.0)
+        if overhang > allowed + 1e-9:
+            return allowed, SIZE_ESTIMATE_LENGTH
         return overhang, SIZE_REFERENCE
 
-    def assumed_overhang_description(self) -> str:
-        """@brief The footprint-description entry of an undeclared overhang, fixed file language, or "".
+    def resolved_pad_overhang(self, side) -> tuple:
+        """@brief The edge-land overhang beyond the module edge one side's footprint lands use, with its provenance.
 
-        @return One ASSUMED_SIZES_DESCRIPTION entry labelled «every side»
-            (the overhang is module-wide, so it is written once, not per
-            side): the value used, with the ESTIMATE_REASON_FILE_TEXTS reason
-            when it was reduced; "" when the overhang is declared or no side
-            has an edge land.
+        @param side One of self.sides (or an equivalent description).
+        @return (value mm, source): the side's declared `pad_overhang` as it
+            is (SIZE_SIDE); else the module's declared one as it is
+            (SIZE_MODULE); else the assumed one as it is when the side has no
+            declared land length, is a continuous pad, or its DECLARED land
+            still reaches past its half-hole under the module
+            (SIZE_REFERENCE); otherwise declared length - inward reach,
+            floored to 0.01 mm (SIZE_ESTIMATE_LENGTH), or 0 when even that is
+            negative (SIZE_ESTIMATE_SHORT_LAND: a declared value contradicts
+            the land, the notes say which).
+        @note An estimate never overrides a measure (review 2026-11-16, I-3):
+            the 1.4 mm reference overhang used to make validate() refuse a
+            DECLARED 1.2 mm land, as if the land were wrong.
+        @note PER SIDE since 2026-11-17 (review of the final generality
+            check): one module-wide value let the shortest declared land of
+            one side move the DECLARED lands of every other side inward.
+        @note DECLARED HEURISTIC, continuous in the declared length. It rests
+            on one physical fact: the land under a castellation must cover
+            the plated half-hole the solder wets, so the part under the
+            module reaches at least the far side of the half-hole (inset +
+            radius, `_inward_reach`). Two assumptions can give way, and the
+            order is a choice with a stated basis, not a measure: first an
+            undeclared half-hole, down to the smallest estimated one
+            (side_geometry: on an edge land it is not written in the
+            footprint, it only shapes the 3D and the contact zones), then
+            this overhang, which moves soldered copper. A declared overhang
+            or half-hole makes it unnecessary. A declared overhang not
+            shorter than a declared length is still refused by validate()
+            (not on a continuous pad, whose copper runs on to the ring).
+        @note Every reader of the overhang inside the generator uses this
+            value (pad_positions, continuous_pad, the checks, the 3D lands);
+            the raw field stays the caller's input. Cached per side on a
+            snapshot of its inputs (`_overhang_key`).
         """
-        if is_declared_size(self.pad_overhang) or not any(
-                side.contact_style != CONTACT_THROUGH_HOLE for side in self.sides):
-            return ""
-        overhang, source = self.resolved_pad_overhang()
-        name = ASSUMED_SIZE_FILE_NAMES["pad_overhang"].format(float(overhang))
-        if source == SIZE_ESTIMATE_LENGTH:
-            name = "{} ({})".format(name, ESTIMATE_REASON_FILE_TEXTS[source])
-        return ASSUMED_SIZES_DESCRIPTION.format(label="every", sizes=name)
+        for index, candidate in enumerate(self.sides):
+            if candidate is side:
+                return self._side_overhangs()[index]
+        return self._resolve_side_overhang(side)
+
+    def _overhang_key(self) -> tuple:
+        """Snapshot of every input of the per-side overhangs, provenance (type) included.
+
+        Lighter than `_pad_cache_key` (no pin numbering, which the overhang
+        does not read, and no repr): it is taken once per contact by
+        `contact_pad_overhang`, so its cost is paid per pad.
+        """
+        module = tuple((type(value).__name__, value) for value in (
+            self.body_length, self.body_width, self.pad_length, self.pad_width, self.pad_overhang,
+            self.hole_diameter, self.hole_inset, self.thru_hole_drill, self.thru_pad_diameter,
+            self.thru_hole_offset, self.row_spacing))
+        sides = tuple(tuple((type(value).__name__, value) for value in (
+            side.edge, side.count, side.pitch, side.pad_length, side.pad_width, side.contact_style,
+            getattr(side, "hole_diameter", None), getattr(side, "thru_hole_drill", None),
+            getattr(side, "thru_pad_diameter", None), getattr(side, "pad_overhang", None)))
+            for side in self.sides)
+        return module, sides
+
+    def _side_overhangs(self) -> tuple:
+        """`resolved_pad_overhang` of every side, in order, cached on `_overhang_key`."""
+        key = self._overhang_key()
+        cached = self.__dict__.get("_overhang_cache")
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        values = tuple(self._resolve_side_overhang(side) for side in self.sides)
+        self.__dict__["_overhang_cache"] = (key, values)
+        return values
+
+    def side_pad_overhang(self, side) -> float:
+        """@brief The overhang value of `resolved_pad_overhang` for one side, mm.
+
+        @param side One of self.sides (or an equivalent description).
+        @return The overhang that side's footprint lands, 3D lands and
+            preview use.
+        """
+        return self.resolved_pad_overhang(side)[0]
+
+    def contact_pad_overhang(self, placement: "PadPlacement") -> float:
+        """@brief The overhang of the side of a placed contact, mm.
+
+        @param placement Contact from pad_positions().
+        @return side_pad_overhang() of its side; for a placement that matches
+            no side, the module's largest (`effective_pad_overhang`).
+        """
+        side = self.side_of(placement)
+        return self.side_pad_overhang(side) if side is not None else self.effective_pad_overhang
+
+    def _side_tag(self, side, localized: bool) -> str:
+        """Name of a side in the overhang notes: its edge, plus its pad range when another side shares the edge."""
+        name = edge_label(side.edge, side.edge) if localized else side.edge
+        if sum(1 for other in self.sides if other.edge == side.edge) > 1:
+            numbers = side.numbers()
+            if numbers:
+                name = "{} {}-{}".format(name, numbers[0], numbers[-1])
+        return name
+
+    def _short_land_cause(self, side) -> str:
+        """Which declared value a SIZE_ESTIMATE_SHORT_LAND land contradicts: "half_hole", "inset" or "smallest"."""
+        if self.side_geometry(side).half_hole_source in (SIZE_SIDE, SIZE_MODULE):
+            return "half_hole"
+        # The declared centre is to blame only when it is what sets the
+        # smallest estimable half-hole (`_smallest_estimated_half_hole`).
+        if (self.hole_inset is not None
+                and self._smallest_estimated_half_hole() > MIN_ESTIMATED_DRILL_MM + 1e-9):
+            return "inset"
+        return "smallest"
+
+    def _overhang_groups(self) -> List[tuple]:
+        """The sides with an UNDECLARED edge-land overhang, grouped by what their notes say.
+
+        @return (sides, value, source, length, reach, cause) tuples: `sides`
+            None when every side with an edge land is in one group (written
+            once, «every side»), else the list of the group's sides; length
+            and reach only where the note quotes them, cause only for
+            SIZE_ESTIMATE_SHORT_LAND (`_short_land_cause`). Sides that say the
+            same thing share one entry (review 2026-11-17: equal per-side
+            entries were repeated).
+        """
+        groups: List[list] = []
+        edge_land_sides = 0
+        for side in self.sides:
+            if (side.edge not in EDGES or side.contact_style not in CONTACT_STYLES
+                    or side.contact_style == CONTACT_THROUGH_HOLE):
+                continue
+            edge_land_sides += 1
+            if self._declared_overhang(side) is not None:
+                continue
+            value, source = self.resolved_pad_overhang(side)
+            quoted = source in (SIZE_ESTIMATE_LENGTH, SIZE_ESTIMATE_SHORT_LAND)
+            length = self._declared_land(side, "pad_length") if quoted else None
+            reach = round(self._inward_reach(side)[0], 3) if source == SIZE_ESTIMATE_SHORT_LAND else None
+            cause = self._short_land_cause(side) if source == SIZE_ESTIMATE_SHORT_LAND else None
+            said = (float(value), source, length, reach, cause)
+            for group in groups:
+                if group[1:] == list(said):
+                    group[0].append(side)
+                    break
+            else:
+                groups.append([[side], *said])
+        if len(groups) == 1 and len(groups[0][0]) == edge_land_sides:
+            groups[0][0] = None
+        return [tuple(group) for group in groups]
+
+    def assumed_overhang_description(self) -> str:
+        """@brief The footprint-description entries of an undeclared overhang, fixed file language, or "".
+
+        @return ASSUMED_SIZES_DESCRIPTION entries joined by "; ", one per
+            `_overhang_groups` group: labelled «every» when one group holds
+            every side with an edge land, else with its sides' edges (and pad
+            range when an edge has several sides) joined by "/"; each names
+            the value used, with the ESTIMATE_REASON_FILE_TEXTS reason when
+            it was reduced. "" when no side with an edge land has an
+            undeclared overhang.
+        """
+        entries = []
+        for sides, value, source, _length, _reach, _cause in self._overhang_groups():
+            name = ASSUMED_SIZE_FILE_NAMES["pad_overhang"].format(value)
+            if source in OVERHANG_ESTIMATE_SOURCES:
+                name = "{} ({})".format(name, ESTIMATE_REASON_FILE_TEXTS[source])
+            label = ("every" if sides is None
+                     else "/".join(self._side_tag(side, localized=False) for side in sides))
+            entries.append(ASSUMED_SIZES_DESCRIPTION.format(label=label, sizes=name))
+        return "; ".join(entries)
 
     @property
     def effective_pad_overhang(self) -> float:
-        """@brief The overhang value of `resolved_pad_overhang`, mm.
+        """@brief The largest overhang any side with an edge land uses, mm.
 
-        @return The overhang the footprint, the 3D lands and the preview must use.
+        @return max of `side_pad_overhang` over the sides that are not
+            through_hole; the module's `pad_overhang` when there is none.
+        @note The envelope readers (KiCad reach check, preview grid) need the
+            farthest copper; a land is placed with its OWN side's value
+            (`side_pad_overhang`, `contact_pad_overhang`).
         """
-        return self.resolved_pad_overhang()[0]
+        values = [self.side_pad_overhang(side) for side in self.sides
+                  if getattr(side, "contact_style", None) != CONTACT_THROUGH_HOLE]
+        values = [value for value in values if isinstance(value, (int, float))
+                  and not isinstance(value, bool) and math.isfinite(value)]
+        return max(values) if values else self.pad_overhang
 
     @staticmethod
     def _sized(side_value, module_value, reference, bounds) -> tuple:
@@ -1016,13 +1206,34 @@ class CastellatedModuleParams:
             smallest = max(smallest, _floor_hundredth(2 * float(self.hole_inset)) + 0.01)
         return smallest
 
-    @staticmethod
-    def _side_land_width(side) -> Optional[float]:
-        """Width (along the edge) of the side's own measured or declared land, mm, or None."""
-        value = getattr(side, "pad_width", None)
-        if value is None or not is_declared_size(value) or not _finite_positive(value):
+    def _declared_land(self, side, name: str) -> Optional[float]:
+        """The DECLARED land size `name` ("pad_length" or "pad_width") drawn on `side`, mm, or None.
+
+        The same lookup on both axes (review 2026-11-17): the side's own
+        value, else the module's (`_raw_pad`, so a side's estimate is never
+        outranked by the module's value); None unless that value is declared.
+        A module-wide value is declared only when the user typed it (the
+        window passes None otherwise, review 2026-11-16 R2-8), and it is the
+        land drawn on every side without its own, so it is evidence of that
+        side's copper like a side's own measure. On a through_hole side only
+        the side's OWN declared value counts, as before 2026-11-17: it draws
+        the ring, not the module's edge land, so a typed module width is no
+        evidence of its copper (second generality audit 2026-11-17: it shrank
+        the assumed drill of through_hole sides), while the side's own value
+        keeps gating the drill-room rule as it did (third review: returning
+        None switched that rule off on every through_hole side).
+        """
+        if getattr(side, "contact_style", None) == CONTACT_THROUGH_HOLE:
+            own = getattr(side, name, None)
+            return float(own) if is_declared_size(own) and _finite_positive(own) else None
+        value, declared = self._raw_pad(side, name)
+        if not declared or not _finite_positive(value):
             return None
         return float(value)
+
+    def _side_land_width(self, side) -> Optional[float]:
+        """Width (along the edge) of the declared land drawn on `side`, mm, or None (`_declared_land`)."""
+        return self._declared_land(side, "pad_width")
 
     def _declared_hole(self, side, name: str) -> Optional[float]:
         """The declared value of hole size `name` for `side` (side first, then module), or None."""
@@ -1120,7 +1331,20 @@ class CastellatedModuleParams:
               edge) with MIN_HOLE_WALL_MM of copper on each part
               (SIZE_ESTIMATE_PAD): a hole wider than the land around it is not
               a castellation (user, 2026-10-02: an AI-estimated 2.0 mm half-hole
-              in a 1.53 mm pad measured on the photo);
+              in a 1.53 mm pad measured on the photo); below the smallest
+              estimated half-hole it is clamped there, never put back to the
+              reference (second generality audit 2026-11-17: a narrower land
+              gave a larger half-hole), and _copper_fit_notes names the
+              contradiction;
+            * the same rule across the edge: an assumed half-hole's far side
+              lies within the side's DECLARED land length under the module
+              (`_half_hole_length_room`: that length minus the declared
+              overhang, else minus the 1.4 mm reference, which gives way only
+              after the half-hole, user decision 2026-11-17), clamped at the
+              smallest estimated half-hole
+              (SIZE_ESTIMATE_PAD_LENGTH; review 2026-11-17). Not on a
+              continuous pad, whose copper covers the half-hole whatever the
+              edge land's length;
             * half_and_through: an assumed ring is copper of the same
               continuous pad, so it is at most the side's pad width
               (SIZE_ESTIMATE_PAD);
@@ -1154,13 +1378,16 @@ class CastellatedModuleParams:
         # «Il foro sta nel suo rame» (the hole fits in its copper; user,
         # 2026-10-02): it holds for every NOT declared hole (AI estimate or
         # historical reference) of a side whose land is evidence of the copper
-        # that is there -- measured on the photo or declared FOR THAT SIDE. The
+        # that is there -- measured on the photo or declared for that side, or
+        # declared module-wide and drawn on it (`_declared_land`). The
         # criterion is the provenance of the two dimensions, not the fact that
-        # the AI estimated something on that side. The module's land width does
-        # not count: it is the module default (the interface resets it to the
-        # reference at every extraction) and in the through-hole contact it is
-        # not even drawn (the land is the ring); only the side's size describes
-        # the copper of those contacts.
+        # the AI estimated something on that side. CONTRACT CHANGED 2026-11-17:
+        # the module's DECLARED width counts too, as the length does. It was
+        # left out when the window reset it to the reference at every
+        # extraction and passed it as declared; since review 2026-11-16 (R2-8)
+        # it is declared only when the user typed it, and it is the land drawn
+        # on every side without its own. The through_hole style draws the ring,
+        # not this land, and none of the rules below applies to it.
         pad_width = self._side_land_width(side)
         declared_drill = (self._declared_hole(side, "thru_hole_drill") if through else None)
 
@@ -1200,6 +1427,15 @@ class CastellatedModuleParams:
                 room = min(caps) if caps else None
             if room is not None:
                 limit = _floor_hundredth(room - 2 * MIN_HOLE_WALL_MM)
+                # DELIBERATELY not clamped at the minimum (third review
+                # 2026-11-17): a clamped drill inside a ring that cannot grow
+                # (declared, or at the pitch) left an annular ring under
+                # MIN_HOLE_WALL_MM accepted silently. Kept, the drill makes the
+                # ring grow around it or validate() refuse the clash, both
+                # said. Known step: on a continuous pad whose declared land is
+                # narrower than 2 * MIN_HOLE_WALL_MM + MIN_ESTIMATED_DRILL_MM the
+                # drill stays the estimate and _copper_fit_notes reports the
+                # ring wider than the land.
                 if MIN_ESTIMATED_DRILL_MM - 1e-9 <= limit < drill - 1e-9:
                     drill, drill_source = limit, SIZE_ESTIMATE_RING
         if (through and drill > 0
@@ -1223,11 +1459,46 @@ class CastellatedModuleParams:
             # the minimum copper wall on each side: on the photo the land is measured,
             # the hole is only estimated by the AI. Not below the minimum drill, nor
             # so small that a DECLARED edge distance would leave it whole inside the
-            # board: then the estimate stays and the note asks for the measure.
-            limit = _floor_hundredth(pad_width - 2 * MIN_HOLE_WALL_MM)
-            if limit < half - 1e-9 and limit >= self._smallest_estimated_half_hole() - 1e-9:
-                half, half_source = limit, SIZE_ESTIMATE_PAD
+            # board: it is clamped there (CONTRACT CHANGED 2026-11-17: it used to
+            # go back to the unreduced estimate, so a narrower land gave a larger
+            # half-hole) and _copper_fit_notes asks for the measure.
+            fit = _floor_hundredth(pad_width - 2 * MIN_HOLE_WALL_MM)
+            limit = max(fit, self._smallest_estimated_half_hole())
+            if limit < half - 1e-9:
+                half, half_source = limit, (SIZE_ESTIMATE_PAD if fit >= limit - 1e-9
+                                            else SIZE_ESTIMATE_MIN)
         has_thru = through and drill > 0 and ring > 0
+        # The same rule across the edge (review 2026-11-17): a NOT declared
+        # half-hole must lie under the DECLARED land drawn on the side, its
+        # far side within the part of the land under the module with the
+        # overhang the side would use unreduced (`_half_hole_length_room`).
+        # A continuous pad (half_and_through with a through-hole) is excluded:
+        # its copper runs on to the ring, so it covers the half-hole whatever
+        # the length. DECLARED HEURISTIC on which assumption gives way first,
+        # USER DECISION 2026-11-17 («cede sempre il semi-foro»): the undeclared
+        # half-hole, whether the reference or an AI estimate of this part, and
+        # only then the assumed overhang. Basis: on an edge land the half-hole
+        # is not written in the footprint (only the 3D and the contact zones
+        # use it), while the overhang moves soldered copper, which must not
+        # move on the provenance of a value the footprint does not write (a
+        # first version let an estimate outrank the overhang: a 1.7 mm
+        # estimate moved the land by 1.1 mm). It is clamped at the smallest
+        # estimated half-hole, never put back to the reference, and the notes
+        # name the reduced estimate and what still does not fit.
+        room = (None if style == CONTACT_HALF_AND_THROUGH and has_thru
+                else self._half_hole_length_room(side))
+        if (half_style and half > 0 and room is not None
+                and half_source not in (SIZE_SIDE, SIZE_MODULE)
+                and self._half_hole_inset_for(half) + half / 2 > room + 1e-9):
+            # Never above the width bound already applied (`half`).
+            target = max(self._largest_half_hole_before(room) if room > 0 else 0.0,
+                         self._smallest_estimated_half_hole())
+            if target < half - 1e-9:
+                # It fits when the land covers it once the assumed overhang
+                # has given way too (down to 0; a declared one stays).
+                full = self._half_hole_length_room(side, overhang_given_way=True)
+                fits = full is not None and self._half_hole_inset_for(target) + target / 2 <= full + 1e-9
+                half, half_source = target, (SIZE_ESTIMATE_PAD_LENGTH if fits else SIZE_ESTIMATE_MIN)
 
         rows_inset = None
         pair = self._row_spacing_edges()
@@ -1250,8 +1521,10 @@ class CastellatedModuleParams:
                 limit = rows_inset - drill / 2 - MIN_HOLE_WALL_MM
                 # Only an ASSUMED half-hole is reduced; a declared one that does not
                 # leave the wall is an error (validate).
+                # Not SIZE_ESTIMATE_MIN: it is already at the smallest
+                # estimable half-hole and must not be cut below it.
                 if (half_style and half_source in (SIZE_REFERENCE, SIZE_ESTIMATE_PITCH,
-                                                   SIZE_ESTIMATE_PAD)
+                                                   SIZE_ESTIMATE_PAD, SIZE_ESTIMATE_PAD_LENGTH)
                         and self._half_hole_inset_for(half) + half / 2 > limit + 1e-9):
                     largest = self._largest_half_hole_before(limit)
                     if 0 < largest < half:
@@ -1301,6 +1574,19 @@ class CastellatedModuleParams:
                         "e' ridotto a {value:.2f}mm. Indica il diametro misurato per averlo esatto.",
                         label=label, pad=self._side_land_width(side) or 0.0,
                         wall=MIN_HOLE_WALL_MM, value=geometry.half_hole))
+                elif geometry.half_hole_source == SIZE_ESTIMATE_PAD_LENGTH:
+                    notes.append(tx(
+                        "Lato {label}: diametro del semi-foro non dichiarato; la stima non stava "
+                        "sotto la piazzola dichiarata di {length}mm, che con lo sbalzo di "
+                        "{overhang:.2f}mm lascia {room:.2f}mm dentro il modulo, quindi e' ridotto a "
+                        "{value:.2f}mm. Indica il diametro misurato per averlo esatto.",
+                        # What the footprint draws: the declared land and the
+                        # overhang this side really uses (review 2026-11-17).
+                        label=label, length=self._declared_land(side, "pad_length"),
+                        overhang=float(self.side_pad_overhang(side)),
+                        room=(self._declared_land(side, "pad_length") or 0.0)
+                        - float(self.side_pad_overhang(side)),
+                        value=geometry.half_hole))
                 elif geometry.half_hole_source == SIZE_ESTIMATE_ROWS:
                     notes.append(tx(
                         "Lato {label}: diametro del semi-foro non dichiarato; con i fori passanti "
@@ -1355,24 +1641,85 @@ class CastellatedModuleParams:
             notes.extend(self._inset_notes(side, geometry, label))
             notes.extend(self._pad_notes(side, label))
             notes.extend(self._assumed_size_notes(side, label))
-        if self.assumed_overhang_description():
-            # Module-wide, so said once. No «indicate the measure» remedy:
-            # the window has no field for the overhang (user decision
-            # 2026-11-16), so the note only states the estimate.
-            overhang, source = self.resolved_pad_overhang()
+        notes.extend(self._overhang_notes())
+        return notes
+
+    def _overhang_notes(self) -> List[str]:
+        """Localized notes on the edge-land overhang: one per `_overhang_groups` group, plus contradictions.
+
+        No «indicate the measure» remedy for the estimate itself: the window
+        has no field for the overhang (user decision 2026-11-16), so the
+        note only states it. A contradiction names the declared values the
+        user can correct: the land against a declared half-hole, a declared
+        half-hole centre, or nothing but the smallest estimable half-hole
+        (SIZE_ESTIMATE_SHORT_LAND); and, with a DECLARED overhang, the land
+        left under the module against the half-hole (review 2026-11-17: that
+        case was silent).
+        """
+        notes = []
+        for sides, value, source, length, reach, cause in self._overhang_groups():
+            where = (tx("tutti i lati") if sides is None
+                     else ", ".join(self._side_tag(side, localized=True) for side in sides))
             if source == SIZE_ESTIMATE_LENGTH:
                 notes.append(tx(
-                    "Sbalzo delle piazzole oltre il bordo non dichiarato: con il valore di riferimento "
-                    "{reference}mm la piazzola dichiarata di {length}mm non coprirebbe il semi-foro "
-                    "sotto il modulo, quindi lo sbalzo e' stimato {value:.2f}mm. E' una stima, non una "
-                    "misura.",
-                    reference=float(self.pad_overhang), length=self._overhang_bound()[1],
-                    value=overhang))
+                    "Sbalzo delle piazzole oltre il bordo non dichiarato ({sides}): con il valore di "
+                    "riferimento {reference}mm la piazzola dichiarata di {length}mm non coprirebbe il "
+                    "semi-foro sotto il modulo, quindi lo sbalzo e' stimato {value:.2f}mm. E' una "
+                    "stima, non una misura.",
+                    sides=where, reference=float(self.pad_overhang), length=length, value=value))
+            elif source == SIZE_ESTIMATE_SHORT_LAND and cause == "half_hole":
+                notes.append(tx(
+                    "Piazzole dichiarate piu' corte del semi-foro ({sides}): la piazzola di {length}mm "
+                    "non arriva al lato interno del semi-foro dichiarato, a {reach:.2f}mm dal bordo, "
+                    "nemmeno con sbalzo 0; lo sbalzo e' messo a 0. Le quote si contraddicono: "
+                    "controlla la lunghezza della piazzola e il diametro del semi-foro.",
+                    sides=where, length=length, reach=reach))
+            elif source == SIZE_ESTIMATE_SHORT_LAND and cause == "inset":
+                notes.append(tx(
+                    "Piazzole dichiarate piu' corte del semi-foro ({sides}): con il centro del "
+                    "semi-foro dichiarato a {inset}mm dal bordo, anche il semi-foro piu' piccolo "
+                    "stimabile arriva a {reach:.2f}mm, oltre la piazzola di {length}mm, nemmeno con "
+                    "sbalzo 0; lo sbalzo e' messo a 0. Le quote si contraddicono: controlla la "
+                    "lunghezza della piazzola e la distanza del semi-foro dal bordo.",
+                    sides=where, inset=self.hole_inset, reach=reach, length=length))
+            elif source == SIZE_ESTIMATE_SHORT_LAND:
+                notes.append(tx(
+                    "Piazzole dichiarate piu' corte del semi-foro ({sides}): la piazzola di {length}mm "
+                    "non copre nemmeno il semi-foro piu' piccolo stimabile, che arriva a {reach:.2f}mm "
+                    "dal bordo, con sbalzo 0; lo sbalzo e' messo a 0. Controlla la lunghezza della "
+                    "piazzola.",
+                    sides=where, length=length, reach=reach))
             else:
                 notes.append(tx(
-                    "Sbalzo delle piazzole oltre il bordo non dichiarato: usato il valore di "
-                    "riferimento {value:.2f}mm di un modulo campione, non misurato su questo modulo.",
-                    value=float(overhang)))
+                    "Sbalzo delle piazzole oltre il bordo non dichiarato ({sides}): usato il valore "
+                    "di riferimento {value:.2f}mm di un modulo campione, non misurato su questo "
+                    "modulo.",
+                    sides=where, value=value))
+        for side in self.sides:
+            overhang = self._declared_overhang(side)
+            if (overhang is None or side.edge not in EDGES
+                    or side.contact_style not in CONTACT_STYLES
+                    or side.contact_style == CONTACT_THROUGH_HOLE or self._is_continuous(side)):
+                continue
+            # The land actually drawn, declared or assumed (second review
+            # 2026-11-17: a declared overhang over an assumed land was silent),
+            # unless it was shortened for another side's copper: _pad_notes
+            # already says that land no longer covers the half-hole.
+            size = self._pad_size_of(side)
+            if size is not None and size.length_source == PAD_ESTIMATE_CLEARANCE:
+                continue
+            length = float(self.side_pad_length(side))
+            reach, half_hole = self._inward_reach(side)
+            room = length - float(overhang)
+            if half_hole and room >= 0 and room < reach - 1e-9:
+                # room < 0 is refused by validate() (overhang not shorter than the land).
+                notes.append(tx(
+                    "Lato {label}: con lo sbalzo dichiarato di {overhang}mm la piazzola di "
+                    "{length:.2f}mm lascia {room:.2f}mm sotto il modulo, meno dei {reach:.2f}mm a cui "
+                    "arriva il semi-foro: le quote si contraddicono, controlla sbalzo, lunghezza "
+                    "della piazzola e semi-foro.",
+                    label=self._side_tag(side, localized=True), overhang=overhang, length=length,
+                    room=room, reach=reach))
         return notes
 
     def assumed_sizes(self, side: CastellatedSide) -> List[tuple]:
@@ -1385,8 +1732,8 @@ class CastellatedModuleParams:
             reference or an AssumedSize estimate that fitted, so nothing
             reduced it and no other note names it), plus the half-hole centre
             from HALF_HOLE_INSET_RATIO when `hole_inset` is not declared. The
-            module-wide overhang is not per side: see
-            `assumed_overhang_description`.
+            overhang is described apart, grouped over the sides that share
+            it: see `assumed_overhang_description`.
         @note Before 2026-11-03 these sizes were used silently when the
             documents gave none (review G1/G5): the reference holes and land
             of one historical module would reach a footprint as if measured.
@@ -1561,7 +1908,8 @@ class CastellatedModuleParams:
                       for kind, value, source in self.estimated_sizes(side)]
             if names:
                 entries.append(ASSUMED_SIZES_DESCRIPTION.format(label=side.edge, sizes=", ".join(names)))
-        # The module-wide overhang, once (not repeated on every side).
+        # The undeclared overhang, once when every side shares it (not
+        # repeated on every side), else per side.
         overhang = self.assumed_overhang_description()
         if overhang:
             entries.append(overhang)
@@ -1574,14 +1922,15 @@ class CastellatedModuleParams:
         if size is None:
             return notes
         raw_length, declared = self._raw_pad(side, "pad_length")
+        overhang = self.side_pad_overhang(side)
         if (not declared and side.contact_style != CONTACT_THROUGH_HOLE
-                and _finite_positive(raw_length) and raw_length <= self.effective_pad_overhang
-                and size.length > self.effective_pad_overhang):
+                and _finite_positive(raw_length) and raw_length <= overhang
+                and size.length > overhang):
             notes.append(tx(
                 "Lato {label}: lunghezza pad stimata {estimate}mm incompatibile con lo "
                 "sbalzo {overhang}mm; usato il riferimento del modulo, con lunghezza "
                 "finale {value:.2f}mm. Quota da verificare.",
-                label=label, estimate=float(raw_length), overhang=self.effective_pad_overhang,
+                label=label, estimate=float(raw_length), overhang=overhang,
                 value=size.length))
         if size.width_source == PAD_ESTIMATE_PITCH:
             notes.append(tx(
@@ -1600,6 +1949,17 @@ class CastellatedModuleParams:
                 label=label, estimate=float(size.length_estimate), gap=MIN_COPPER_GAP_MM,
                 other=edge_label(size.clearance_edge, size.clearance_edge),
                 value=size.length))
+            # The floor of that shortening keeps the land under the module,
+            # not over its half-hole (raising it would refuse modules that
+            # are built today): when the shortened land no longer covers
+            # the half-hole, say so instead of leaving it silent.
+            reach, half_hole = self._inward_reach(side)
+            if half_hole and size.length - overhang < reach - 1e-9:
+                notes.append(tx(
+                    "Lato {label}: accorciata a {value:.2f}mm, la piazzola non copre piu' tutto il "
+                    "semi-foro sotto il modulo (servono {reach:.2f}mm dal bordo). Indica la "
+                    "lunghezza letta dal disegno per averla esatta.",
+                    label=label, value=size.length, reach=reach))
         return notes
 
     def _reference(self, name: str, side: Optional[CastellatedSide] = None) -> float:
@@ -1879,7 +2239,7 @@ class CastellatedModuleParams:
         sides = tuple(tuple(tagged(getattr(side, name, None)) for name in (
             "edge", "count", "pitch", "first_pin", "reverse", "offset", "pad_length",
             "pad_width", "pin_numbers", "contact_style", "hole_diameter",
-            "thru_hole_drill", "thru_pad_diameter")) for side in self.sides)
+            "thru_hole_drill", "thru_pad_diameter", "pad_overhang")) for side in self.sides)
         return repr((module, sides))
 
     def pad_sizes(self) -> List[PadSize]:
@@ -1925,11 +2285,11 @@ class CastellatedModuleParams:
         widths and every other step are the same. validate() uses that cheap
         form for its per-side checks, which a shortened length cannot change
         (see the comment in validate)."""
-        # The overhang the lands are drawn with (an assumed one reduced to a
-        # declared land, `resolved_pad_overhang`).
-        overhang = self.effective_pad_overhang
         entries = []
         for side in self.sides:
+            # The overhang this side's lands are drawn with (an assumed one
+            # reduced to the side's declared land, `resolved_pad_overhang`).
+            overhang = self.side_pad_overhang(side)
             length, length_declared = self._raw_pad(side, "pad_length")
             width, width_declared = self._raw_pad(side, "pad_width")
             # A photo estimate shorter than the existing overhang cannot be
@@ -1962,8 +2322,10 @@ class CastellatedModuleParams:
                     entries[index] = entry._replace(width=best, width_source=PAD_ESTIMATE_PITCH)
         adjustable = [e.length_source == PAD_ASSUMED and side.contact_style != CONTACT_THROUGH_HOLE
                       for e, side in zip(entries, self.sides)]
-        overhang_ok = (not isinstance(overhang, bool) and isinstance(overhang, (int, float))
-                       and math.isfinite(overhang) and overhang >= 0)
+        overhang_ok = all(
+            not isinstance(value, bool) and isinstance(value, (int, float))
+            and math.isfinite(value) and value >= 0
+            for value in (self.side_pad_overhang(side) for side in self.sides))
         if shorten and any(adjustable) and len(self.sides) > 1 and overhang_ok:
             try:
                 self._shorten_assumed_lengths(entries, adjustable)
@@ -1976,13 +2338,23 @@ class CastellatedModuleParams:
 
     def _probe(self, entries: List[PadSize]) -> "CastellatedModuleParams":
         """A copy whose sides carry `entries` as DECLARED sizes, so it reduces nothing."""
-        sides = [replace(side, pad_length=float(e.length), pad_width=float(e.width))
-                 for side, e in zip(self.sides, entries)]
-        # The overhang too is the one the real lands use, as a plain
-        # (declared) float like every other probe size: left assumed, the
-        # probe would re-resolve it against the TRIAL lengths and place its
-        # lands differently from the module it measures (final review
-        # 2026-11-16).
+        # The overhang too is the one each side's real lands use, as a plain
+        # (declared) float on the side like every other probe size: left
+        # assumed, the probe would re-resolve it against the TRIAL lengths
+        # and place its lands differently from the module it measures (final
+        # review 2026-11-16; per side since 2026-11-17). The hole sizes are
+        # frozen the same way: with the trial land sizes declared, the
+        # probe's side_geometry would otherwise fit the undeclared holes
+        # into those trial lands (width and, since 2026-11-17, length) and
+        # draw continuous pads around holes the module does not have.
+        sides = []
+        for side, e in zip(self.sides, entries):
+            geometry = self.side_geometry(side)
+            sides.append(replace(side, pad_length=float(e.length), pad_width=float(e.width),
+                                 pad_overhang=float(self.side_pad_overhang(side)),
+                                 hole_diameter=float(geometry.half_hole),
+                                 thru_hole_drill=float(geometry.drill),
+                                 thru_pad_diameter=float(geometry.ring)))
         return replace(self, sides=sides, pad_length=float(self.pad_length),
                        pad_width=float(self.pad_width),
                        pad_overhang=float(self.effective_pad_overhang))
@@ -2005,7 +2377,9 @@ class CastellatedModuleParams:
 
     def _shorten_assumed_lengths(self, entries: List[PadSize], adjustable: List[bool]) -> None:
         """Shorten, in place, the assumed lengths of side pairs whose copper is closer than the gap."""
-        floor = round(self.effective_pad_overhang + 0.01, 2)
+        # Each side's floor keeps ITS land under the module: its own overhang
+        # (`side_pad_overhang`) + 0.01 mm.
+        floors = [round(self.side_pad_overhang(side) + 0.01, 2) for side in self.sides]
         count = len(self.sides)
         for first in range(count):
             for second in range(first + 1, count):
@@ -2013,7 +2387,7 @@ class CastellatedModuleParams:
                 if not movable or self._side_gap(entries, first, second) >= MIN_COPPER_GAP_MM - 1e-9:
                     continue
                 starts = {i: _floor_hundredth(entries[i].length) for i in movable}
-                steps = max(int(round((starts[i] - floor) * 100)) for i in movable)
+                steps = max(int(round((starts[i] - floors[i]) * 100)) for i in movable)
                 if steps <= 0:
                     continue
                 base = list(entries)
@@ -2022,7 +2396,7 @@ class CastellatedModuleParams:
                     trial = list(base)
                     for i in movable:
                         trial[i] = trial[i]._replace(
-                            length=max(floor, round(starts[i] - step / 100, 2)))
+                            length=max(floors[i], round(starts[i] - step / 100, 2)))
                     return trial
 
                 def clear(step):
@@ -2092,14 +2466,17 @@ class CastellatedModuleParams:
         # along-edge extent lies within the body, checked per side below) and
         # the courtyard margin; KiCad cannot represent coordinates beyond its
         # range and would move the copper silently (review 2026-10-29, G3).
-        if self.pad_overhang < 0:
-            raise ValueError(
-                tx("Lo sbalzo dei pad oltre il bordo ({pad_overhang}mm) non puo' essere negativo.",
-                   pad_overhang=self.pad_overhang)
-            )
+        for overhang in [self.pad_overhang] + [getattr(side, "pad_overhang", None) for side in self.sides]:
+            if overhang is not None and overhang < 0:
+                raise ValueError(
+                    tx("Lo sbalzo dei pad oltre il bordo ({pad_overhang}mm) non puo' essere negativo.",
+                       pad_overhang=overhang)
+                )
         if self.margin < 0:
             raise ValueError(tx("Il margine del courtyard deve essere >= 0."))
         protrudes = any(side.contact_style != CONTACT_THROUGH_HOLE for side in self.sides)
+        # The farthest copper: the largest overhang of any side (per side
+        # since 2026-11-17, `effective_pad_overhang`).
         require_kicad_reach(max(self.body_length, self.body_width) / 2
                             + (self.effective_pad_overhang if protrudes else 0.0) + self.margin)
         total = sum(max(side.count, 0) for side in self.sides)
@@ -2181,14 +2558,20 @@ class CastellatedModuleParams:
             if pad_length <= 0 or pad_width <= 0:
                 raise ValueError(tx("Lato {label}: le dimensioni dei pad devono essere > 0.", label=label))
             # A land entirely outside the edge does not lie under the module: there
-            # is nothing to solder. It holds for the sides with an edge land.
-            if side.contact_style != CONTACT_THROUGH_HOLE and self.effective_pad_overhang >= pad_length:
+            # is nothing to solder. It holds for the sides with an edge land,
+            # not for a continuous pad (CONTRACT CHANGED 2026-11-17): its
+            # copper runs on from the edge to the through-hole ring
+            # (continuous_pad), so it lies under the module whatever the edge
+            # land's length.
+            side_overhang = self.side_pad_overhang(side)
+            if (side.contact_style != CONTACT_THROUGH_HOLE and side_overhang >= pad_length
+                    and not self._is_continuous(side)):
                 raise ValueError(
                     tx("Lato {label}: lo sbalzo dei pad oltre il bordo ({pad_overhang}mm) non e' "
                        "minore della loro lunghezza ({pad_length}mm): la piazzola starebbe tutta "
                        "fuori dal modulo.",
                        label=label,
-                       pad_overhang=self.effective_pad_overhang,
+                       pad_overhang=side_overhang,
                        pad_length=pad_length)
                 )
             # The land that is aligned along the edge is the one the side really
@@ -2315,7 +2698,7 @@ class CastellatedModuleParams:
             for name in ("pitch", "offset"):
                 check(getattr(side, name), f"{name} ({label})")
             for name in ("pad_length", "pad_width", "hole_diameter", "thru_hole_drill",
-                         "thru_pad_diameter"):
+                         "thru_pad_diameter", "pad_overhang"):
                 # getattr with a default: a side described by an older object, without
                 # the per-side hole dimensions, stays valid.
                 check(getattr(side, name, None), f"{name} ({label})", optional=True)
@@ -2752,9 +3135,9 @@ def pad_positions(params: CastellatedModuleParams) -> Iterator[PadPlacement]:
             center_offset = outer - geometry.thru_inset
             pad_length = pad_width = geometry.ring
         else:
-            # The pad protrudes by pad_overhang past the edge, the rest of its
-            # length goes under the module.
-            center_offset = outer + params.effective_pad_overhang - pad_length / 2
+            # The pad protrudes by its side's overhang past the edge, the
+            # rest of its length goes under the module.
+            center_offset = outer + params.side_pad_overhang(side) - pad_length / 2
 
         for index, number in enumerate(side.numbers()):
             along = start + index * side.pitch
@@ -2842,7 +3225,7 @@ def continuous_pad(params: CastellatedModuleParams, placement: PadPlacement) -> 
     land_length = placement.width if vertical_edge else placement.height
     land_width = placement.height if vertical_edge else placement.width
     across = continuous_pad_across(params, land_width, geometry.ring)
-    overhang = params.effective_pad_overhang
+    overhang = params.contact_pad_overhang(placement)
     inner = max(land_length - overhang,
                 geometry.thru_inset + geometry.ring / 2,
                 across - overhang,
