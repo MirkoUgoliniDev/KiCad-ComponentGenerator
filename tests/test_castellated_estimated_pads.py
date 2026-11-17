@@ -45,7 +45,17 @@ def test_estimated_land_shorter_than_overhang_uses_module_reference(length):
     assert any('sbalzo' in note and 'Quota da verificare' in note
                for note in params.geometry_notes())
     assert len(header_footprint_params(params, 1.3, .5).pins) == 7
+    # CONTRACT CHANGED 2026-11-16 (review I-3, final review): a DECLARED land
+    # not longer than the overhang is refused only when the overhang is
+    # DECLARED too; the module's overhang here is the assumed reference, so
+    # it is shortened until the land covers its half-hole under the module
+    # (declared length - (inset + radius), at 0; `resolved_pad_overhang`).
     params.sides[1].pad_length = length
+    params.validate()
+    geometry = params.side_geometry(params.sides[1])
+    reach = geometry.half_hole_inset + geometry.half_hole / 2
+    assert params.effective_pad_overhang == pytest.approx(max(math.floor((length - reach) * 100 + 1e-9) / 100, 0.0))
+    params.pad_overhang = 1.4
     with pytest.raises(ValueError, match='sbalzo'):
         params.validate()
 
@@ -73,7 +83,12 @@ def smallest_gap(params, first_edge=None, second_edge=None):
 
 
 def pad_notes(params):
-    return [note for note in params.geometry_notes() if "piazzole" in note]
+    # CONTRACT CHANGED 2026-11-16 (final review): the module-wide note on the
+    # assumed land overhang («Sbalzo delle piazzole ...», written once since
+    # then) is not a note on a side's land sizes, which is what these tests
+    # count; it is left out by its subject, not by its wording.
+    return [note for note in params.geometry_notes()
+            if "piazzole" in note and not note.startswith("Sbalzo delle piazzole")]
 
 
 # -- larghezza lungo il bordo -------------------------------------------------

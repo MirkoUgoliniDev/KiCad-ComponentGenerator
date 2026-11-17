@@ -10393,6 +10393,20 @@ class MainWindow(QMainWindow):
             `self._config`: config.json stays the default of new projects
             until the user changes them from «Opzioni di generazione...». An
             option the state does not declare goes back to the general value.
+        @note The whole restore is ONE sides batch (review I, 2026-11-16): the
+            refresh the sides changes ask for runs once at the end, after the
+            mounting, the pad overrides and the declared sizes of THIS
+            project are back -- never with the previous project's (a host pad
+            override on pin 30 of project A was reported «non applicata» in
+            project B, which has 8 pins).
+        """
+        with self._sides_batch():
+            self._apply_project_state_body(state)
+
+    def _apply_project_state_body(self, state: dict) -> None:
+        """@brief Body of `_apply_project_state`, run inside one sides batch.
+
+        @param state See `_apply_project_state`.
         """
         from .project_state import set_widget_value, saved_package_geometry
         from ..cad3d.annotations import EdgeFilletAnnotation, FaceTextAnnotation
@@ -10459,22 +10473,24 @@ class MainWindow(QMainWindow):
         # A «models» block of an older project (per-session models) is
         # ignored: every analysis uses the saved models (user, 2026-11-13).
         self._refresh_ai_models_line()
-        self._sides.clear()
-        for index, side in enumerate(_project_list(state, "sides", skipped)):
-            if isinstance(side, dict):
-                # A side whose count, pitch, offset or first pin is damaged
-                # (null, a word, NaN dropped to null by `read_project_config`)
-                # is skipped with a note, like a damaged component: opening a
-                # project must never raise, and inventing its contacts would
-                # be a guess (review 2026-10-29, A1).
-                try:
-                    normalised_side(side)
-                except (TypeError, ValueError, OverflowError) as exc:
-                    skipped.append(f"sides[{index}] ({exc})")
-                    continue
-                # A project saved before the key was generated with the style of
-                # that time: it is kept, it is not a deduction.
-                self._add_side_row(side, missing_style=default_contact_style())
+        # Cleared and rebuilt as one change: one refresh at the end (`_sides_batch`).
+        with self._sides_batch():
+            self._sides.clear()
+            for index, side in enumerate(_project_list(state, "sides", skipped)):
+                if isinstance(side, dict):
+                    # A side whose count, pitch, offset or first pin is damaged
+                    # (null, a word, NaN dropped to null by `read_project_config`)
+                    # is skipped with a note, like a damaged component: opening a
+                    # project must never raise, and inventing its contacts would
+                    # be a guess (review 2026-10-29, A1).
+                    try:
+                        normalised_side(side)
+                    except (TypeError, ValueError, OverflowError) as exc:
+                        skipped.append(f"sides[{index}] ({exc})")
+                        continue
+                    # A project saved before the key was generated with the style of
+                    # that time: it is kept, it is not a deduction.
+                    self._add_side_row(side, missing_style=default_contact_style())
         # Even without saved sides: the contact-type bar must not stay
         # the one of the previous project.
         self._sync_contact_style_bar()
@@ -10966,6 +10982,11 @@ class MainWindow(QMainWindow):
         # Both come back from the open project's file (`_apply_project_state`).
         self._pin_map_conflict_record = None
         self._step_regen_pending_saved = False
+        # The closing project's host pad overrides never reach a refresh of
+        # the next one (review I); `_restore_mounting_state` puts back the
+        # open project's, and the stale-override report starts afresh.
+        self.header_pad_overrides = {}
+        self._stale_pad_overrides_reported = ()
 
     def _take_project_lock(self) -> None:
         """@brief Mark the project just opened as open in this window (`services.project_lock`).
@@ -15254,6 +15275,18 @@ class MainWindow(QMainWindow):
         to the reference land pattern at every extraction and apply only to
         the sides without their own measure.
         """
+        # The switch to castellated is part of the same batch as the rebuild
+        # below (review I): `_on_castellated_toggled` asks its redraw through
+        # `_on_sides_changed`, so its placeholder sides never get a refresh of
+        # their own; the batch ends with one refresh on the final sides.
+        with self._sides_batch():
+            self._apply_extracted_castellated_body(params)
+
+    def _apply_extracted_castellated_body(self, params: ExtractedParams) -> None:
+        """@brief Body of `_apply_extracted_castellated`, run inside one sides batch.
+
+        @param params See `_apply_extracted_castellated`.
+        """
         self.group_castellated.setChecked(True)
         # Distance between the rows declared by the extraction: it is the dimension
         # from which the generator derives where the through holes are relative to
@@ -15267,49 +15300,53 @@ class MainWindow(QMainWindow):
             float(spacing) if isinstance(spacing, (int, float)) and not isinstance(spacing, bool)
             and math.isfinite(float(spacing)) and float(spacing) > 0 else None)
 
-        if params.body_length_mm:
-            self.field_cast_body_length.setValue(params.body_length_mm)
-        if params.body_width_mm:
-            self.field_cast_body_width.setValue(params.body_width_mm)
-        # Like the distance between the rows: a measurement of another board (or
-        # the one that a project saved before 28/09 had copied there from a
-        # single side) does not hold for this one. The reference reaches the
-        # generator as an estimate (see `_current_castellated_params`).
-        self.field_cast_pad_length.setValue(_reference_pad("pad_length"))
-        self.field_cast_pad_width.setValue(_reference_pad("pad_width"))
-        # The reference is an estimate: these two are no longer declared (R2-8).
-        self._cast_declared_sizes = set(getattr(self, "_cast_declared_sizes", ())) - {
-            "field_cast_pad_length", "field_cast_pad_width"}
+        # The fields and the sides are rebuilt as ONE batch (2026-11-16, real
+        # run): one redraw at the end, so the pad overrides are judged on the
+        # final sides, never on a table half rebuilt (`_sides_batch`).
+        with self._sides_batch():
+            if params.body_length_mm:
+                self.field_cast_body_length.setValue(params.body_length_mm)
+            if params.body_width_mm:
+                self.field_cast_body_width.setValue(params.body_width_mm)
+            # Like the distance between the rows: a measurement of another board (or
+            # the one that a project saved before 28/09 had copied there from a
+            # single side) does not hold for this one. The reference reaches the
+            # generator as an estimate (see `_current_castellated_params`).
+            self.field_cast_pad_length.setValue(_reference_pad("pad_length"))
+            self.field_cast_pad_width.setValue(_reference_pad("pad_width"))
+            # The reference is an estimate: these two are no longer declared (R2-8).
+            self._cast_declared_sizes = set(getattr(self, "_cast_declared_sizes", ())) - {
+                "field_cast_pad_length", "field_cast_pad_width"}
 
-        self._sides.clear()
-        if not getattr(self, "_relaunch_base_synthesized", False):
-            # A base rebuilt from the fields carries no labels: it must not
-            # wipe the ones of the analysis it re-runs.
-            self._document_sides = self._canonical_document_sides(params.castellated_sides)
-        names = []
-        pinout = []
-        sources = getattr(params, "value_sources", None) or {}
-        for side in params.castellated_sides or ():
-            side = dict(side)
-            # Hole diameters (26/09) and side pads (28/09): declared
-            # only if read, derived or measured; estimated or without provenance
-            # they stay estimates. Without the provenance entry (sides coming back from
-            # `_serialised_sides`, which already carry it in the side, e.g. the
-            # re-run after a restart) the side's one applies; if that is missing
-            # too, the measurement stays an estimate. Before, the holes had no
-            # fallback: a declared hole went back to an estimate and was reduced
-            # (adversarial check of 2026-10-02, C-M3).
-            for field in ("half_hole_diameter_mm", "through_hole_drill_mm",
-                          "pad_length_mm", "pad_width_mm"):
-                key = f"castellated_sides.{side.get('edge')}.{field}"
-                flag = field.replace("_mm", "_declared")
-                side[flag] = (sources[key] in DECLARED_SOURCES if key in sources
-                              else side.get(flag) is True)
-            self._add_side_row(side)
-            label = edge_label(side["edge"])
-            if side.get("pin_names"):
-                names.append(f"{label}: {', '.join(side['pin_names'])}")
-                pinout.extend(_side_pinout(side))
+            self._sides.clear()
+            if not getattr(self, "_relaunch_base_synthesized", False):
+                # A base rebuilt from the fields carries no labels: it must not
+                # wipe the ones of the analysis it re-runs.
+                self._document_sides = self._canonical_document_sides(params.castellated_sides)
+            names = []
+            pinout = []
+            sources = getattr(params, "value_sources", None) or {}
+            for side in params.castellated_sides or ():
+                side = dict(side)
+                # Hole diameters (26/09) and side pads (28/09): declared
+                # only if read, derived or measured; estimated or without provenance
+                # they stay estimates. Without the provenance entry (sides coming back from
+                # `_serialised_sides`, which already carry it in the side, e.g. the
+                # re-run after a restart) the side's one applies; if that is missing
+                # too, the measurement stays an estimate. Before, the holes had no
+                # fallback: a declared hole went back to an estimate and was reduced
+                # (adversarial check of 2026-10-02, C-M3).
+                for field in ("half_hole_diameter_mm", "through_hole_drill_mm",
+                              "pad_length_mm", "pad_width_mm"):
+                    key = f"castellated_sides.{side.get('edge')}.{field}"
+                    flag = field.replace("_mm", "_declared")
+                    side[flag] = (sources[key] in DECLARED_SOURCES if key in sources
+                                  else side.get(flag) is True)
+                self._add_side_row(side)
+                label = edge_label(side["edge"])
+                if side.get("pin_names"):
+                    names.append(f"{label}: {', '.join(side['pin_names'])}")
+                    pinout.extend(_side_pinout(side))
 
         # Pinout table: if the model has not filled it separately, it is
         # derived from the silkscreen labels next to the contacts of every side.
@@ -15474,7 +15511,8 @@ class MainWindow(QMainWindow):
         self.field_cast_pad_length = BoundedValue(3.6, 0.0, MAX_LENGTH_MM)
         self.field_cast_pad_width = BoundedValue(1.8, 0.0, MAX_LENGTH_MM)
         #: Overhang of the pad beyond the edge (inspectable meniscus).
-        self.field_cast_overhang = BoundedValue(1.4, 0.0, 5.0)
+        # The generator's reference (REFERENCE_PAD_OVERHANG_MM), one source (review I).
+        self.field_cast_overhang = BoundedValue(_reference_pad("pad_overhang"), 0.0, 5.0)
         #: Diameter of the plated half-hole: the half-holes are cut in the 3D.
         self.field_cast_hole = BoundedValue(1.7, 0.0, 10.0)
         #: Board thickness; without a dimension, the declared standard (see
@@ -15535,13 +15573,17 @@ class MainWindow(QMainWindow):
             # an extraction replaces them all (and asks for the style the photo
             # does not show). The style here is the one of the 3D tab selector.
             style = default_contact_style()
-            self._add_side_row({"edge": "left", "count": 3, "pitch_mm": 2.54, "first_pin": 1,
-                                "contact_style": style})
-            self._add_side_row({"edge": "right", "count": 3, "pitch_mm": 2.54, "first_pin": 4,
-                                "contact_style": style})
+            # One change, one refresh (`_sides_batch`).
+            with self._sides_batch():
+                self._add_side_row({"edge": "left", "count": 3, "pitch_mm": 2.54, "first_pin": 1,
+                                    "contact_style": style})
+                self._add_side_row({"edge": "right", "count": 3, "pitch_mm": 2.54, "first_pin": 4,
+                                    "contact_style": style})
         self._sync_3d_fields_for_castellated(checked)
-        self._sync_contact_style_bar()
-        self._draw_preview()
+        # Redraw and contact-style bar through `_on_sides_changed`, so a batch
+        # that switches castellated on (an analysis) defers them to its one
+        # refresh: the placeholder pins are never judged (final review, 3).
+        self._on_sides_changed()
 
     def _sync_3d_fields_for_castellated(self, castellated: bool) -> None:
         """In castellated modules the 3D body comes from the module, not from the 3D fields.
@@ -15632,8 +15674,44 @@ class MainWindow(QMainWindow):
                 combo.setItemText(index, self.i18n.text(source))
 
     def _on_sides_changed(self) -> None:
+        """@brief Redraw what follows the castellated sides; postponed while a batch rebuilds them.
+
+        @note Inside `_sides_batch` the call is only recorded, and made once
+            when the batch ends.
+        """
+        if getattr(self, "_sides_batch_depth", 0) > 0:
+            self._sides_batch_pending = True
+            return
         self._draw_preview()
         self._sync_contact_style_bar()
+
+    @contextmanager
+    def _sides_batch(self):
+        """@brief Rebuild the sides table (and its fields) as one change: one refresh at the end.
+
+        @note Real run of 2026-11-16: the sides were added one row at a
+            time, each row redrawing the preview, and a host pad override on
+            a pin of a side not added yet was reported «non applicata» (pin
+            gone) although it applied once every side was in. Inside the
+            batch `_on_sides_changed` is postponed; the batch ends with ONE
+            refresh, so the overrides are judged on the final sides only (and
+            `_applicable_pad_overrides` reports once per real change).
+            Re-entrant. When the rebuild raises, the deferred refresh is
+            skipped (final review, 6): a second error in that redraw would
+            replace the original traceback; the caller's error path decides.
+        """
+        self._sides_batch_depth = getattr(self, "_sides_batch_depth", 0) + 1
+        try:
+            yield
+        except BaseException:
+            self._sides_batch_depth -= 1
+            if self._sides_batch_depth == 0:
+                self._sides_batch_pending = False
+            raise
+        self._sides_batch_depth -= 1
+        if self._sides_batch_depth == 0 and getattr(self, "_sides_batch_pending", False):
+            self._sides_batch_pending = False
+            self._on_sides_changed()
 
     def _on_side_edited(self, *_args) -> None:
         """@brief A user edit of the sides table: refresh views and drop the old 3D.
@@ -15860,7 +15938,9 @@ class MainWindow(QMainWindow):
             # value (`_cast_declared_sizes`) as a measurement.
             pad_length=self._declared_cast_size("field_cast_pad_length"),
             pad_width=self._declared_cast_size("field_cast_pad_width"),
-            pad_overhang=self.field_cast_overhang.value(),
+            # The overhang too (C4, 2026-11-16): an untouched default is the
+            # generator's estimate, a declared value a measure.
+            pad_overhang=self._declared_cast_size("field_cast_overhang"),
             # An undeclared value is not a measurement: passed as None the
             # generator uses its reference as an estimate and, if it does not fit in
             # a side's pitch, reduces it and writes it in the notes instead of
@@ -15887,6 +15967,7 @@ class MainWindow(QMainWindow):
     CAST_MODULE_SIZE_REFERENCES = {
         "field_cast_pad_length": _reference_pad("pad_length"),
         "field_cast_pad_width": _reference_pad("pad_width"),
+        "field_cast_overhang": _reference_pad("pad_overhang"),
         "field_cast_hole": 1.7,
         "field_cast_thru_drill": 1.0,
         "field_cast_thru_pad": 1.7,
@@ -23475,7 +23556,11 @@ class MainWindow(QMainWindow):
                    drill=params.drill)
             )
 
-        if body is None and (self.fillet_annotations or self.face_text_annotations):
+        # Only when this generation was to build the STEP (real run of
+        # 2026-11-16): a footprint-only rewrite («Applica ai file», a pad
+        # edit) never builds it, so the annotations are not «ignored» there.
+        if (body is None and not footprint_only
+                and (self.fillet_annotations or self.face_text_annotations)):
             self._append_log(
                 tx("ATTENZIONE: annotazioni 3D presenti ma il modello STEP non viene generato "
                    "(quote del corpo mancanti o 3D disattivato): verranno ignorate.")
@@ -34014,7 +34099,9 @@ class MainWindow(QMainWindow):
         built = self._built_footprint(lambda: build_castellated_module(p))
 
         self._draw_grid(
-            mm_to_px, p.body_length, p.body_width, p.pad_overhang + p.pad_length,
+            # The overhang the footprint really uses: an assumed one may be
+            # reduced to fit a declared land (review I, 2026-11-16).
+            mm_to_px, p.body_length, p.body_width, p.effective_pad_overhang + p.pad_length,
             x0=-p.body_length / 2, y0=-p.body_width / 2,
             origin=castellated_preview_grid_origin(p),
         )

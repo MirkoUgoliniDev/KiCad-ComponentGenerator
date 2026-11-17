@@ -232,7 +232,13 @@ contradicts the measure; point 150, `FIX` only: profile field «Modello lettura 
 checkbox, one review window in two stages with the detector's reading kept beside the AI's,
 three-section «Parametri» modal, phantom sides excluded by the photo, pulsing running mark,
 unread row spacing ignored, pad width at the pitch downgraded, lands measured on the photo)
-is 16306 passed,
+is 16343 passed,
+13 skipped and 19 subtests (2026-11-17, branch `FOOTPRINT-ADVANCE` merged into `main`, halves 9883/9/19 and 6460/4,
+no red: defects of an offline real run on three user projects -- misleading «pad changes not applied» while the
+sides table is rebuilt (one batched refresh), false 3D-annotation warning on footprint-only writes, castellated
+estimated pads in the «Pad stimati» check, duplicate pin-rename log lines, install lock files leaked by the suite --
+plus the castellated assumed pad overhang (description only, reduced to cover the half-hole; three medium findings
+left open, see HANDOFF.md «STATO 17/11/2026»); before that, 16306 passed,
 13 skipped and 19 subtests (2026-11-16 evening, branch `FOOTPRINT-ADVANCE`, commit `18c2be6`, NOT merged into `main`, halves 9881/9/19
 and 6425/4 with four red tests -- contracts changed by this round, updated and re-run alone, not a second full run:
 full-codebase «super check» by twelve read-only reviewers on race conditions, blocking work and grey zones, every

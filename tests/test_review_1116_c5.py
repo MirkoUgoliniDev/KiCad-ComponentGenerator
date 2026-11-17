@@ -666,3 +666,99 @@ def test_footprint_panel_escape_with_no_tool_armed_keeps_the_selection(qapp, fp)
     QTest.keyClick(editor, Qt.Key.Key_Escape)
     qapp.processEvents()
     assert window._fp_selected_indices() == [0] and 'x' in panel.field_keys()
+
+
+# ── Per-pin rename note logged once per real change (2026-11-16 evening) ──
+
+def _rows_named(first_name):
+    """Five pins; pin 1 carries `first_name` (a space KiCad rewrites to «_» yields a per-pin note)."""
+    rows = [dict(row) for row in sym.ROWS5]
+    rows[0]['name'] = first_name
+    return rows
+
+
+def _note_lines(lines, fragment):
+    """The logged lines that mention `fragment` (the pin name a note quotes)."""
+    return [line for line in lines if fragment in line]
+
+
+def test_the_same_rows_loaded_twice_log_the_rename_note_once(qapp, tmp_path):
+    """@brief Opening a project loads its rows twice: the per-pin note reaches the log once, not twice."""
+    from kicadgen.gui.symbol_tab import SymbolTab
+    tab = SymbolTab()
+    logged = []
+    tab.log_message.connect(logged.append)
+    rows = _rows_named('EN A')
+    tab.set_data('Board', rows, pad_ids=[r['pin'] for r in rows])
+    qapp.processEvents()
+    first = _note_lines(logged, 'EN A')
+    assert len(first) == 1, logged
+    tab.set_data('Board', _rows_named('EN A'), pad_ids=[r['pin'] for r in rows], force=True)
+    qapp.processEvents()
+    assert _note_lines(logged, 'EN A') == first, "the reload of the same rows logs nothing again"
+    tab.deleteLater()
+
+
+def test_a_real_rename_logs_its_note_and_a_name_changed_back_logs_again(qapp, tmp_path):
+    """@brief Negative twin: a changed name logs its new note; the old name back is a change too; another project starts afresh."""
+    from kicadgen.gui.symbol_tab import SymbolTab
+    tab = SymbolTab()
+    logged = []
+    tab.log_message.connect(logged.append)
+    pads = [r['pin'] for r in sym.ROWS5]
+    tab.set_data('Board', _rows_named('EN A'), pad_ids=pads)
+    tab.set_data('Board', _rows_named('EN B'), pad_ids=pads, force=True)
+    qapp.processEvents()
+    assert len(_note_lines(logged, 'EN B')) == 1, "the new name's note is logged"
+    tab.set_data('Board', _rows_named('EN A'), pad_ids=pads, force=True)
+    qapp.processEvents()
+    assert len(_note_lines(logged, 'EN A')) == 2, "back to the first name: its note appears again"
+    # Another project with the same names: its notes are its own.
+    tab.set_data('Other', _rows_named('EN A'), pad_ids=pads, force=True)
+    qapp.processEvents()
+    assert len(_note_lines(logged, 'EN A')) == 3
+    tab.deleteLater()
+
+
+def test_a_homonymous_project_in_another_root_logs_its_own_notes(qapp, tmp_path):
+    """@brief Review I: same component name, another library root: `set_recovery_path` drops the name-kept memo and logs the notes."""
+    from kicadgen.gui.symbol_tab import SymbolTab
+    tab = SymbolTab()
+    logged = []
+    tab.log_message.connect(logged.append)
+    pads = [r['pin'] for r in sym.ROWS5]
+    first, second = tmp_path / 'rootA' / 'Board', tmp_path / 'rootB' / 'Board'
+    for folder in (first, second):
+        folder.mkdir(parents=True)
+    tab.set_data('Board', _rows_named('EN A'), pad_ids=pads)
+    tab.set_recovery_path(first / '.symbol-draft.json')
+    qapp.processEvents()
+    assert len(_note_lines(logged, 'EN A')) == 1
+    # The homonym in another root: `set_data` sees the same name (memo kept) ...
+    tab.set_data('Board', _rows_named('EN A'), pad_ids=pads, force=True)
+    qapp.processEvents()
+    assert len(_note_lines(logged, 'EN A')) == 1
+    # ... and the recovery path settles it is another project: its note is logged.
+    tab.set_recovery_path(second / '.symbol-draft.json')
+    qapp.processEvents()
+    assert len(_note_lines(logged, 'EN A')) == 2, logged
+    tab.deleteLater()
+
+
+def test_the_same_project_rebound_to_its_own_recovery_file_logs_nothing_again(qapp, tmp_path):
+    """@brief Review I negative: a reload bound again to the SAME recovery file keeps the memo (one line in all)."""
+    from kicadgen.gui.symbol_tab import SymbolTab
+    tab = SymbolTab()
+    logged = []
+    tab.log_message.connect(logged.append)
+    pads = [r['pin'] for r in sym.ROWS5]
+    folder = tmp_path / 'root' / 'Board'
+    folder.mkdir(parents=True)
+    path = folder / '.symbol-draft.json'
+    tab.set_data('Board', _rows_named('EN A'), pad_ids=pads)
+    tab.set_recovery_path(path)
+    tab.set_data('Board', _rows_named('EN A'), pad_ids=pads, force=True)
+    tab.set_recovery_path(path)
+    qapp.processEvents()
+    assert len(_note_lines(logged, 'EN A')) == 1, logged
+    tab.deleteLater()

@@ -2053,3 +2053,248 @@ def test_h4_a_failing_read_writes_the_window_config_never_defaults(window, monke
     window._config["language"] = "de"
     window._save_config_changes()
     assert written[-1] == window._config
+
+
+# ── Real run of 2026-11-16 ───────────────────────────────────────────────────
+
+
+def _module_with_override(window, monkeypatch, pin):
+    """@brief A castellated module with a host pad override on `pin`, log captured."""
+    lines = _logged(window, monkeypatch)
+    window.group_castellated.setChecked(True)
+    window._board_size_known = True
+    window.combo_mounting.setCurrentIndex(window.combo_mounting.findData("headers"))
+    monkeypatch.setattr(window, "_photo_inventory_family", lambda: True)
+    window.header_pad_overrides = {pin: {"shape": "circle", "size": 2.4}}
+    window._stale_pad_overrides_reported = ()
+    return lines
+
+
+def _sides_extraction(counts):
+    """@brief An extraction with one castellated side per (edge, count, first pin)."""
+    from kicadgen.services.datasheet_extractor import ExtractedParams
+    sides = [dict(edge=edge, count=count, pitch_mm=2.54, first_pin=first, contact_style="half_hole")
+             for edge, count, first in counts]
+    return ExtractedParams(name="", description="", tags="", confidence="medium", notes="",
+                           layout="castellated", castellated_sides=sides,
+                           body_length_mm=30.0, body_width_mm=15.2, photo_source="",
+                           components_3d=[])
+
+
+def test_run1_a_rebuild_never_reports_an_override_whose_pin_exists_at_the_end(window, monkeypatch):
+    """@brief Positive: pin 1 lives on the SECOND side: nothing reported while the sides are rebuilt."""
+    lines = _module_with_override(window, monkeypatch, "1")
+    window._apply_extracted_castellated(_sides_extraction([("left", 4, 5), ("right", 4, 1)]))
+    assert not any("non applicate" in line for line in lines)
+
+
+def test_run1_an_override_on_a_pin_that_is_gone_is_reported_once(window, monkeypatch):
+    """@brief Negative: a pin that truly disappeared is still reported, once."""
+    lines = _module_with_override(window, monkeypatch, "9")
+    window._apply_extracted_castellated(_sides_extraction([("left", 4, 1), ("right", 4, 5)]))
+    window._draw_preview()
+    assert len([line for line in lines if "non applicate" in line]) == 1
+
+
+def test_run1_the_batch_refreshes_once_at_the_end(window, monkeypatch):
+    """@brief Positive: a batch postpones every side change to one refresh; negative: outside it each change refreshes."""
+    drawn = []
+    monkeypatch.setattr(window, "_draw_preview", lambda: drawn.append(len(window._sides)))
+    with window._sides_batch():
+        window._sides.clear()
+        window._add_side_row({"edge": "left", "count": 2, "pitch_mm": 2.54, "first_pin": 1})
+        window._add_side_row({"edge": "right", "count": 2, "pitch_mm": 2.54, "first_pin": 3})
+        assert drawn == []
+    assert drawn == [2]
+    window._add_side_row({"edge": "top", "count": 2, "pitch_mm": 2.54, "first_pin": 5})
+    assert drawn == [2, 3]
+
+
+def _annotation_warning_lines(window, monkeypatch, footprint_only):
+    """@brief Run one generation up to the worker with 3D annotations and no STEP body."""
+    lines = _logged(window, monkeypatch)
+    monkeypatch.setattr(gui.QThread, "start", lambda self: None)
+    window.group_castellated.setChecked(False)
+    window.group_3d.setChecked(False)
+    window.package_geometry = None
+    window._acquisition_completed = True
+    window.fillet_annotations = [object()]
+    try:
+        window._generate_applied(footprint_only=footprint_only)
+    finally:
+        window.fillet_annotations = []
+        window._worker = None
+    return [line for line in lines if "annotazioni 3D presenti" in line]
+
+
+def test_run2_a_footprint_only_rewrite_does_not_warn_about_3d_annotations(window, monkeypatch):
+    """@brief Positive: «Applica ai file» / «Rigenera footprint» build no STEP: no warning."""
+    assert _annotation_warning_lines(window, monkeypatch, footprint_only=True) == []
+
+
+def test_run2_a_full_generation_without_a_step_still_warns(window, monkeypatch):
+    """@brief Negative: a generation that would build the STEP but cannot still says so."""
+    assert len(_annotation_warning_lines(window, monkeypatch, footprint_only=False)) == 1
+
+
+# ── The castellated pad overhang is an estimate unless declared (C4, 2026-11-16) ─
+
+
+def _declared_module(window):
+    """@brief A castellated module whose only possible estimate is the overhang."""
+    window.group_castellated.setChecked(True)
+    window._board_size_known = True
+    window._sides[:] = [gui.normalised_side(dict(
+        edge="left", count=3, pitch_mm=2.54, first_pin=1, contact_style="half_hole",
+        pad_length_mm=2.0, pad_width_mm=1.5, half_hole_diameter_mm=1.0,
+        pad_length_declared=True, pad_width_declared=True, half_hole_diameter_declared=True))]
+
+
+def test_overhang_untouched_default_is_an_estimate(window):
+    """@brief Positive: the untouched 1.4 mm reaches the generator as an estimate.
+
+    @note CONTRACT CHANGED 2026-11-16 (user decision): the assumed overhang is
+        reported only in the footprint description, never as a «Pad stimati»
+        mark on the pads (no editor for it: a permanent row with no remedy).
+    """
+    from kicadgen.generators.castellated_module import is_declared_size
+    _declared_module(window)
+    window._cast_declared_sizes = set()
+    params = window._current_castellated_params()
+    assert not is_declared_size(params.pad_overhang)
+    assert params.pad_overhang == pytest.approx(1.4)
+    assert "pad_size" not in (params.contact_sources(params.sides[0]) or {})
+    # Listed as an estimate; its value is the generator's (C4 reduces an
+    # assumed overhang so the declared pad covers the half-hole, here 1.12 mm).
+    description = params.assumed_sizes_description()
+    assert "pad overhang" in description and "estimate" in description
+
+
+def test_overhang_declared_value_is_a_measure_and_survives_reopen_and_analysis(window, raw_params):
+    """@brief Negative: a declared overhang is a measure, kept by a reopen and by a new analysis."""
+    from kicadgen.generators.castellated_module import is_declared_size
+    _declared_module(window)
+    window.field_cast_overhang.setValue(0.8)
+    window._cast_declared_sizes = {"field_cast_overhang"}
+    params = window._current_castellated_params()
+    assert is_declared_size(params.pad_overhang) and params.pad_overhang == pytest.approx(0.8)
+    assert params.contact_sources(params.sides[0]) is None
+    state = window._project_state()
+    window._cast_declared_sizes = set()
+    window._apply_project_state(state)
+    assert "field_cast_overhang" in window._cast_declared_sizes
+    window._on_extracted(raw_params)                      # a new analysis reads no overhang
+    assert "field_cast_overhang" in window._cast_declared_sizes
+    assert window.field_cast_overhang.value() == pytest.approx(0.8)
+
+
+def test_overhang_legacy_project_reads_the_old_rule(window):
+    """@brief A project saved before the flag: 1.4 is the estimate, another value was declared."""
+    state = window._project_state()
+    state.pop("cast_declared_sizes")
+    state["widgets"]["field_cast_overhang"] = 1.4
+    window._apply_project_state(state)
+    assert "field_cast_overhang" not in window._cast_declared_sizes
+    state["widgets"]["field_cast_overhang"] = 0.9
+    window._apply_project_state(state)
+    assert "field_cast_overhang" in window._cast_declared_sizes
+
+
+# ── Review I: a project switch never judges the previous project's overrides ─
+
+
+def _two_projects(window, monkeypatch, b_override=None):
+    """@brief Project B (8 pins) saved, project A (40 pins, override on pin 30) in memory."""
+    window.group_castellated.setChecked(True)
+    window._board_size_known = True
+    monkeypatch.setattr(window, "_photo_inventory_family", lambda: True)
+    window.combo_mounting.setCurrentIndex(window.combo_mounting.findData("headers"))
+    window._apply_extracted_castellated(_sides_extraction([("left", 4, 1), ("right", 4, 5)]))
+    window.header_pad_overrides = dict(b_override or {})
+    state_b = window._project_state()
+    if b_override:
+        state_b["host_mounting"]["pad_overrides"] = dict(b_override)
+    window._apply_extracted_castellated(_sides_extraction([("left", 20, 1), ("right", 20, 21)]))
+    window.header_pad_overrides = {"30": {"shape": "circle", "size": 2.4}}
+    window._stale_pad_overrides_reported = ()
+    window._draw_preview()
+    return state_b
+
+
+def test_i1_switching_to_another_project_never_reports_the_previous_overrides(window, monkeypatch):
+    """@brief Positive: A's override on pin 30 is not reported while project B (8 pins) opens."""
+    state_b = _two_projects(window, monkeypatch)
+    lines = _logged(window, monkeypatch)
+    window._switch_project("PROGETTO_B", state_b)
+    assert not any("non applicate" in line for line in lines)
+    assert window.header_pad_overrides == {}
+
+
+def test_i1_a_stale_override_of_the_opened_project_is_still_reported(window, monkeypatch):
+    """@brief Negative: B's own override on a pin B does not have is reported once."""
+    state_b = _two_projects(window, monkeypatch, b_override={"12": {"shape": "circle", "size": 2.4}})
+    lines = _logged(window, monkeypatch)
+    window._switch_project("PROGETTO_B", state_b)
+    window._draw_preview()
+    assert len([line for line in lines if "non applicate" in line and "12" in line]) == 1
+
+
+def test_i2_the_overhang_reference_is_the_generators(window):
+    """@brief The field default and the legacy reference are the generator's REFERENCE_PAD_OVERHANG_MM."""
+    from kicadgen.generators.castellated_module import REFERENCE_PAD_OVERHANG_MM
+    assert window.CAST_MODULE_SIZE_REFERENCES["field_cast_overhang"] == float(REFERENCE_PAD_OVERHANG_MM)
+    assert gui.BoundedValue(gui._reference_pad("pad_overhang"), 0.0, 5.0).value() == float(
+        REFERENCE_PAD_OVERHANG_MM)
+
+
+# ── Final review: the castellated switch and a failing batch ────────────────
+
+
+def _matrix_with_override(window, monkeypatch, pin):
+    """@brief A pin-matrix window with no sides and a host pad override on `pin`."""
+    lines = _logged(window, monkeypatch)
+    window.group_castellated.setChecked(False)
+    window._sides.clear()
+    window._board_size_known = True
+    window.combo_mounting.setCurrentIndex(window.combo_mounting.findData("headers"))
+    monkeypatch.setattr(window, "_photo_inventory_family", lambda: True)
+    window.header_pad_overrides = {pin: {"shape": "circle", "size": 2.4}}
+    window._stale_pad_overrides_reported = ()
+    return lines
+
+
+def test_final3_an_analysis_switching_castellated_on_never_judges_the_placeholders(window, monkeypatch):
+    """@brief Positive: pin 9 exists in the analysed sides, not in the 6 placeholder pins: nothing logged."""
+    lines = _matrix_with_override(window, monkeypatch, "9")
+    window._apply_extracted_castellated(_sides_extraction([("left", 4, 1), ("right", 6, 5)]))
+    assert not any("non applicate" in line for line in lines)
+
+
+def test_final3_switching_castellated_on_by_hand_still_judges_its_placeholders(window, monkeypatch):
+    """@brief Negative: outside a batch the switch refreshes at once on its placeholder pins."""
+    lines = _matrix_with_override(window, monkeypatch, "9")
+    window.group_castellated.setChecked(True)
+    assert len([line for line in lines if "non applicate" in line]) == 1
+
+
+def test_final6_a_failing_batch_skips_the_deferred_refresh(window, monkeypatch):
+    """@brief Positive: the original error propagates and no deferred redraw runs after it."""
+    drawn = []
+    monkeypatch.setattr(window, "_draw_preview", lambda: drawn.append(1))
+    with pytest.raises(RuntimeError, match="rebuild broken"):
+        with window._sides_batch():
+            window._on_sides_changed()
+            raise RuntimeError("rebuild broken")
+    assert drawn == [] and window._sides_batch_depth == 0
+    window._on_sides_changed()                       # the window is not left batched
+    assert drawn == [1]
+
+
+def test_final6_a_clean_batch_refreshes_once(window, monkeypatch):
+    """@brief Negative: without an error the deferred refresh runs once at the end."""
+    drawn = []
+    monkeypatch.setattr(window, "_draw_preview", lambda: drawn.append(1))
+    with window._sides_batch():
+        window._on_sides_changed()
+        window._on_sides_changed()
+    assert drawn == [1]

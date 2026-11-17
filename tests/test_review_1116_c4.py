@@ -324,3 +324,218 @@ def test_the_skipped_drawings_note():
     """@brief Nothing skipped -> no note; some skipped -> a sentence with the count."""
     assert skipped_drawings_note(0) == ""
     assert "2" in skipped_drawings_note(2)
+
+
+# ── Follow-up 16/11 evening: castellated estimates reach the «Pad stimati» check ──
+
+def _rs485_like(declared):
+    """A module with half_and_through contacts on two facing sides.
+
+    With `declared` False every hole and land is the assumed reference (the
+    left side at 1.27 mm also reduced to fit the pitch) and the through-holes
+    sit at the smallest distance that fits; with `declared` True the same
+    module carries a plain (declared) float for every size, the explicit
+    through-hole distance and the land overhang.
+    """
+    if declared:
+        sides = [CastellatedSide("left", 4, 2.54, pad_length=3.0, pad_width=1.6, hole_diameter=1.0,
+                                 thru_hole_drill=0.8, thru_pad_diameter=1.5),
+                 CastellatedSide("right", 4, 2.54, first_pin=5, pad_length=3.0, pad_width=1.6,
+                                 hole_diameter=1.0, thru_hole_drill=0.8, thru_pad_diameter=1.5)]
+        return CastellatedModuleParams(name="D", body_length=20.0, body_width=15.0, sides=sides,
+                                       thru_hole_offset=2.0, pad_overhang=1.4)
+    sides = [CastellatedSide("left", 4, 1.27),
+             CastellatedSide("right", 4, 2.54, first_pin=5)]
+    return CastellatedModuleParams(name="E", body_length=20.0, body_width=15.0, sides=sides)
+
+
+def test_assumed_and_reduced_castellated_sizes_are_listed_by_the_estimated_pads_check():
+    """@brief Positive: assumed and reduced holes and lands -> every pad carries "estimated" for
+    size and hole, and check_estimated_pads names them in one line per set of values."""
+    from kicadgen.services.footprint_checks import check_estimated_pads
+    fp = build_castellated_module(_rs485_like(declared=False))
+    assert all(pad.sources == {"pad_size": "estimated", "drill_mm": "estimated"} for pad in fp.pads)
+    findings = check_estimated_pads(fp)
+    assert [f.code for f in findings] == ["estimated_pad"]
+    assert sorted(findings[0].pads) == list(range(len(fp.pads)))
+    assert "1-8" in findings[0].message
+
+
+def test_declared_castellated_sizes_are_not_listed_by_the_estimated_pads_check():
+    """@brief Negative: the same contact type with every size and the through-hole distance
+    declared -> no provenance on any pad and no «Pad stimati» row."""
+    from kicadgen.services.footprint_checks import check_estimated_pads
+    fp = build_castellated_module(_rs485_like(declared=True))
+    assert all(pad.sources is None for pad in fp.pads)
+    assert check_estimated_pads(fp) == []
+
+
+def test_a_side_with_only_its_land_assumed_marks_the_size_and_not_the_hole():
+    """@brief Positive: a half-hole side (SMD edge land) with an assumed land -> "pad_size" only;
+    negative: a through-hole side with a declared ring and drill at a declared distance -> nothing."""
+    smd = CastellatedModuleParams(name="S", body_length=20.0, body_width=15.0,
+                                  sides=[CastellatedSide("left", 3, 2.54, contact_style=CONTACT_HALF_HOLE)])
+    assert {pad.sources["pad_size"] for pad in build_castellated_module(smd).pads} == {"estimated"}
+    assert all("drill_mm" not in pad.sources for pad in build_castellated_module(smd).pads)
+    tht = CastellatedModuleParams(
+        name="T", body_length=20.0, body_width=15.0, thru_hole_offset=2.0,
+        sides=[CastellatedSide("left", 3, 2.54, contact_style=CONTACT_THROUGH_HOLE,
+                               thru_hole_drill=0.9, thru_pad_diameter=1.6)])
+    assert all(pad.sources is None for pad in build_castellated_module(tht).pads)
+
+
+def test_pad_sources_leave_the_written_file_unchanged():
+    """@brief The provenance is metadata: the same footprint without it renders the same text."""
+    import re
+    fp = build_castellated_module(_rs485_like(declared=False))
+    with_sources = re.sub(r'\(uuid "[^"]*"\)', "", fp.render())
+    for pad in fp.pads:
+        pad.sources = None
+    assert re.sub(r'\(uuid "[^"]*"\)', "", fp.render()) == with_sources
+
+
+def test_an_assumed_overhang_is_an_estimate_and_a_declared_one_is_not():
+    """@brief Positive: the overhang left at its reference (or passed as None) -> listed in the
+    description and in `assumed_sizes`, WITHOUT marking the pads (user decision 2026-11-16: no
+    editor for the overhang, so a «Pad stimati» row would have no remedy); negative: the same
+    number passed by the caller (declared) -> not listed either."""
+    def edge_module(overhang):
+        side = CastellatedSide("left", 3, 2.54, pad_length=3.0, pad_width=1.6,
+                               contact_style=CONTACT_HALF_HOLE)
+        kwargs = {} if overhang == "default" else {"pad_overhang": overhang}
+        return CastellatedModuleParams(name="O", body_length=20.0, body_width=15.0, sides=[side],
+                                       hole_diameter=1.0, hole_inset=0.3, **kwargs)
+    for assumed in (edge_module("default"), edge_module(None)):
+        fp = build_castellated_module(assumed)
+        assert "pad overhang 1.40mm beyond the edge" in fp.description
+        # Module-wide, so written once («every side»), not in the per-side lists.
+        assert "every side: pad overhang 1.40mm beyond the edge" in fp.description
+        assert fp.description.count("pad overhang") == 1
+        assert "pad_overhang" not in [kind for kind, _v in assumed.assumed_sizes(assumed.sides[0])]
+        assert all(pad.sources is None for pad in fp.pads)
+    declared = edge_module(1.4)
+    fp = build_castellated_module(declared)
+    assert "overhang" not in fp.description and "assumed" not in fp.description
+    assert declared.assumed_sizes(declared.sides[0]) == []
+    assert all(pad.sources is None for pad in fp.pads)
+    # The value is the same: only the provenance tells them apart.
+    assert float(edge_module("default").pad_overhang) == float(declared.pad_overhang)
+
+
+# -- Review I follow-up: an assumed overhang never refuses a declared land --
+
+def _short_land(overhang="default", length=1.2):
+    """One half-hole side with a DECLARED land `length` mm long and declared holes."""
+    side = CastellatedSide("left", 3, 2.54, pad_length=length, pad_width=1.0,
+                           contact_style=CONTACT_HALF_HOLE)
+    kwargs = {} if overhang == "default" else {"pad_overhang": overhang}
+    return CastellatedModuleParams(name="L", body_length=20.0, body_width=10.0, sides=[side],
+                                   hole_diameter=0.6, hole_inset=0.2, **kwargs)
+
+
+def test_an_assumed_overhang_is_reduced_to_a_shorter_declared_land():
+    """@brief Positive: declared land 1.2 mm, overhang left at its 1.4 mm reference -> built, the
+    overhang shortened so the land still covers the half-hole under the module (0.6 mm half-hole
+    0.2 mm in: reach 0.5 mm, overhang 0.70 mm), named once as a reduced estimate in the description
+    and in the notes, the notes without a remedy the window cannot apply."""
+    params = _short_land()
+    assert params.resolved_pad_overhang() == (0.7, cm.SIZE_ESTIMATE_LENGTH)
+    fp = build_castellated_module(params)
+    pad = fp.pads[0]
+    # Outer end 0.70 mm beyond the edge (x = -10): centre at -10.7 + 0.6.
+    assert pad.at[0] == pytest.approx(-10.1) and pad.size[0] == pytest.approx(1.2)
+    assert ("every side: pad overhang 0.70mm beyond the edge (reduced so the declared pad covers "
+            "the half-hole)") in fp.description
+    note = next(note for note in params.geometry_notes() if "0.70mm" in note)
+    assert "1.2mm" in note and "Indica" not in note
+
+
+def test_a_declared_overhang_not_shorter_than_a_declared_land_is_still_refused():
+    """@brief Negative: the same land with the overhang DECLARED at 1.4 mm -> refused, never reduced."""
+    with pytest.raises(ValueError):
+        _short_land(overhang=1.4).validate()
+
+
+def test_an_assumed_overhang_shorter_than_every_declared_land_is_kept():
+    """@brief Negative: a declared 3.0 mm land -> the 1.4 mm reference fits and is kept, listed as
+    assumed but not as reduced."""
+    params = _short_land(length=3.0)
+    assert params.resolved_pad_overhang() == (1.4, cm.SIZE_REFERENCE)
+    description = build_castellated_module(params).description
+    assert "pad overhang 1.40mm beyond the edge" in description and "reduced" not in description
+
+
+def test_contact_sources_are_resolved_once_per_side(monkeypatch):
+    """@brief Positive: two sides of 40 contacts -> contact_sources runs twice, not 80 times, and
+    every pad still carries its own copy of the side's provenance."""
+    calls = []
+    real = CastellatedModuleParams.contact_sources
+
+    def counted(self, side):
+        calls.append(side.edge)
+        return real(self, side)
+    monkeypatch.setattr(CastellatedModuleParams, "contact_sources", counted)
+    params = CastellatedModuleParams(name="C", body_length=30.0, body_width=110.0,
+                                     sides=[CastellatedSide("left", 40, 2.54),
+                                            CastellatedSide("right", 40, 2.54, first_pin=41)])
+    fp = build_castellated_module(params)
+    assert sorted(calls) == ["left", "right"]
+    assert all(pad.sources for pad in fp.pads)
+    assert fp.pads[0].sources is not fp.pads[1].sources
+
+
+def test_an_assumed_land_length_still_marks_the_pads_while_the_overhang_alone_does_not():
+    """@brief Positive: the same module with its land LENGTH left assumed -> "pad_size"
+    estimated on every pad and a «Pad stimati» row; negative: only the overhang assumed (the
+    land declared) -> no mark and no row, the overhang staying in the description."""
+    from kicadgen.services.footprint_checks import check_estimated_pads
+    def edge_module(length):
+        side = CastellatedSide("left", 3, 2.54, pad_length=length, pad_width=1.6,
+                               contact_style=CONTACT_HALF_HOLE)
+        return CastellatedModuleParams(name="O", body_length=20.0, body_width=15.0, sides=[side],
+                                       hole_diameter=1.0, hole_inset=0.3)
+    marked = build_castellated_module(edge_module(cm.AssumedSize(3.0)))
+    assert all(pad.sources == {"pad_size": "estimated"} for pad in marked.pads)
+    assert [f.code for f in check_estimated_pads(marked)] == ["estimated_pad"]
+    unmarked = build_castellated_module(edge_module(3.0))
+    assert all(pad.sources is None for pad in unmarked.pads)
+    assert check_estimated_pads(unmarked) == []
+    assert "pad overhang 1.40mm beyond the edge" in unmarked.description
+
+
+
+def test_the_overhang_reduction_is_continuous_across_the_old_boundary():
+    """@brief Positive: declared lands of 1.40 and 1.41 mm (the old cliff: 0.70 -> 1.40 mm) give
+    overhangs 0.01 mm apart, and each land keeps its half-hole covered under the module; negative:
+    a land long enough for the reference keeps 1.40 mm, unreduced."""
+    reach = 0.2 + 0.3   # hole_inset + half the declared 0.6 mm half-hole
+    first, second = (_short_land(length=length) for length in (1.40, 1.41))
+    a, b = first.effective_pad_overhang, second.effective_pad_overhang
+    assert 0 <= b - a <= 0.011 + 1e-9
+    for params, length in ((first, 1.40), (second, 1.41)):
+        assert length - params.effective_pad_overhang >= reach - 1e-9
+        params.validate()
+    assert _short_land(length=1.9).resolved_pad_overhang() == (1.4, cm.SIZE_REFERENCE)
+
+
+@pytest.mark.parametrize("body, pitch", [(5.0, 3.6), (4.0, 2.6), (4.4, 3.0)])
+def test_the_clearance_probe_uses_the_modules_own_overhang(body, pitch):
+    """@brief Positive (final review 2026-11-16): a declared short land on one side and assumed
+    lengths on the adjacent one -> the assumed lengths are shortened for clearance and the module
+    validates; structurally, the probe that measures the gaps places its lands with the module's
+    own overhang, whatever trial lengths it is given (negative twin: those trial lengths would
+    have resolved another overhang if the probe re-resolved it)."""
+    sides = [CastellatedSide(edge="left", count=2, pitch=pitch, pad_length=1.0, pad_width=0.9,
+                             contact_style=CONTACT_HALF_HOLE),
+             CastellatedSide(edge="bottom", count=2, pitch=pitch, first_pin=3, pad_width=0.9,
+                             contact_style=CONTACT_HALF_HOLE)]
+    params = CastellatedModuleParams(name="P", body_length=body, body_width=body, sides=sides)
+    params.validate()
+    assert params.pad_sizes()[1].length_source == cm.PAD_ESTIMATE_CLEARANCE
+    trial = [entry._replace(length=0.3) for entry in params.pad_sizes()]
+    probe = params._probe(trial)
+    assert probe.effective_pad_overhang == params.effective_pad_overhang
+    # What a re-resolution against the trial lengths would have given.
+    from dataclasses import replace
+    unfrozen = replace(probe, pad_overhang=params.pad_overhang)
+    assert unfrozen.effective_pad_overhang != params.effective_pad_overhang

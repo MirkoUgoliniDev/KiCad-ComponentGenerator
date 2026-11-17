@@ -380,9 +380,13 @@ def test_assumed_castellated_sizes_are_noted_and_written_in_the_description():
     # (stima)»; the same estimate is now recorded in English.
     assert "left side: " in description and "half-hole 1.70mm" in description
     assert "assumed, not measured (estimate)" in description
+    # CONTRACT CHANGED 2026-11-16 (review follow-up, coordinator decision):
+    # the land overhang left at its 1.4 mm reference is an assumed size too
+    # (REFERENCE_PAD_OVERHANG_MM), so a module with every size declared
+    # declares the overhang as well.
     declared = CastellatedModuleParams(body_length=10, body_width=12, sides=[side],
                                        hole_diameter=1.0, hole_inset=0.3, pad_length=2.5,
-                                       pad_width=1.2)
+                                       pad_width=1.2, pad_overhang=1.4)
     assert declared.assumed_sizes(declared.sides[0]) == []
     assert "assumed" not in build_castellated_module(declared).description
 

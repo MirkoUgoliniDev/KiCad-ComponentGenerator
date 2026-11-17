@@ -268,6 +268,20 @@ def test_the_generators_own_footprints_are_clean():
                                                         build_castellated_module)
     module = CastellatedModuleParams(sides=[CastellatedSide(edge="left", count=4, pitch=2.54),
                                             CastellatedSide(edge="right", count=4, pitch=2.54, first_pin=5)])
-    assert fc.check_footprint_geometry(build_castellated_module(module)) == []
+    # CONTRACT CHANGED 2026-11-16 (review follow-up, user-approved): this
+    # module uses the ASSUMED reference holes and lands and the smallest
+    # through-hole distance that fits, so its pads now carry their
+    # provenance and the «Pad stimati» warning names all of them; the
+    # geometry is clean otherwise. The same module with every size declared
+    # is clean, warning included.
+    findings = fc.check_footprint_geometry(build_castellated_module(module))
+    assert [f.code for f in findings] == ["estimated_pad"] and findings[0].pads == tuple(range(8))
+    declared = CastellatedModuleParams(
+        thru_hole_offset=2.0, hole_diameter=1.0, thru_hole_drill=0.8, thru_pad_diameter=1.5,
+        pad_overhang=1.4,
+        sides=[CastellatedSide(edge="left", count=4, pitch=2.54, pad_length=3.0, pad_width=1.6),
+               CastellatedSide(edge="right", count=4, pitch=2.54, first_pin=5, pad_length=3.0,
+                               pad_width=1.6)])
+    assert fc.check_footprint_geometry(build_castellated_module(declared)) == []
     from kicadgen.generators.host_mounting import header_footprint_params
     assert fc.check_footprint_geometry(build_package(header_footprint_params(tht, 1.7, 1.0))) == []

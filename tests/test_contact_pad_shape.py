@@ -480,8 +480,13 @@ def test_half_hole_and_through_hole_outputs_are_byte_identical(name, script, mon
     # lette dai documenti» note per side); folded out here, every other
     # payload byte is the pinned one. The notes are tested in
     # tests/test_review_1103b_generators.py.
+    # CONTRACT CHANGED 2026-11-16 (final review of C4): the land overhang
+    # left at its reference is an assumed size too, named once per module in
+    # its own note («Sbalzo delle piazzole oltre il bordo non dichiarato...»)
+    # instead of inside the per-side note; folded out the same way.
     described = (*described[:3], [note for note in described[3]
-                                  if "quote non lette dai documenti" not in note])
+                                  if "quote non lette dai documenti" not in note
+                                  and not note.startswith("Sbalzo delle piazzole oltre il bordo")])
     assert hashlib.sha256(json.dumps(described, sort_keys=True).encode()).hexdigest() == payload
     specs = [script["_contact_features"](copy.deepcopy(c), _bounds(params), PLATING, PAD_T)
              for c in described[1]]

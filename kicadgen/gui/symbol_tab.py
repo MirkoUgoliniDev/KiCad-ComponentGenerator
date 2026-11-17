@@ -2116,10 +2116,13 @@ class SymbolTab(QWidget):
         self._history_index = -1
         self._selected_pin = None
         self._selected_pins = set()
-        # The per-pin notes already sent to the log belong to the rows just
-        # replaced: a new load logs its own once (review 2026-11-13).
-        self.__dict__.pop('_logged_pin_notes', None)
         if not same_project:
+            # Another component: its per-pin notes are logged afresh. A reload
+            # of the SAME project keeps the notes the log already holds:
+            # opening a project loads its rows twice, which logged every note
+            # twice (2026-11-16); a note that really changes is new anyway
+            # (`_normalization_notes` logs the notes that were not there).
+            self.__dict__.pop('_logged_pin_notes', None)
             # The element selection is made of indices into the previous
             # project's `symbol_graphics`: kept, it would select (and let
             # Delete remove) whatever element of the new project has the
@@ -2399,6 +2402,22 @@ class SymbolTab(QWidget):
             return False
         return self._read_project_id(owner) != self._draft_owner_id
 
+    def _relog_pin_notes(self):
+        """Send to the log the per-pin notes of the current draft that it does not hold yet.
+
+        Used when `set_recovery_path` finds that the project only shares the
+        component name: `set_data` drew it with the other project's memo.
+        A draft whose pins cannot be read logs nothing (its redraw shows the error).
+        """
+        try:
+            pins, body = symbol_inputs(self.draft_rows())
+            # The notes are read from laid-out pins, as the redraw does.
+            if pins:
+                layout_symbol(pins, body)
+                self._normalization_notes(pins)
+        except ValueError:
+            return
+
     def _normalization_notes(self, pins):
         """@brief Notes of the silent pin normalisations, in the interface language.
 
@@ -2410,9 +2429,15 @@ class SymbolTab(QWidget):
         @note `layout_symbol` normalises the pins but discards the notes;
             asking `normalize_pins` again with a list is the only way to read
             them, and on pins that already validated it cannot raise.
-        @note The per-pin lines go to the log through `log_message`, each
-            distinct text once per tab (this runs at every redraw, a drag
-            included): the user asked for one line on the status, the
+        @note The per-pin lines go to the log through `log_message` when
+            they APPEAR: a note is logged when it was not among the notes of
+            the previous call (this runs at every redraw, a drag included,
+            and at every load). The same rows loaded twice log nothing the
+            second time; a rename logs its new note, and a name changed back
+            logs its note again, since that is a change too (2026-11-16: the
+            memo used to be cleared at every load, and opening a project
+            loads the rows twice). A project switch starts afresh
+            (`set_data`). The user asked for one line on the status, the
             detail in the registro (2026-11-13).
         """
         if not pins:
@@ -2425,12 +2450,17 @@ class SymbolTab(QWidget):
             text = note.localized(self.tx)
             if text not in lines:
                 lines.append(text)
-        logged = self.__dict__.setdefault('_logged_pin_notes', set())
+        previous = self.__dict__.get('_logged_pin_notes', set())
+        current = []
         for note in detail:
             text = note.localized(self.tx)
-            if text not in logged:
-                logged.add(text)
+            if text not in current:
+                current.append(text)
+        # Only what appeared since the previous call reaches the log.
+        for text in current:
+            if text not in previous:
                 self.log_message.emit(text)
+        self._logged_pin_notes = set(current)
         return lines
 
     def set_primary_pin_names(self, enabled: bool) -> None:
@@ -2674,6 +2704,11 @@ class SymbolTab(QWidget):
             self._recoverable = None
             self._stale_recoverable = None
             carry = None
+            # Another project that only shares the component name: the notes
+            # `set_data` kept on the strength of the name belong to the
+            # other one, so this project's notes are logged afresh (review I,
+            # 2026-11-16), by the redraw below or by `_relog_pin_notes`.
+            self.__dict__.pop('_logged_pin_notes', None)
             if plain is not None:
                 # The wires were frozen at ANOTHER project's pin positions:
                 # load this project's data as it is stored.
@@ -2683,6 +2718,7 @@ class SymbolTab(QWidget):
                 self._history = []
                 self._history_index = -1
                 self._populate(deepcopy(self._baseline))
+            self._relog_pin_notes()
         self._recovery_path = path
         # Another binding is another situation: a missing folder is told again.
         self._draft_folder_notice = False

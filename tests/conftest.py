@@ -232,6 +232,22 @@ def no_real_uninstall_registry(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def isolated_install_locks(monkeypatch, tmp_path_factory):
+    """@brief Install lock files go under the run's base temp folder, never the user's %TEMP%.
+
+    `kicad_library._install_lock_dir` is the user's temporary folder and its
+    lock files are never deleted (the OS releases a lock with its holder, see
+    review R9-2). The suite installs into thousands of throw-away library
+    roots, so without this every run left thousands of empty files in
+    %TEMP%\\kicadgen-install-locks (offline real run, 2026-11-16). Tests of the
+    lock itself redirect the folder again on their own.
+    """
+    from kicadgen.services import kicad_library
+    folder = tmp_path_factory.getbasetemp() / "install-locks"
+    monkeypatch.setattr(kicad_library, "_install_lock_dir", lambda: folder)
+
+
+@pytest.fixture(autouse=True)
 def fresh_exit_deadline():
     """@brief Every test starts with no exit begun and the whole exit budget.
 
