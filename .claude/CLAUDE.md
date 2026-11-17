@@ -232,7 +232,12 @@ contradicts the measure; point 150, `FIX` only: profile field «Modello lettura 
 checkbox, one review window in two stages with the detector's reading kept beside the AI's,
 three-section «Parametri» modal, phantom sides excluded by the photo, pulsing running mark,
 unread row spacing ignored, pad width at the pitch downgraded, lands measured on the photo)
-is 16343 passed,
+is 16389 passed,
+13 skipped and 19 subtests (2026-11-17 evening, branch `FOOTPRINT-ADVANCE` commit `e982c84` merged into main as `7a42f18`, halves 9886/9/19 and 6503/4,
+no red: castellated edge-land overhang resolved per side -- undeclared half-hole gives way first (reference or AI estimate,
+user decision), clamped at the smallest estimable size, then the assumed overhang, then 0 with the contradiction named;
+continuous pads never shortened; one land rule on both axes (user decision: a declared module land bounds assumed holes,
+pinned rs485 outputs re-pinned); see HANDOFF.md «STATO 17/11/2026 SERA»); before that, 16343 passed,
 13 skipped and 19 subtests (2026-11-17, branch `FOOTPRINT-ADVANCE` commit `aa218f1` merged into `main` as `e9fde89`, halves 9883/9/19 and 6460/4,
 no red: defects of an offline real run on three user projects -- misleading «pad changes not applied» while the
 sides table is rebuilt (one batched refresh), false 3D-annotation warning on footprint-only writes, castellated
