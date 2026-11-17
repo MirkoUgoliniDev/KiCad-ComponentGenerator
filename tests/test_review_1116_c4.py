@@ -439,7 +439,8 @@ def test_an_assumed_overhang_is_reduced_to_a_shorter_declared_land():
     0.2 mm in: reach 0.5 mm, overhang 0.70 mm), named once as a reduced estimate in the description
     and in the notes, the notes without a remedy the window cannot apply."""
     params = _short_land()
-    assert params.resolved_pad_overhang() == (0.7, cm.SIZE_ESTIMATE_LENGTH)
+    # CONTRACT CHANGED 2026-11-17: the overhang is resolved per side.
+    assert params.resolved_pad_overhang(params.sides[0]) == (0.7, cm.SIZE_ESTIMATE_LENGTH)
     fp = build_castellated_module(params)
     pad = fp.pads[0]
     # Outer end 0.70 mm beyond the edge (x = -10): centre at -10.7 + 0.6.
@@ -460,7 +461,7 @@ def test_an_assumed_overhang_shorter_than_every_declared_land_is_kept():
     """@brief Negative: a declared 3.0 mm land -> the 1.4 mm reference fits and is kept, listed as
     assumed but not as reduced."""
     params = _short_land(length=3.0)
-    assert params.resolved_pad_overhang() == (1.4, cm.SIZE_REFERENCE)
+    assert params.resolved_pad_overhang(params.sides[0]) == (1.4, cm.SIZE_REFERENCE)
     description = build_castellated_module(params).description
     assert "pad overhang 1.40mm beyond the edge" in description and "reduced" not in description
 
@@ -515,7 +516,8 @@ def test_the_overhang_reduction_is_continuous_across_the_old_boundary():
     for params, length in ((first, 1.40), (second, 1.41)):
         assert length - params.effective_pad_overhang >= reach - 1e-9
         params.validate()
-    assert _short_land(length=1.9).resolved_pad_overhang() == (1.4, cm.SIZE_REFERENCE)
+    long_land = _short_land(length=1.9)
+    assert long_land.resolved_pad_overhang(long_land.sides[0]) == (1.4, cm.SIZE_REFERENCE)
 
 
 @pytest.mark.parametrize("body, pitch", [(5.0, 3.6), (4.0, 2.6), (4.4, 3.0)])
@@ -534,8 +536,13 @@ def test_the_clearance_probe_uses_the_modules_own_overhang(body, pitch):
     assert params.pad_sizes()[1].length_source == cm.PAD_ESTIMATE_CLEARANCE
     trial = [entry._replace(length=0.3) for entry in params.pad_sizes()]
     probe = params._probe(trial)
-    assert probe.effective_pad_overhang == params.effective_pad_overhang
-    # What a re-resolution against the trial lengths would have given.
+    # CONTRACT CHANGED 2026-11-17: frozen per side (the overhang is resolved per side).
+    for real, probed in zip(params.sides, probe.sides):
+        assert probe.side_pad_overhang(probed) == params.side_pad_overhang(real)
+    # What a re-resolution against the trial lengths would have given: the
+    # bottom side's land is assumed in the module (reference overhang) but
+    # declared 0.3 mm in the probe.
     from dataclasses import replace
-    unfrozen = replace(probe, pad_overhang=params.pad_overhang)
-    assert unfrozen.effective_pad_overhang != params.effective_pad_overhang
+    unfrozen = replace(probe, pad_overhang=params.pad_overhang,
+                       sides=[replace(side, pad_overhang=None) for side in probe.sides])
+    assert unfrozen.side_pad_overhang(unfrozen.sides[1]) != params.side_pad_overhang(params.sides[1])

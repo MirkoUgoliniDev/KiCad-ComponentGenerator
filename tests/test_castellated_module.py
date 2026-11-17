@@ -160,12 +160,17 @@ def test_every_contact_gets_a_half_hole_and_a_closed_hole():
     assert fp.attr == "smd"
     assert len(fp.pads) == 8
     assert sorted(p.number for p in fp.pads) == sorted(p.number for p in pad_positions(params))
+    by_number = {p.number: p for p in pad_positions(params)}
     for pad in fp.pads:
-        assert pad.pad_type == "thru_hole" and pad.shape == "oval" and pad.drill == 1.0
+        # CONTRACT CHANGED 2026-11-17 (user decision «una regola sola»): the
+        # assumed ring and drill fit the module's DECLARED 1.2 mm land, as a
+        # side's own land: drill 0.8, ring 1.2 (was 1.0 and 1.7).
+        geometry = params.contact_geometry(by_number[pad.number])
+        assert (geometry.drill, geometry.ring) == (pytest.approx(0.8), pytest.approx(1.2))
+        assert pad.pad_type == "thru_hole" and pad.shape == "oval" and pad.drill == geometry.drill
         assert list(pad.layers) == ["*.Cu", "*.Mask", "F.Paste"]
-        # La corona dichiarata (1.7 mm) sta tutta dentro: lo stadio e' largo
-        # almeno quanto lei, anche se la piazzola di bordo e' 1.2 mm.
-        assert min(pad.size) == pytest.approx(1.7)
+        # The ring lies wholly inside: the stadium is at least as wide.
+        assert min(pad.size) == pytest.approx(geometry.ring)
         assert pad.drill_offset != (0.0, 0.0)
 
 
@@ -211,7 +216,8 @@ def test_footprint_writes_valid_file(tmp_path):
     # Il footprint e' ibrido: rifusione sui mezzi fori, strip nei fori interi.
     # Dal 2026-09-23 il foro sta decentrato nella piazzola continua, quindi il
     # nodo drill porta anche l'offset.
-    assert "thru_hole oval" in content and "(drill 1" in content and "(offset " in content
+    # 2026-11-17: the assumed drill fits rs485's declared land, 0.8 mm.
+    assert "thru_hole oval" in content and "(drill 0.8" in content and "(offset " in content
 
 
 def test_footprint_has_reference_on_fab_layer():
@@ -299,7 +305,8 @@ def test_the_solid_gets_both_holes_for_every_contact(monkeypatch, tmp_path):
     touching = [n for n in notches if crosses_the_edge(n)]
     inside = [n for n in notches if not crosses_the_edge(n)]
     assert len(touching) == len(inside) == 8
-    assert all(n["radius"] == params.thru_hole_drill / 2 for n in inside)
+    # The side's resolved drill (2026-11-17: fitted to the declared land).
+    assert all(n["radius"] == params.side_geometry(params.sides[0]).drill / 2 for n in inside)
     for n in inside:
         assert abs(n["x"]) + n["radius"] < half_l + 1e-6
         assert abs(n["y"]) + n["radius"] < half_w + 1e-6
@@ -348,7 +355,10 @@ def test_an_explicit_offset_that_would_merge_is_refused(offset, expected):
     params.body_width = 20.0
     params.thru_hole_offset = offset
     if expected:
-        with pytest.raises(ValueError, match="si toccano"):
+        # CONTRACT CHANGED 2026-11-17: the assumed holes fit the declared
+        # 1.2 mm land (0.8 mm), so at 1.27 mm they no longer overlap; the same
+        # keyhole check refuses the wall left between them.
+        with pytest.raises(ValueError, match="parete minima"):
             params.validate()
     else:
         params.validate()

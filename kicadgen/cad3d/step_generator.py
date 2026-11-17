@@ -70,9 +70,11 @@ _CFLAGS = NO_WINDOW_FLAGS
 
 #: Shortest golden pad drawn inside the board for a castellated contact, in
 #: mm. It mirrors the validator's own floor (CastellatedModuleParams keeps
-#: every land at least pad_overhang + 0.01 mm long), so for validated
-#: parameters it never lengthens the pad; it only keeps the solid non-empty
-#: for parameters that skipped the validation.
+#: every EDGE land at least its side's overhang + 0.01 mm long), so for
+#: validated parameters it never lengthens an edge land; it keeps the solid
+#: non-empty for parameters that skipped the validation, and for the edge
+#: land of a continuous pad, which validate() lets lie wholly outside the
+#: edge since 2026-11-17 (its stadium copper runs on to the ring).
 CASTELLATED_PAD_MIN_INNER_MM = 0.01
 
 #: Minimum distance kept between a component's edge and the module's edge,
@@ -719,10 +721,12 @@ def castellated_contact_payload(params: CastellatedModuleParams, pin_color_hex: 
             # golden pad, never longer than that part of the footprint land
             # (2026-11-03 second review, G9: a 0.6 mm floor drew gold where
             # the land has none). See CASTELLATED_PAD_MIN_INNER_MM.
-            # The overhang the footprint really uses (an assumed one may be
-            # reduced to fit a declared land, review I 2026-11-16), so the 3D
-            # gold matches the copper of the written footprint.
-            inner_len = max(pad_len - params.effective_pad_overhang, CASTELLATED_PAD_MIN_INNER_MM)
+            # The overhang the footprint really uses for this contact's side
+            # (an assumed one may be reduced to fit a declared land, review I
+            # 2026-11-16; per side since 2026-11-17), so the 3D gold matches
+            # the copper of the written footprint.
+            inner_len = max(pad_len - params.contact_pad_overhang(placement),
+                            CASTELLATED_PAD_MIN_INNER_MM)
             if placement.edge == "left":
                 centre = (-half_length + inset, placement.y)
                 label = (-half_length + inner_len + label_gap, placement.y)

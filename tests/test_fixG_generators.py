@@ -22,7 +22,7 @@ from kicadgen.core.silk import SILK_PAD_CLEARANCE_MM, clip_segment, pin_one
 from kicadgen.generators.castellated_module import (
     CONTACT_HALF_AND_THROUGH, CONTACT_HALF_HOLE, CONTACT_THROUGH_HOLE,
     CastellatedModuleParams, CastellatedSide, OffsetDrillPad, _copper_outline,
-    build_castellated_module, continuous_pad, pad_positions,
+    build_castellated_module, continuous_pad, continuous_pads, pad_positions,
 )
 from kicadgen.generators.package import build_package, footprint_attr
 from kicadgen.generators.pin_header import PinHeaderParams, build_pin_header
@@ -324,10 +324,23 @@ def test_a_single_row_of_holes_is_not_compared_with_an_empty_opposite_edge():
 
 @pytest.mark.parametrize("overhang", [3.6, 5.0, -0.1])
 def test_pad_overhang_outside_the_land_or_negative_is_refused(overhang):
-    params = rs485()
+    # CONTRACT CHANGED 2026-11-17: an EDGE land (half_hole) entirely outside
+    # the module is refused; rs485's default half_and_through contacts are one
+    # continuous pad whose copper runs on to the ring, so it lies under the
+    # module whatever the edge land's length and a long overhang is accepted
+    # there. A negative overhang is refused on both.
+    params = rs485(CONTACT_HALF_HOLE)
     params.pad_overhang = overhang
     with pytest.raises(ValueError, match="sbalzo"):
         params.validate()
+    continuous = rs485()
+    continuous.pad_overhang = overhang
+    if overhang < 0:
+        with pytest.raises(ValueError, match="sbalzo"):
+            continuous.validate()
+    else:
+        continuous.validate()
+        assert all(pad.inner_reach > 0 for pad in continuous_pads(continuous))
 
 
 def test_a_pad_still_partly_under_the_module_is_accepted():

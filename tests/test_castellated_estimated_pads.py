@@ -16,7 +16,8 @@ import math
 import pytest
 
 from kicadgen.generators.castellated_module import (
-    CONTACT_HALF_HOLE, CONTACT_THROUGH_HOLE, MIN_COPPER_GAP_MM, PAD_ASSUMED, PAD_DECLARED,
+    CONTACT_HALF_HOLE, CONTACT_THROUGH_HOLE, MIN_COPPER_GAP_MM, MIN_INNER_LAND_MM, PAD_ASSUMED,
+    PAD_DECLARED,
     PAD_ESTIMATE_CLEARANCE, PAD_ESTIMATE_PITCH, AssumedSize, CastellatedModuleParams,
     CastellatedSide, _box_distance, _copper_outline, build_castellated_module, pad_positions,
 )
@@ -52,10 +53,21 @@ def test_estimated_land_shorter_than_overhang_uses_module_reference(length):
     # (declared length - (inset + radius), at 0; `resolved_pad_overhang`).
     params.sides[1].pad_length = length
     params.validate()
-    geometry = params.side_geometry(params.sides[1])
-    reach = geometry.half_hole_inset + geometry.half_hole / 2
-    assert params.effective_pad_overhang == pytest.approx(max(math.floor((length - reach) * 100 + 1e-9) / 100, 0.0))
+    # CONTRACT CHANGED 2026-11-17: the overhang is resolved PER SIDE, and
+    # these sides are ONE continuous pad (half_and_through with a
+    # through-hole): that copper runs on from the edge to the ring, so it
+    # covers the half-hole and lies under the module whatever the edge
+    # land's length. The reference overhang is kept (it used to shrink to
+    # cover the half-hole with the edge land alone, for nothing), and even a
+    # DECLARED overhang not shorter than the edge land is accepted.
+    assert params.side_geometry(params.sides[1]).has_thru_holes
+    assert params.side_pad_overhang(params.sides[1]) == pytest.approx(1.4)
     params.pad_overhang = 1.4
+    params.validate()
+    # The edge-land negative: the same declared numbers on half_hole sides
+    # (edge land only) are still refused.
+    for side in params.sides:
+        side.contact_style = CONTACT_HALF_HOLE
     with pytest.raises(ValueError, match='sbalzo'):
         params.validate()
 

@@ -34,9 +34,15 @@ from kicadgen.cad3d import step_generator
 
 def fine_pitch(style=CONTACT_HALF_HOLE, pitch=1.27, count=8, **changes):
     """Quattro lati a passo fine, piazzole strette: nessun campione reale."""
+    # CONTRACT CHANGED 2026-11-17 (user decision «una regola sola»): a
+    # module-wide DECLARED land now bounds the assumed holes like a side's
+    # own (`_declared_land`). These tests isolate the PITCH rule, so the
+    # fixture's synthetic narrow land is an assumed size, as the window
+    # passes an untouched module field; the land rule has its own tests
+    # (tests/test_review_1117_overhang.py, tests/test_estimated_holes_fit_copper.py).
     params = CastellatedModuleParams(
-        name="Fine", body_length=20, body_width=20, pad_length=1.8, pad_width=0.9,
-        pad_overhang=0.5,
+        name="Fine", body_length=20, body_width=20, pad_length=AssumedSize(1.8),
+        pad_width=AssumedSize(0.9), pad_overhang=0.5,
         sides=[CastellatedSide(edge=edge, count=count, pitch=pitch, first_pin=1 + count * i,
                                contact_style=style)
                for i, edge in enumerate(EDGES)])
@@ -100,8 +106,14 @@ def test_an_assumed_size_behaves_as_its_float_and_keeps_its_type_when_copied():
 _ASSUMED_NOTE = "quote non lette dai documenti"
 
 
+#: Since 2026-11-17 a DECLARED overhang that leaves the half-hole uncovered is
+#: noted (the fixtures declare 0.5 mm over a 1.8 mm land): a contradiction
+#: note, not a reduction for the pitch, so it is left out like the assumed one.
+_DECLARED_OVERHANG_NOTE = "con lo sbalzo dichiarato"
+
+
 def _reduction_notes(notes):
-    return [note for note in notes if _ASSUMED_NOTE not in note]
+    return [note for note in notes if _ASSUMED_NOTE not in note and _DECLARED_OVERHANG_NOTE not in note]
 
 
 def test_small_declared_half_holes_on_a_fine_pitch_are_used_as_they_are():
@@ -153,7 +165,8 @@ def test_the_same_module_on_a_2_54_pitch_keeps_the_reference_without_notes():
     assert params.side_geometry(params.sides[0]).half_hole_source == "reference"
     assert _reduction_notes(params.geometry_notes()) == []
     # Nothing reduced, but the kept reference is never silent (G1).
-    assert all("semi-foro 1.70mm" in note for note in params.geometry_notes())
+    assert all("semi-foro 1.70mm" in note for note in params.geometry_notes()
+               if _DECLARED_OVERHANG_NOTE not in note)
 
 
 @pytest.mark.parametrize("pitch,expected,source", [
@@ -209,9 +222,11 @@ def test_half_and_through_on_a_fine_pitch_keeps_both_holes_apart():
 # ── Passi diversi per lato ──────────────────────────────────────────
 
 def mixed(**changes):
+    # Assumed synthetic land for the same reason as fine_pitch (CONTRACT
+    # CHANGED 2026-11-17): these tests isolate the pitch rule.
     params = CastellatedModuleParams(
-        name="Mixed", body_length=30, body_width=20, pad_length=1.8, pad_width=0.9,
-        pad_overhang=0.5,
+        name="Mixed", body_length=30, body_width=20, pad_length=AssumedSize(1.8),
+        pad_width=AssumedSize(0.9), pad_overhang=0.5,
         sides=[CastellatedSide(edge="left", count=3, pitch=5.08, contact_style=CONTACT_HALF_HOLE),
                CastellatedSide(edge="right", count=5, pitch=2.54, first_pin=4,
                                contact_style=CONTACT_HALF_HOLE)])

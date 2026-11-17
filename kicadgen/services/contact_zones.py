@@ -150,6 +150,12 @@ def declared_module(data, length_mm, width_mm):
         sits where the declared row spacing puts it. Before this, the photo
         mask used module-wide values and a through-hole offset that ignored
         the row spacing, so it could disagree with the footprint it filters for.
+    @note Deliberate exception: the land sizes (pad length and width) are not
+        passed, so the rules that fit an undeclared half-hole or ring into a
+        declared land (side_geometry, SIZE_ESTIMATE_PAD and, since
+        2026-11-17, SIZE_ESTIMATE_PAD_LENGTH) do not act here. The mask then
+        uses the unreduced, larger hole: its strip is at most deeper than the
+        footprint's, which errs on the side of masking the contacts.
     @note Tolerant of side descriptions that are objects rather than dicts
         (attributes pitch/offset/hole_diameter/... as CastellatedSide names
         them), and of an installed CastellatedSide without the side-level size
