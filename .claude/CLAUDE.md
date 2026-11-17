@@ -233,7 +233,7 @@ checkbox, one review window in two stages with the detector's reading kept besid
 three-section «Parametri» modal, phantom sides excluded by the photo, pulsing running mark,
 unread row spacing ignored, pad width at the pitch downgraded, lands measured on the photo)
 is 16343 passed,
-13 skipped and 19 subtests (2026-11-17, branch `FOOTPRINT-ADVANCE` merged into `main`, halves 9883/9/19 and 6460/4,
+13 skipped and 19 subtests (2026-11-17, branch `FOOTPRINT-ADVANCE` commit `aa218f1` merged into `main` as `e9fde89`, halves 9883/9/19 and 6460/4,
 no red: defects of an offline real run on three user projects -- misleading «pad changes not applied» while the
 sides table is rebuilt (one batched refresh), false 3D-annotation warning on footprint-only writes, castellated
 estimated pads in the «Pad stimati» check, duplicate pin-rename log lines, install lock files leaked by the suite --
