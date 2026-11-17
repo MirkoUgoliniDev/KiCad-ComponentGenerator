@@ -468,6 +468,31 @@ def test_a_window_shrunk_after_the_outcome_gives_up_the_larger_size(qapp):
         parent.deleteLater()
 
 
+def _outcome_label_state(qapp, overlay):
+    """Diagnostic text of the outcome label: property, style sheets, font, polish and the same after one more event pass."""
+    from PyQt6.QtCore import Qt
+    label = overlay.status
+    font = label.font()
+    state = {
+        "outcome": label.property("outcome"), "label_sheet": label.styleSheet(),
+        "overlay_sheet_has_rule": 'QLabel[outcome="partial"]' in overlay.styleSheet(),
+        "weight": font.weight(), "point_size": font.pointSizeF(), "family": font.family(),
+        "bold": font.bold(), "style": type(label.style()).__name__,
+        "style_class": label.style().metaObject().className(),
+        "polished": label.testAttribute(Qt.WidgetAttribute.WA_WState_Polished),
+        "visible": label.isVisible(), "running_pt": getattr(overlay, "_status_running_pt", None),
+        "text_width": overlay._status_text_width(), "min_height": label.minimumHeight(),
+        "app_sheet_len": len(qapp.styleSheet()), "app_font": qapp.font().toString(),
+        "app_style": qapp.style().objectName(),
+    }
+    qapp.processEvents()
+    state["weight_after_one_more_pass"] = label.font().weight()
+    label.style().unpolish(label)
+    label.style().polish(label)
+    state["weight_after_repolish"] = label.font().weight()
+    return "outcome label state: {}".format(state)
+
+
 @pytest.mark.parametrize("point_size", [7, 16, 24])
 def test_a_highlighted_outcome_is_never_cut_in_a_small_window(qapp, point_size):
     """@brief «badando che ci stiano»: the larger size gives way when it would need more rows."""
@@ -487,7 +512,11 @@ def test_a_highlighted_outcome_is_never_cut_in_a_small_window(qapp, point_size):
         overlay.show_completed("Footprint generato; modello STEP rinviato: mancano le quote del corpo "
                                "(lunghezza, larghezza, altezza).", partial=True)
         qapp.processEvents()
-        assert overlay.status.font().bold()
+        bold = overlay.status.font().bold()
+        # Failed ONCE on the GitHub runner (run 44084798374, 2026-11-17) and
+        # never locally: the state of the label is written in the message so
+        # the next failure says why; the assertion itself is unchanged.
+        assert bold, _outcome_label_state(qapp, overlay)
         assert overlay.status.heightForWidth(overlay._status_text_width()) <= overlay.status.minimumHeight()
     finally:
         overlay.stop()
