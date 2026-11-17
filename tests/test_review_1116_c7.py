@@ -319,6 +319,9 @@ def test_the_most_detailed_calibrated_view_wins_and_ties_keep_the_first(monkeypa
         tmp_path.joinpath(name).write_bytes(b"")
     monkeypatch.setattr(photo_inventory, "prepare_photo",
                         lambda path, *a, **k: np.zeros(sizes[Path(path).name] + (3,), np.uint8))
+    # The view choice is under test, not the detector: a fake one, so the
+    # test needs no model weights (the GitHub runner has none; ci-green).
+    monkeypatch.setattr(photo_yolo, "detect_yolo_components", lambda *a, **k: [])
     report = photo_inventory.extract_inventory(
         [tmp_path / n for n in sizes], "", 20.0, 10.0, [], lambda **kw: pytest.fail("paid"),
         top_photo_index=[0, 1, 2], detector="yolo_only")
