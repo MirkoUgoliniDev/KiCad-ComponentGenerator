@@ -2267,7 +2267,17 @@ def _library_model(component, cx, cy, z0, color):
     path = component.get("model_path")
     if not path:
         return None
-    print(f"KICADGEN_IMPORT_START:{path}", flush=True)
+    if component.get("model_import_blocked"):
+        # The parent remembers that importing this file killed this FreeCAD
+        # build (2026-11-16 review, R10-4): it is not read again, the body
+        # falls back on the approximate shape and the parent says why.
+        component["_model_import_error"] = "Model import skipped: it crashed FreeCAD before"
+        return None
+    # «<payload index>:<path>» when the builder numbered the component: the
+    # parent blames a crash by that index (step_generator.import_in_progress).
+    index = component.get("_payload_index")
+    tag = f"{index}:{path}" if type(index) is int else str(path)
+    print(f"KICADGEN_IMPORT_START:{tag}", flush=True)
     try:
         # The heartbeat covers the WHOLE silent stretch: reading the file (both the
         # path with native colours and the Part.read fallback) and the geometric
@@ -2303,6 +2313,10 @@ def _library_model(component, cx, cy, z0, color):
                     raise _CheckFailed("no_valid_solids", "library model has no valid solids")
                 parts = [(shape, _ModelColor(color, None, path))]
                 reader = "part_read"
+            # The file is read: what follows (body section, landmark booleans)
+            # is the analysis. A child dying after this line died in the
+            # analysis, not in the reader (2026-11-16 review H).
+            print(f"KICADGEN_IMPORT_LOADED:{tag}", flush=True)
             heartbeat.beat_if_due()
             combined = Part.makeCompound([shape for shape, _ in parts])
             box = combined.BoundBox
@@ -2379,6 +2393,10 @@ def _library_model(component, cx, cy, z0, color):
         component["_rendered_local_rotation_deg"] = angle
         return parts
     except Exception as exc:  # noqa: BLE001 - fall back to the synthetic shape
+        # Closes the import for the parent: a KICADGEN_IMPORT_START without
+        # an outcome marker means the child died inside the import
+        # (step_generator.import_in_progress), a handled failure does not.
+        print(f"KICADGEN_IMPORT_FAILED:{tag}", flush=True)
         component["_model_import_error"] = _safe_import_error(exc)
         code = getattr(exc, "code", None) if isinstance(exc, _CheckFailed) else None
         if code == "placement_not_finite":

@@ -289,7 +289,7 @@ def _attachment_decision(body, box, stated):
 
 
 def observe_terminals(photo_png, components, model, call, log, cache_dir=None, system_prompt=None,
-                      step_models=None):
+                      step_models=None, cancel=None):
     """@brief Enrich fixed components independently; missing evidence retains envelopes.
 
     @param photo_png Encoded PNG bytes of the calibrated board photo.
@@ -304,18 +304,36 @@ def observe_terminals(photo_png, components, model, call, log, cache_dir=None, s
         or None (`model`, the behaviour before 2026-11-12). The step 'terminal_prompt'
         uses its own model when one is chosen and usable, resolved before any
         crop is sent, so it keys the cache (photo_grounding.cached_call).
+    @param cancel Optional cancellation channel (a threading.Event-like
+        object, a predicate, or None; see photo_cancel.cancel_requested). It
+        is checked before every component and therefore before every paid
+        call, and watched while a call is in flight: the request is closed
+        (ai_diagnostics.cancel_scope, openrouter.abort_request) instead of
+        being paid to the end (review 2026-11-16, R1-6). It must be
+        thread-safe. None (default) checks nothing, as before.
     @return A deep copy of ``components`` in which each observed body gained a
         ``terminal_geometry`` dict (coordinate_frame ``target_image_v2``);
         envelopes and every other field are unchanged.
     @throws ValueError When the photo bytes cannot be decoded. A model answer
         without a terminal list raises ValueError inside the loop, where it is
         caught and logged for that component only.
+    @throws CallCancelled When `cancel` is set: before a component, or while
+        its request is in flight. Nothing is returned: the components read
+        before stay unchanged for the caller.
     """
     import cv2
     import numpy as np
+    from .ai_diagnostics import cancel_scope
+    from .photo_cancel import raise_if_cancelled
     from .photo_grounding import cached_call
     from .photo_inventory import image_block
     from .prompt_models import usable_model
+
+    def checker():
+        # The checker form of ai_diagnostics: it raises to cancel, and the
+        # watch thread calls it while a request waits for its answer.
+        raise_if_cancelled(cancel)
+    watched = checker if cancel is not None else None
     # The step's own model, before the cache key and the first request.
     model = usable_model('terminal_prompt', step_models, model, log)
     image = cv2.imdecode(np.frombuffer(photo_png, np.uint8), cv2.IMREAD_COLOR)
@@ -330,16 +348,22 @@ def observe_terminals(photo_png, components, model, call, log, cache_dir=None, s
             candidates.append(target)
     accepted = 0
     for start in range(len(candidates)):
+        # Between two components, so before every paid call.
+        raise_if_cancelled(cancel)
         batch = candidates[start:start+1]
         label = tx("Dettaglio terminali {index}/{total}", index=start + 1, total=len(candidates))
         log(label + tx(": corpo e reofori osservati nella foto."))
         try:
             crop, image_box = target_crop(image, batch[0]['_box'])
-            data = cached_call(call, dict(model=model, system_prompt=(system_prompt or '').strip() or PROMPT,
-                content_blocks=[{'type':'text', 'text':f"Target ID: {batch[0]['_id']}. Coordinates refer to the entire attached image."},
-                                image_block(crop)], tool=terminal_tool(),
-                max_tokens=8192, has_pdf=False), cache_dir, label, log,
-                expected_ids=[c['_id'] for c in batch])
+            # A Cancel pressed while the request waits closes it; the
+            # CallCancelled raised here is no OpenRouterError/ValueError, so
+            # it leaves the loop instead of becoming a failed component.
+            with cancel_scope(watched):
+                data = cached_call(call, dict(model=model, system_prompt=(system_prompt or '').strip() or PROMPT,
+                    content_blocks=[{'type':'text', 'text':f"Target ID: {batch[0]['_id']}. Coordinates refer to the entire attached image."},
+                                    image_block(crop)], tool=terminal_tool(),
+                    max_tokens=8192, has_pdf=False), cache_dir, label, log,
+                    expected_ids=[c['_id'] for c in batch])
             entries = data.get("components")
             if not isinstance(entries,list):
                 raise ValueError(tx("elenco terminali mancante"))

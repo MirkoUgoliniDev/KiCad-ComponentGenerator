@@ -78,8 +78,11 @@ def test_a_snapshot_does_not_move_with_later_calls_and_a_reset_empties_it():
 def _finish_automatic_generation(window, monkeypatch):
     """@brief Run an extraction followed by its automatic generation up to the finished card."""
     begin(window, monkeypatch)
-    _bill(0.10, "openai/gpt-5.6-sol")
-    _bill(0.02, "deepseek/deepseek-flash")
+    # The worker's calls are made inside the run's usage scope (review
+    # 2026-11-16, R6-8: `ExtractWorker` runs its job in `usage_scope.active()`).
+    with window._usage_scope.active():
+        _bill(0.10, "openai/gpt-5.6-sol")
+        _bill(0.02, "deepseek/deepseek-flash")
     window._on_extracted(acquired('castellated'))
     window._on_extract_finished()
     worker = window._worker
@@ -131,11 +134,17 @@ def test_every_ai_run_starts_its_own_tally_and_forgets_the_previous_split(window
     window.analysis_overlay.set_cost_models(["openai/gpt-5.6-sol: 0.1000 USD (1)"])
     window._begin_ai_run(title)
     try:
-        assert openrouter.usage_totals().by_model == {} and openrouter.usage_totals().calls == 0
+        # CONTRACT CHANGED 2026-11-16 (review R6-8): the run's tally is its own
+        # usage scope, which starts empty; the process-wide tally is no longer
+        # reset (that zeroed the costs of another paid run still going).
+        scope = window._usage_scope
+        assert scope.totals().by_model == {} and scope.totals().calls == 0
+        assert openrouter.usage_totals().calls == 1, "another run's calls are kept"
         assert window._last_analysis_cost is None
         assert window.analysis_overlay.cost_models.isHidden()
-        _bill(0.01, "deepseek/deepseek-flash")
-        assert [line.split(":")[0] for line in openrouter.usage_totals().model_lines()] == [
+        with scope.active():                      # the worker's calls
+            _bill(0.01, "deepseek/deepseek-flash")
+        assert [line.split(":")[0] for line in window._run_usage_totals().model_lines()] == [
             "deepseek/deepseek-flash"]
     finally:
         window._end_extraction_busy()

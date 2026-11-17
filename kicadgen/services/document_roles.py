@@ -20,6 +20,7 @@ under version 1 the top view doubled as the photograph when no photograph was
 loaded. The migrated manifest is written back only by the next change.
 """
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -28,6 +29,9 @@ import tempfile
 import uuid
 from .messages import tx
 from ..fsutil import replace_file
+
+#: Logger of the document store (a replaced file that could not be deleted).
+_LOG = logging.getLogger(__name__)
 
 #: Roles a document can carry, with the label shown to the user and sent to
 #: the AI. The order is the display order.
@@ -170,6 +174,26 @@ def valid_document_name(name) -> bool:
     path = Path(name)
     return path.suffix.lower() in SUFFIXES and path.stem.lower() not in _WINDOWS_RESERVED \
         and bool(path.stem.strip())
+
+
+def _discard_replaced(path: Path) -> None:
+    """Delete a document file the manifest no longer lists; a refusal is logged, never raised.
+
+    Called only AFTER the manifest was written and a copy archived in
+    `.history`: the import or removal has already succeeded. An unlink refused
+    by Windows (the file open in a viewer, an antivirus scan) used to raise
+    from there, and the GUI reported «Documento non caricato» (document not
+    loaded) for a document that was loaded (review R7-13). The leftover file
+    is harmless: it is in no manifest, so the AI never reads it, and a later
+    import of the same name takes a free one (`_free_name`).
+    """
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        _LOG.warning("Replaced document %s not deleted (%s); it is no longer in the manifest",
+                     path.name, exc)
 
 
 def _local_name(source_name: str) -> str:
@@ -452,7 +476,7 @@ class DocumentSet:
             Path(staged).unlink(missing_ok=True)
         # Old versions are retained in .history, never selected by the AI.
         if previous and previous != target and previous.is_file() and previous.resolve() != source.resolve():
-            previous.unlink()
+            _discard_replaced(previous)
         return target
 
     def set_roles(self, name, roles):
@@ -493,7 +517,7 @@ class DocumentSet:
         data['original_names'].pop(name, None)
         self._write(data)
         if old.is_file():
-            old.unlink()  # Recoverable from the archive made before changing the manifest.
+            _discard_replaced(old)  # Recoverable from the archive made before changing the manifest.
         return archive
 
     def documents(self):

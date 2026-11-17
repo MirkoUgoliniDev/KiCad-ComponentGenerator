@@ -65,7 +65,10 @@ from ..core.footprint import (COURTYARD_WIDTH_MM, FAB_WIDTH_MM, SILK_OUTSIDE_FAB
                               Pad, courtyard_corners, fab_reference_text, require_kicad_reach,
                               validate_pad_number)
 from ..core.output_names import validate_output_name
-from ..core.silk import (PIN_ONE_UNMARKED_NOTE, keepout_box, marker_ink_box, pin_one, pin_one_marker,
+from ..core.pad_limits import MAX_PAD_POSITIONS
+from ..core.silk import (PIN_ONE_DOT_COPPER_DISTANCE_MM, PIN_ONE_NO_ROOM_NOTE, PIN_ONE_UNMARKED_NOTE,
+                         keepout_box, marker_ink_box,
+                         marker_points_at, pin_one, pin_one_marker, pin_one_marker_beside,
                          silk_rectangle)
 from ..core.sexpr import SExpr, sx
 from ..services.messages import tx
@@ -138,6 +141,8 @@ ASSUMED_SIZE_FILE_NAMES = {
     "ring": "annular ring {:.2f}mm",
     "pad_length": "pad length {:.2f}mm",
     "pad_width": "pad width {:.2f}mm",
+    "pad_overhang": "pad overhang {:.2f}mm beyond the edge",
+    "thru_inset": "through-hole centre {:.2f}mm from the edge",
 }
 
 #: Default footprint description when the project gives none (file
@@ -186,6 +191,20 @@ REFERENCE_THRU_RING_MM = AssumedSize(1.7)
 #: nearby contacts at MIN_COPPER_GAP_MM it is reduced and written in the notes.
 REFERENCE_PAD_LENGTH_MM = AssumedSize(3.6)
 REFERENCE_PAD_WIDTH_MM = AssumedSize(1.8)
+#: Reference overhang of the edge land beyond the module edge (mm), from the
+#: same historical land pattern: an ASSUMED size, never measured on the module
+#: being processed. A number passed by the caller (analysis or user) is
+#: declared; this default is listed as an estimate, once, in the footprint
+#: description and in the notes (review 2026-11-16 follow-up: it used to be a
+#: plain float, read as a measure). It does NOT mark the pads in the «Pad
+#: stimati» check (user decision 2026-11-16: no editor for it, so that row
+#: would have no remedy).
+REFERENCE_PAD_OVERHANG_MM = AssumedSize(1.4)
+#: Shortest part of an edge land kept under the module when nothing else
+#: bounds it (`CastellatedModuleParams.resolved_pad_overhang` without a
+#: half-hole), mm: the validator's own floor (a land longer than its
+#: overhang by at least 0.01 mm) and the 3D's CASTELLATED_PAD_MIN_INNER_MM.
+MIN_INNER_LAND_MM = 0.01
 
 #: Provenance of a land size resolved for a side (PadSize).
 PAD_DECLARED = "declared"             # read from the documents or written by the user
@@ -202,12 +221,38 @@ SIZE_ESTIMATE_ROWS = "estimate_rows"    # estimated: the reference did not fit b
 SIZE_ESTIMATE_DRILL = "estimate_drill"  # estimated: the assumed ring did not surround the hole
 SIZE_ESTIMATE_PAD = "estimate_pad"      # estimated: the half-hole did not fit in the side's land
 SIZE_ESTIMATE_RING = "estimate_ring"    # estimated: the hole left no room for a ring
+SIZE_ESTIMATE_LENGTH = "estimate_length"  # estimated: the assumed overhang left a declared land too short under the module
+
+#: The hole provenances that mean "an assumed size changed by the program to
+#: fit" (reduced to the pitch, the rows, the land or the ring, or enlarged
+#: around a hole): estimates, recorded in the footprint description.
+ESTIMATED_SIZE_SOURCES = (SIZE_ESTIMATE_PITCH, SIZE_ESTIMATE_ROWS, SIZE_ESTIMATE_DRILL,
+                          SIZE_ESTIMATE_PAD, SIZE_ESTIMATE_RING)
+#: The land provenances that mean "an assumed size reduced by the program".
+ESTIMATED_PAD_SOURCES = (PAD_ESTIMATE_PITCH, PAD_ESTIMATE_CLEARANCE)
 
 #: Provenance of the edge distance of a side's through hole.
 INSET_EXPLICIT = "explicit"           # thru_hole_offset declared
 INSET_ROW_SPACING = "row_spacing"     # body and row spacing declared
 INSET_HALF_HOLE_ROWS = "half_hole_rows"  # the row spacing is that of the half-holes
 INSET_FALLBACK = "fallback"           # declared estimate (minimum compatible)
+
+#: Why an estimated size (`CastellatedModuleParams.estimated_sizes`) differs
+#: from the assumed one, by provenance, in the file language: appended in
+#: brackets after the size inside the same ASSUMED_SIZES_DESCRIPTION entry,
+#: so the value written in the footprint is the one the description names
+#: (review 2026-11-16, R11-1).
+ESTIMATE_REASON_FILE_TEXTS = {
+    SIZE_ESTIMATE_PITCH: "reduced to fit the pitch",  # same value as PAD_ESTIMATE_PITCH
+    SIZE_ESTIMATE_ROWS: "reduced to fit before the through-hole",
+    SIZE_ESTIMATE_PAD: "reduced to fit the pad",
+    SIZE_ESTIMATE_RING: "reduced to leave an annular ring",
+    SIZE_ESTIMATE_DRILL: "enlarged around the drill",
+    PAD_ESTIMATE_CLEARANCE: "shortened to clear another side's copper",
+    SIZE_ESTIMATE_LENGTH: "reduced so the declared pad covers the half-hole",
+    INSET_FALLBACK: "smallest that fits",
+    INSET_HALF_HOLE_ROWS: "smallest that fits",
+}
 
 
 def is_declared_size(value) -> bool:
@@ -751,7 +796,10 @@ class CastellatedModuleParams:
     # None = not declared.
     pad_length: float = REFERENCE_PAD_LENGTH_MM
     pad_width: float = REFERENCE_PAD_WIDTH_MM
-    pad_overhang: float = 1.4
+    # Edge-land overhang beyond the module edge: the reference is an
+    # AssumedSize (an estimate), a number passed by the caller is declared.
+    # None = not declared.
+    pad_overhang: float = REFERENCE_PAD_OVERHANG_MM
     # Diameter of the plated half-hole on the edge: not needed by the footprint
     # (the pads are rectangular) but by the 3D model, where the half-holes must
     # be cut into the solid so that the part resembles the real one.
@@ -811,9 +859,114 @@ class CastellatedModuleParams:
                                 ("thru_hole_drill", REFERENCE_THRU_DRILL_MM),
                                 ("thru_pad_diameter", REFERENCE_THRU_RING_MM),
                                 ("pad_length", REFERENCE_PAD_LENGTH_MM),
-                                ("pad_width", REFERENCE_PAD_WIDTH_MM)):
+                                ("pad_width", REFERENCE_PAD_WIDTH_MM),
+                                ("pad_overhang", REFERENCE_PAD_OVERHANG_MM)):
             if getattr(self, name) is None:
                 setattr(self, name, reference)
+
+    def _inward_reach(self, side) -> float:
+        """How far inside the module edge a side's land must reach, mm.
+
+        The far side of the side's half-hole (its centre's inset plus its
+        radius): the land under a castellation must cover the plated
+        half-hole the solder wets. MIN_INNER_LAND_MM when the side has no
+        usable half-hole geometry.
+        """
+        try:
+            geometry = self.side_geometry(side)
+            reach = geometry.half_hole_inset + geometry.half_hole / 2
+        except (ArithmeticError, KeyError, TypeError, ValueError):
+            return MIN_INNER_LAND_MM
+        if not style_has_half_hole(side.contact_style) or not _finite_positive(reach):
+            return MIN_INNER_LAND_MM
+        return max(float(reach), MIN_INNER_LAND_MM)
+
+    def _overhang_bound(self) -> Optional[tuple]:
+        """(largest overhang every DECLARED edge land allows, the declared length that sets it), or None.
+
+        For each side with an edge land and a DECLARED length L, the land
+        keeps L - overhang under the module, which must reach the far side of
+        its half-hole (`_inward_reach`): overhang <= L - reach, floored to
+        0.01 mm and at 0. None without a declared edge-land length.
+        """
+        bound = None
+        for side in self.sides:
+            if getattr(side, "contact_style", None) == CONTACT_THROUGH_HOLE:
+                continue
+            value, declared = self._raw_pad(side, "pad_length")
+            if not (declared and _finite_positive(value)):
+                continue
+            allowed = max(_floor_hundredth(float(value) - self._inward_reach(side)), 0.0)
+            if bound is None or allowed < bound[0]:
+                bound = (allowed, float(value))
+        return bound
+
+    def resolved_pad_overhang(self) -> tuple:
+        """@brief The edge-land overhang beyond the module edge the footprint uses, with its provenance.
+
+        @return (value mm, source): the declared `pad_overhang` as it is
+            (SIZE_MODULE); an assumed one as it is when every DECLARED edge
+            land still reaches past its half-hole under the module
+            (SIZE_REFERENCE); otherwise min over those lands of
+            (declared length - inward reach), floored to 0.01 mm and at 0
+            (SIZE_ESTIMATE_LENGTH).
+        @note An estimate never overrides a measure (review 2026-11-16, I-3):
+            the 1.4 mm reference overhang used to make validate() refuse a
+            DECLARED 1.2 mm land, as if the land were wrong.
+        @note DECLARED HEURISTIC, continuous in the declared length (final
+            review 2026-11-16: the former «half the length when the overhang
+            is not shorter» jumped from 0.70 to 1.40 mm between a 1.40 and a
+            1.41 mm land, leaving 0.01 mm under the module). It rests on one
+            physical fact: the land under a castellation must cover the
+            plated half-hole the solder wets, so the part under the module
+            reaches at least the far side of the half-hole (inset + radius,
+            `_inward_reach`; MIN_INNER_LAND_MM without a half-hole). The
+            reference overhang is kept whenever that holds, and shortened
+            just enough when it does not. Module-wide like `pad_overhang`,
+            so the most constraining declared land decides it. A declared
+            overhang makes it unnecessary; a declared overhang not shorter
+            than a declared length is still refused by validate().
+        @note Every reader of the overhang inside the generator uses this
+            value (pad_positions, continuous_pad, the checks); the raw field
+            stays the caller's input.
+        """
+        overhang = self.pad_overhang
+        if is_declared_size(overhang):
+            return overhang, SIZE_MODULE
+        if (isinstance(overhang, bool) or not isinstance(overhang, (int, float))
+                or not math.isfinite(overhang)):
+            # validate() refuses it with its own message.
+            return overhang, SIZE_REFERENCE
+        bound = self._overhang_bound()
+        if bound is not None and overhang > bound[0] + 1e-9:
+            return bound[0], SIZE_ESTIMATE_LENGTH
+        return overhang, SIZE_REFERENCE
+
+    def assumed_overhang_description(self) -> str:
+        """@brief The footprint-description entry of an undeclared overhang, fixed file language, or "".
+
+        @return One ASSUMED_SIZES_DESCRIPTION entry labelled «every side»
+            (the overhang is module-wide, so it is written once, not per
+            side): the value used, with the ESTIMATE_REASON_FILE_TEXTS reason
+            when it was reduced; "" when the overhang is declared or no side
+            has an edge land.
+        """
+        if is_declared_size(self.pad_overhang) or not any(
+                side.contact_style != CONTACT_THROUGH_HOLE for side in self.sides):
+            return ""
+        overhang, source = self.resolved_pad_overhang()
+        name = ASSUMED_SIZE_FILE_NAMES["pad_overhang"].format(float(overhang))
+        if source == SIZE_ESTIMATE_LENGTH:
+            name = "{} ({})".format(name, ESTIMATE_REASON_FILE_TEXTS[source])
+        return ASSUMED_SIZES_DESCRIPTION.format(label="every", sizes=name)
+
+    @property
+    def effective_pad_overhang(self) -> float:
+        """@brief The overhang value of `resolved_pad_overhang`, mm.
+
+        @return The overhang the footprint, the 3D lands and the preview must use.
+        """
+        return self.resolved_pad_overhang()[0]
 
     @staticmethod
     def _sized(side_value, module_value, reference, bounds) -> tuple:
@@ -1202,6 +1355,24 @@ class CastellatedModuleParams:
             notes.extend(self._inset_notes(side, geometry, label))
             notes.extend(self._pad_notes(side, label))
             notes.extend(self._assumed_size_notes(side, label))
+        if self.assumed_overhang_description():
+            # Module-wide, so said once. No «indicate the measure» remedy:
+            # the window has no field for the overhang (user decision
+            # 2026-11-16), so the note only states the estimate.
+            overhang, source = self.resolved_pad_overhang()
+            if source == SIZE_ESTIMATE_LENGTH:
+                notes.append(tx(
+                    "Sbalzo delle piazzole oltre il bordo non dichiarato: con il valore di riferimento "
+                    "{reference}mm la piazzola dichiarata di {length}mm non coprirebbe il semi-foro "
+                    "sotto il modulo, quindi lo sbalzo e' stimato {value:.2f}mm. E' una stima, non una "
+                    "misura.",
+                    reference=float(self.pad_overhang), length=self._overhang_bound()[1],
+                    value=overhang))
+            else:
+                notes.append(tx(
+                    "Sbalzo delle piazzole oltre il bordo non dichiarato: usato il valore di "
+                    "riferimento {value:.2f}mm di un modulo campione, non misurato su questo modulo.",
+                    value=float(overhang)))
         return notes
 
     def assumed_sizes(self, side: CastellatedSide) -> List[tuple]:
@@ -1209,11 +1380,13 @@ class CastellatedModuleParams:
 
         @param side One of self.sides.
         @return (kind, value) pairs, mm, in the order half_hole, half_hole_inset,
-            drill, ring, pad_length, pad_width: every size whose provenance is
-            SIZE_REFERENCE or PAD_ASSUMED (the historical sample's reference or
-            an AssumedSize estimate that fitted, so nothing reduced it and no
-            other note names it), plus the half-hole centre from
-            HALF_HOLE_INSET_RATIO when `hole_inset` is not declared.
+            drill, ring, pad_length, pad_width: every size whose provenance
+            is SIZE_REFERENCE or PAD_ASSUMED (the historical sample's
+            reference or an AssumedSize estimate that fitted, so nothing
+            reduced it and no other note names it), plus the half-hole centre
+            from HALF_HOLE_INSET_RATIO when `hole_inset` is not declared. The
+            module-wide overhang is not per side: see
+            `assumed_overhang_description`.
         @note Before 2026-11-03 these sizes were used silently when the
             documents gave none (review G1/G5): the reference holes and land
             of one historical module would reach a footprint as if measured.
@@ -1239,6 +1412,106 @@ class CastellatedModuleParams:
                 sizes.append(("pad_width", size.width))
         return sizes
 
+    def estimated_sizes(self, side: CastellatedSide) -> List[tuple]:
+        """@brief The sizes of one side the program ESTIMATED by reducing, enlarging or deriving a value.
+
+        @param side One of self.sides.
+        @return (kind, value, source) triples, mm, in the order half_hole,
+            drill, ring, pad_length, pad_width, thru_inset: every size whose
+            provenance is a SIZE_ESTIMATE_* or PAD_ESTIMATE_* value (an
+            assumed size changed to fit the pitch, the land, the rows, the
+            ring or another side's copper), plus the through-hole distance
+            from the edge when it is the declared lower bound
+            (INSET_FALLBACK, or INSET_HALF_HOLE_ROWS, which falls back to
+            it). `source` is that provenance.
+        @note Complement of `assumed_sizes`, which lists the assumed values
+            kept as they are: together they name every size of the side that
+            nobody measured, the value written being the one listed (review
+            2026-11-16, R11-1: the reduced values reached the footprint while
+            its description named only the unreduced assumptions).
+        """
+        geometry = self.side_geometry(side)
+        style = side.contact_style
+        sizes = []
+        if style_has_half_hole(style) and geometry.half_hole_source in ESTIMATED_SIZE_SOURCES:
+            sizes.append(("half_hole", geometry.half_hole, geometry.half_hole_source))
+        through = style == CONTACT_THROUGH_HOLE or geometry.has_thru_holes
+        if through:
+            if geometry.drill_source in ESTIMATED_SIZE_SOURCES:
+                sizes.append(("drill", geometry.drill, geometry.drill_source))
+            if geometry.ring_source in ESTIMATED_SIZE_SOURCES:
+                sizes.append(("ring", geometry.ring, geometry.ring_source))
+        size = self._pad_size_of(side)
+        if size is not None and style != CONTACT_THROUGH_HOLE:
+            if size.length_source in ESTIMATED_PAD_SOURCES:
+                sizes.append(("pad_length", size.length, size.length_source))
+            if size.width_source in ESTIMATED_PAD_SOURCES:
+                sizes.append(("pad_width", size.width, size.width_source))
+        if (through and geometry.thru_inset is not None
+                and geometry.thru_inset_source in (INSET_FALLBACK, INSET_HALF_HOLE_ROWS)):
+            sizes.append(("thru_inset", geometry.thru_inset, geometry.thru_inset_source))
+        return sizes
+
+    def contact_sources(self, side: CastellatedSide) -> Optional[dict]:
+        """@brief Provenance of the footprint pad of a side's contacts, in the `Pad.sources` vocabulary.
+
+        @param side One of self.sides.
+        @return None when every value the pad is drawn from was declared;
+            otherwise a mapping with "pad_size" and/or "drill_mm" set to
+            "estimated" (`core.tht_estimates.SOURCE_WORDS`), the keys
+            `services.footprint_checks.check_estimated_pads` reads:
+            * "pad_size": the copper size is built from an undeclared value
+              -- the edge land's length or width (assumed, reduced to the
+              pitch or to another side's copper), the ring of a through-hole,
+              or, for the continuous land that reaches past the ring, the
+              through-hole's distance from the edge when it is the smallest
+              that fits (INSET_FALLBACK, INSET_HALF_HOLE_ROWS);
+            * "drill_mm": the hole of a contact that carries one has an
+              undeclared drill, or sits at that estimated distance from the
+              edge (the vocabulary has no separate key for the hole's place).
+        @note "estimated", never "derived": every such value starts from an
+            assumption (a reference size, an AI estimate, the smallest
+            compatible inset), even when the program then reduced it to fit
+            a declared pitch. Declared values get no key at all rather than
+            "read": a declared castellated size may come from a photo
+            measure, not from a drawing, and "read" is shown as verified on
+            the drawing. The pad shape (roundrect, oval, circle) is the
+            generator's convention for each contact type and is not marked.
+            Metadata only: `Pad.sources` is never written to the .kicad_mod
+            (review 2026-11-16: the «Pad stimati» check never saw a
+            castellated estimate).
+        """
+        geometry = self.side_geometry(side)
+        style = side.contact_style
+        declared = (SIZE_SIDE, SIZE_MODULE)
+        inset_estimated = geometry.thru_inset_source in (INSET_FALLBACK, INSET_HALF_HOLE_ROWS)
+        # The overhang (`pad_overhang`) does NOT mark the pads, assumed or
+        # reduced as it may be: user decision of 2026-11-16. The window has no
+        # editor for it, so the «Pad stimati» row would stay on every module
+        # with no remedy the user can apply; the estimate is recorded in the
+        # footprint description and in the notes instead (`assumed_sizes`,
+        # `estimated_sizes`, `geometry_notes`).
+        sources = {}
+        if style == CONTACT_THROUGH_HOLE:
+            if geometry.ring_source not in declared:
+                sources["pad_size"] = "estimated"
+            if geometry.drill_source not in declared or inset_estimated:
+                sources["drill_mm"] = "estimated"
+            return sources or None
+        size = self._pad_size_of(side)
+        # A side that is not one of self.sides has no resolved land: nothing
+        # says it was declared, so it counts as estimated.
+        land_estimated = (size is None or size.length_source != PAD_DECLARED
+                          or size.width_source != PAD_DECLARED)
+        if has_continuous_pad(self, style, side):
+            if land_estimated or geometry.ring_source not in declared or inset_estimated:
+                sources["pad_size"] = "estimated"
+            if geometry.drill_source not in declared or inset_estimated:
+                sources["drill_mm"] = "estimated"
+        elif land_estimated:
+            sources["pad_size"] = "estimated"
+        return sources or None
+
     def _assumed_size_notes(self, side: CastellatedSide, label: str) -> List[str]:
         """One localized note naming every assumed size of a side, [] when there is none."""
         sizes = self.assumed_sizes(side)
@@ -1262,8 +1535,16 @@ class CastellatedModuleParams:
     def assumed_sizes_description(self) -> str:
         """@brief The footprint-description text that records every assumed size, fixed file language.
 
-        @return "" when no side uses an assumed size, otherwise one
-            ASSUMED_SIZES_DESCRIPTION entry per side joined by "; ".
+        @return "" when no side uses an assumed or estimated size, otherwise
+            one ASSUMED_SIZES_DESCRIPTION entry per side joined by "; ": the
+            `assumed_sizes` first, then the `estimated_sizes`, each with its
+            ESTIMATE_REASON_FILE_TEXTS reason in brackets.
+        @note CONTRACT CHANGED 2026-11-16 (review R11-1): the sizes the
+            program reduced or derived (pad width at the pitch, a ring or a
+            drill made to fit, the through-hole distance from the edge as
+            the smallest that fits...) are listed too, with the value
+            written in the file. Before, they reached the footprint as if
+            measured and only the log said otherwise.
         @note English whatever the interface language, like the other notes
             written into the library (`core.footprint.FOOTPRINT_TEXT_LANGUAGE`,
             English since 2026-11-15): the estimate is recorded where the
@@ -1274,11 +1555,16 @@ class CastellatedModuleParams:
         for side in self.sides:
             if side.edge not in EDGES or side.contact_style not in CONTACT_STYLES:
                 continue
-            sizes = self.assumed_sizes(side)
-            if sizes:
-                entries.append(ASSUMED_SIZES_DESCRIPTION.format(
-                    label=side.edge,
-                    sizes=", ".join(ASSUMED_SIZE_FILE_NAMES[kind].format(value) for kind, value in sizes)))
+            names = [ASSUMED_SIZE_FILE_NAMES[kind].format(value) for kind, value in self.assumed_sizes(side)]
+            names += ["{} ({})".format(ASSUMED_SIZE_FILE_NAMES[kind].format(value),
+                                       ESTIMATE_REASON_FILE_TEXTS[source])
+                      for kind, value, source in self.estimated_sizes(side)]
+            if names:
+                entries.append(ASSUMED_SIZES_DESCRIPTION.format(label=side.edge, sizes=", ".join(names)))
+        # The module-wide overhang, once (not repeated on every side).
+        overhang = self.assumed_overhang_description()
+        if overhang:
+            entries.append(overhang)
         return "; ".join(entries)
 
     def _pad_notes(self, side: CastellatedSide, label: str) -> List[str]:
@@ -1289,13 +1575,13 @@ class CastellatedModuleParams:
             return notes
         raw_length, declared = self._raw_pad(side, "pad_length")
         if (not declared and side.contact_style != CONTACT_THROUGH_HOLE
-                and _finite_positive(raw_length) and raw_length <= self.pad_overhang
-                and size.length > self.pad_overhang):
+                and _finite_positive(raw_length) and raw_length <= self.effective_pad_overhang
+                and size.length > self.effective_pad_overhang):
             notes.append(tx(
                 "Lato {label}: lunghezza pad stimata {estimate}mm incompatibile con lo "
                 "sbalzo {overhang}mm; usato il riferimento del modulo, con lunghezza "
                 "finale {value:.2f}mm. Quota da verificare.",
-                label=label, estimate=float(raw_length), overhang=self.pad_overhang,
+                label=label, estimate=float(raw_length), overhang=self.effective_pad_overhang,
                 value=size.length))
         if size.width_source == PAD_ESTIMATE_PITCH:
             notes.append(tx(
@@ -1639,6 +1925,9 @@ class CastellatedModuleParams:
         widths and every other step are the same. validate() uses that cheap
         form for its per-side checks, which a shortened length cannot change
         (see the comment in validate)."""
+        # The overhang the lands are drawn with (an assumed one reduced to a
+        # declared land, `resolved_pad_overhang`).
+        overhang = self.effective_pad_overhang
         entries = []
         for side in self.sides:
             length, length_declared = self._raw_pad(side, "pad_length")
@@ -1648,11 +1937,11 @@ class CastellatedModuleParams:
             # estimate subject to clearance fitting. Never alter read sizes.
             if (not length_declared and side.contact_style != CONTACT_THROUGH_HOLE
                     and _finite_positive(length)
-                    and isinstance(self.pad_overhang, (int, float))
-                    and math.isfinite(self.pad_overhang)
-                    and 0 <= length <= self.pad_overhang
+                    and isinstance(overhang, (int, float))
+                    and math.isfinite(overhang)
+                    and 0 <= length <= overhang
                     and _finite_positive(self.pad_length)
-                    and self.pad_length > self.pad_overhang):
+                    and self.pad_length > overhang):
                 length = float(self.pad_length)
             entries.append(PadSize(
                 length, PAD_DECLARED if length_declared else PAD_ASSUMED, length,
@@ -1673,7 +1962,6 @@ class CastellatedModuleParams:
                     entries[index] = entry._replace(width=best, width_source=PAD_ESTIMATE_PITCH)
         adjustable = [e.length_source == PAD_ASSUMED and side.contact_style != CONTACT_THROUGH_HOLE
                       for e, side in zip(entries, self.sides)]
-        overhang = self.pad_overhang
         overhang_ok = (not isinstance(overhang, bool) and isinstance(overhang, (int, float))
                        and math.isfinite(overhang) and overhang >= 0)
         if shorten and any(adjustable) and len(self.sides) > 1 and overhang_ok:
@@ -1690,8 +1978,14 @@ class CastellatedModuleParams:
         """A copy whose sides carry `entries` as DECLARED sizes, so it reduces nothing."""
         sides = [replace(side, pad_length=float(e.length), pad_width=float(e.width))
                  for side, e in zip(self.sides, entries)]
+        # The overhang too is the one the real lands use, as a plain
+        # (declared) float like every other probe size: left assumed, the
+        # probe would re-resolve it against the TRIAL lengths and place its
+        # lands differently from the module it measures (final review
+        # 2026-11-16).
         return replace(self, sides=sides, pad_length=float(self.pad_length),
-                       pad_width=float(self.pad_width))
+                       pad_width=float(self.pad_width),
+                       pad_overhang=float(self.effective_pad_overhang))
 
     def _side_gap(self, entries: List[PadSize], first: int, second: int) -> float:
         """Smallest copper gap between contacts of two sides with different numbers, mm."""
@@ -1711,7 +2005,7 @@ class CastellatedModuleParams:
 
     def _shorten_assumed_lengths(self, entries: List[PadSize], adjustable: List[bool]) -> None:
         """Shorten, in place, the assumed lengths of side pairs whose copper is closer than the gap."""
-        floor = round(self.pad_overhang + 0.01, 2)
+        floor = round(self.effective_pad_overhang + 0.01, 2)
         count = len(self.sides)
         for first in range(count):
             for second in range(first + 1, count):
@@ -1789,6 +2083,30 @@ class CastellatedModuleParams:
             raise ValueError(tx("Le dimensioni del corpo devono essere > 0."))
         if not self.sides:
             raise ValueError(tx("Serve almeno un lato con dei contatti."))
+        # Bounds that need no contact enumerated, checked before anything
+        # enumerates them (review 2026-11-16, R11-4: the pin numbers of every
+        # side were built before the KiCad range was checked, so a huge body
+        # with a tiny pitch enumerated millions of numbers first). The
+        # envelope is the one build_castellated_module draws its courtyard
+        # from: the body, the edge lands protruding by pad_overhang (their
+        # along-edge extent lies within the body, checked per side below) and
+        # the courtyard margin; KiCad cannot represent coordinates beyond its
+        # range and would move the copper silently (review 2026-10-29, G3).
+        if self.pad_overhang < 0:
+            raise ValueError(
+                tx("Lo sbalzo dei pad oltre il bordo ({pad_overhang}mm) non puo' essere negativo.",
+                   pad_overhang=self.pad_overhang)
+            )
+        if self.margin < 0:
+            raise ValueError(tx("Il margine del courtyard deve essere >= 0."))
+        protrudes = any(side.contact_style != CONTACT_THROUGH_HOLE for side in self.sides)
+        require_kicad_reach(max(self.body_length, self.body_width) / 2
+                            + (self.effective_pad_overhang if protrudes else 0.0) + self.margin)
+        total = sum(max(side.count, 0) for side in self.sides)
+        if total > MAX_PAD_POSITIONS:
+            raise ValueError(tx("Il modulo ha {count} contatti, oltre il limite di {limit}: nessun componente "
+                                "reale ne ha tanti. Controlla il numero di contatti dei lati.",
+                                count=total, limit=MAX_PAD_POSITIONS))
         # An unknown value is rejected, not remapped: guessing which of the
         # three was meant would be exactly the deduction that the field
         # exists to avoid.
@@ -1813,17 +2131,11 @@ class CastellatedModuleParams:
         declared_through = [value for value in declared_through if value is not None]
         if any(value < 0 for value in declared_through):
             raise ValueError(tx("Le quote del foro passante non possono essere negative."))
-        if self.pad_overhang < 0:
-            raise ValueError(
-                tx("Lo sbalzo dei pad oltre il bordo ({pad_overhang}mm) non puo' essere negativo.",
-                   pad_overhang=self.pad_overhang)
-            )
-        # A negative courtyard margin would draw the courtyard inside the
-        # copper, and a negative half-hole inset puts the hole centre outside
-        # the board, where the edge cannot cut it: both refused, as
-        # PinHeaderParams refuses its margin (review 2026-10-29, G8).
-        if self.margin < 0:
-            raise ValueError(tx("Il margine del courtyard deve essere >= 0."))
+        # A negative courtyard margin (refused above, with the overhang) would
+        # draw the courtyard inside the copper, and a negative half-hole inset
+        # puts the hole centre outside the board, where the edge cannot cut
+        # it: both refused, as PinHeaderParams refuses its margin (review
+        # 2026-10-29, G8).
         if self.hole_inset is not None and self.hole_inset < 0:
             raise ValueError(tx("La distanza del centro del semi-foro dal bordo ({hole_inset}mm) non puo' "
                                 "essere negativa.", hole_inset=self.hole_inset))
@@ -1870,13 +2182,13 @@ class CastellatedModuleParams:
                 raise ValueError(tx("Lato {label}: le dimensioni dei pad devono essere > 0.", label=label))
             # A land entirely outside the edge does not lie under the module: there
             # is nothing to solder. It holds for the sides with an edge land.
-            if side.contact_style != CONTACT_THROUGH_HOLE and self.pad_overhang >= pad_length:
+            if side.contact_style != CONTACT_THROUGH_HOLE and self.effective_pad_overhang >= pad_length:
                 raise ValueError(
                     tx("Lato {label}: lo sbalzo dei pad oltre il bordo ({pad_overhang}mm) non e' "
                        "minore della loro lunghezza ({pad_length}mm): la piazzola starebbe tutta "
                        "fuori dal modulo.",
                        label=label,
-                       pad_overhang=self.pad_overhang,
+                       pad_overhang=self.effective_pad_overhang,
                        pad_length=pad_length)
                 )
             # The land that is aligned along the edge is the one the side really
@@ -1971,15 +2283,8 @@ class CastellatedModuleParams:
                     )
                 seen_numbers[number] = label
 
-        # Envelope of the footprint as build_castellated_module draws its
-        # courtyard: the body, the edge lands protruding by pad_overhang
-        # (their along-edge extent lies within the body, checked above) and
-        # the courtyard margin. KiCad cannot represent coordinates beyond its
-        # range and would move the copper silently (review 2026-10-29, G3).
-        protrudes = any(side.contact_style != CONTACT_THROUGH_HOLE for side in self.sides)
-        require_kicad_reach(max(self.body_length, self.body_width) / 2
-                            + (self.pad_overhang if protrudes else 0.0) + self.margin)
-
+        # The KiCad range of the envelope was checked at the top, before any
+        # contact was enumerated (R11-4).
         self._validate_copper_clearance()
         self._validate_half_hole_insets()
         self._validate_hole_walls()
@@ -2449,7 +2754,7 @@ def pad_positions(params: CastellatedModuleParams) -> Iterator[PadPlacement]:
         else:
             # The pad protrudes by pad_overhang past the edge, the rest of its
             # length goes under the module.
-            center_offset = outer + params.pad_overhang - pad_length / 2
+            center_offset = outer + params.effective_pad_overhang - pad_length / 2
 
         for index, number in enumerate(side.numbers()):
             along = start + index * side.pitch
@@ -2537,7 +2842,7 @@ def continuous_pad(params: CastellatedModuleParams, placement: PadPlacement) -> 
     land_length = placement.width if vertical_edge else placement.height
     land_width = placement.height if vertical_edge else placement.width
     across = continuous_pad_across(params, land_width, geometry.ring)
-    overhang = params.pad_overhang
+    overhang = params.effective_pad_overhang
     inner = max(land_length - overhang,
                 geometry.thru_inset + geometry.ring / 2,
                 across - overhang,
@@ -2621,6 +2926,59 @@ def preview_grid_origin(params: CastellatedModuleParams) -> tuple:
     """
     first = next(iter(pad_positions(params)), None)
     return (0.0, 0.0) if first is None else (float(first.x), float(first.y))
+
+
+def _pin_one_dot(params: CastellatedModuleParams, placements: List[PadPlacement],
+                 placement: PadPlacement, center: tuple,
+                 direction: tuple, keepouts: list):
+    """The pin-1 dot next to the pin-1 contact itself, or None when no spot next to it is free.
+
+    The preferred spot is the historical one -- beside the pad along the
+    edge, on the side away from the row, pushed along the edge off the
+    copper (`pin_one_marker`) -- kept when the dot still points at pin 1
+    (`core.silk.marker_points_at`, the footprint check's criterion), so a
+    pin 1 at the end of a row keeps exactly its dot. Otherwise (pin 1 in the
+    middle of a row, where the push used to land next to another contact or
+    raise and block the footprint; review 2026-11-16, R11-2) the other spots
+    next to the same contact are tried in order: along the edge on the other
+    side, outward past the outer end of its copper, inward past its inner
+    end; each walk stops as soon as the dot would point at another pad.
+    The rule is structural (the copper around pin 1), never a pitch or a
+    count chosen for one module.
+    """
+    owner = [_copper_outline(params, p) for p in placements if p.number == placement.number]
+    others = [_copper_outline(params, p) for p in placements if p.number != placement.number]
+    try:
+        marker = pin_one_marker(center, keepouts, direction)
+    except ValueError:
+        marker = None
+    if marker is not None and marker_points_at(tuple(marker.center), owner, others):
+        return marker
+    x0, y0, x1, y1 = _copper_outline_bbox(params, placement)
+    nx, ny = INWARD_FOOTPRINT[placement.edge]
+    along_x, along_y = (placement.x, placement.y)
+    # Start each new spot where the dot's ink already keeps the silk clearance
+    # from pin 1's own copper (ink radius + SILK_PAD_CLEARANCE_MM).
+    gap = PIN_ONE_DOT_COPPER_DISTANCE_MM
+    # Mirror of the preferred spot about the contact centre, along the edge.
+    opposite = (2 * along_x - center[0], 2 * along_y - center[1])
+    # Ends of the contact's copper across the edge: the outer end lies
+    # against the inward normal, the inner end along it.
+    outer = (x0 if nx > 0 else x1 if nx < 0 else along_x, y0 if ny > 0 else y1 if ny < 0 else along_y)
+    inner = (x1 if nx > 0 else x0 if nx < 0 else along_x, y1 if ny > 0 else y0 if ny < 0 else along_y)
+    # Order of preference: the other side along the edge first (the same
+    # kind of spot as the historical one); then OUTWARD past the copper's
+    # outer end, which lies beyond the module edge on the host board and
+    # stays visible once the module is mounted (KLC F5.1 wants the pin-1
+    # mark readable after assembly); INWARD last, because that spot lies
+    # under the module body, where the silkscreen is hidden by the mounted
+    # module and serves only the bare board.
+    candidates = [
+        (opposite, (-direction[0], -direction[1])),
+        ((outer[0] - nx * gap, outer[1] - ny * gap), (-nx, -ny)),
+        ((inner[0] + nx * gap, inner[1] + ny * gap), (nx, ny)),
+    ]
+    return pin_one_marker_beside(candidates, keepouts, owner, others)
 
 
 def build_castellated_module(params: CastellatedModuleParams) -> Footprint:
@@ -2727,7 +3085,17 @@ def build_castellated_module(params: CastellatedModuleParams) -> Footprint:
     if first_number is None:
         fp.description = f"{fp.description}; {PIN_ONE_UNMARKED_NOTE}"
     marker = None
+    # Provenance of the pads' values for the «Pad stimati» check, once per
+    # side (it resolves the side's geometry and land sizes; per pad it cost
+    # about 50 % of a 1600-contact build, review 2026-11-16, I-4): metadata,
+    # never written to the file (`contact_sources`).
+    side_sources = {id(side): params.contact_sources(side) for side in params.sides}
     for placement, stadium in zip(placements, stadiums):
+        side = params.side_of(placement)
+        shared = side_sources.get(id(side)) if side is not None else None
+        # A copy per pad: one pad's metadata edited later must not change
+        # its neighbours'.
+        sources = dict(shared) if shared else None
         if stadium is not None:
             # ONE single pad per contact, as on the real board: continuous copper
             # from the edge past the ring, off-centre through hole inside.
@@ -2743,6 +3111,7 @@ def build_castellated_module(params: CastellatedModuleParams) -> Footprint:
                 layers=["*.Cu", "*.Mask", "F.Paste"],
                 drill=stadium.drill,
                 drill_offset=stadium.drill_offset,
+                sources=sources,
             ))
         elif placement.style != CONTACT_THROUGH_HOLE:
             fp.add_pad(Pad(
@@ -2753,6 +3122,7 @@ def build_castellated_module(params: CastellatedModuleParams) -> Footprint:
                 size=(placement.width, placement.height),
                 layers=["F.Cu", "F.Paste", "F.Mask"],
                 roundrect_rratio=0.25,
+                sources=sources,
             ))
         if placement.style == CONTACT_THROUGH_HOLE:
             geometry = params.contact_geometry(placement)
@@ -2764,6 +3134,7 @@ def build_castellated_module(params: CastellatedModuleParams) -> Footprint:
                 size=(geometry.ring, geometry.ring),
                 layers=["*.Cu", "*.Mask"],
                 drill=geometry.drill,
+                sources=sources,
             ))
         if placement.number == first_number:
             first_number = None   # a single marker even if the number repeats
@@ -2791,8 +3162,15 @@ def build_castellated_module(params: CastellatedModuleParams) -> Footprint:
             # own ink radius (radius + half stroke) is added by pin_one_marker.
             marker_keepouts = [keepout_box(*_copper_outline_bbox(params, p), line_width=0.0)
                                for p in placements]
-            marker = pin_one_marker(center, marker_keepouts, direction)
-            fp.add_graphic(marker)
+            marker = _pin_one_dot(params, placements, placement, center, direction,
+                                  marker_keepouts)
+            if marker is None:
+                # No spot next to pad 1 is free of copper: no dot, and the
+                # library says why (R11-2), instead of a dot next to another
+                # pad or a footprint refused because of its silkscreen.
+                fp.description = f"{fp.description}; {PIN_ONE_NO_ROOM_NOTE}"
+            else:
+                fp.add_graphic(marker)
 
         # Contact label (PE, B-, A+, GND...) on F.Fab, past the inner edge of
         # the pad: readable in the assembly drawing without having to consult

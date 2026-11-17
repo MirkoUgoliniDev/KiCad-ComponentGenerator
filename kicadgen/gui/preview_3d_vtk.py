@@ -109,6 +109,38 @@ def _mesh_file_key(mesh_path) -> tuple:
     return (str(resolved), stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
 
 
+#: Second and later pieces of one FreeCAD object exported with another colour
+#: (`freecad_build_body.py`: «<name>_color<n>»): the first piece carries the label.
+_COLOUR_PIECE = re.compile(r"_color\d+$")
+
+
+def _part_pin_number(part) -> Optional[str]:
+    """@brief The pin number a preview part is the contact of, as text, or None.
+
+    @param part One entry of the preview JSON's `parts`.
+    @return The declared number when the part carries a `pin` field; else the
+        text after «Pin» in its object name; None for a part that is no contact.
+    @note Pin numbers are text end to end (A1, EP, 001): the number is never
+        turned into an integer, so «A1» gets its label and «001» is not
+        shown as «1» (super review 2026-11-16, R4-2).
+    @note FALLBACK, declared: the object name is what FreeCAD made of the
+        requested «Pin<number>». FreeCAD rewrites a name that is no valid
+        identifier («PinA-1» -> «PinA_1») and suffixes a duplicate
+        («Pin1» -> «Pin001»), so a name can mislabel a pin. Only a `pin`
+        field written by the FreeCAD child from the contact it built
+        removes that; it is read first whenever present.
+    """
+    declared = part.get("pin")
+    if isinstance(declared, (str, int)) and not isinstance(declared, bool):
+        text = str(declared).strip()
+        if text:
+            return text
+    name = str(part.get("name", ""))
+    if not name.startswith("Pin") or len(name) <= 3 or _COLOUR_PIECE.search(name):
+        return None
+    return name[3:]
+
+
 def _prepare_mesh_scene(mesh_path) -> _PreparedScene:
     """@brief Read a FreeCAD preview JSON and build the meshes to draw.
 
@@ -135,21 +167,20 @@ def _prepare_mesh_scene(mesh_path) -> _PreparedScene:
         if len(vertices) == 0 or len(triangles) == 0:
             continue
 
-        # The lead pieces are named "Pin<number>" (see
-        # freecad_build_body.py): the label is derived from there, anchored
-        # to the tip of the pin.
-        name = str(part.get("name", ""))
-        if name.startswith("Pin") and name[3:].isdigit():
+        # The lead pieces are the contacts (see freecad_build_body.py):
+        # their pin number labels them, anchored to the tip of the pin.
+        pin = _part_pin_number(part)
+        if pin is not None:
             label = part.get("label")
             if label:
                 # Point chosen by whoever built the piece (e.g. beside the
                 # half-hole of a module, not over it): the number does not cover the metal.
                 point = _spaced_label(label, vertices)
-                anchors.append((int(name[3:]), *point))
+                anchors.append((pin, *point))
             else:
                 centre = vertices.mean(axis=0)
                 anchors.append(
-                    (int(name[3:]), float(centre[0]), float(centre[1]),
+                    (pin, float(centre[0]), float(centre[1]),
                      float(vertices[:, 2].min()))
                 )
         # PyVista wants the faces as [n_points, i, j, k, n_points, ...]

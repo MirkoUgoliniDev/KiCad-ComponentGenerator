@@ -681,7 +681,15 @@ def test_apply_commits_pending_keyboard_text(dialog):
 
 
 @pytest.mark.parametrize("cancel", ["button", "escape", "close"])
-def test_cancel_never_emits_or_mutates_inputs(dialog, components, cancel):
+def test_cancel_never_emits_or_mutates_inputs(dialog, components, cancel, monkeypatch):
+    """@brief Discarding never emits nor touches the caller's rows.
+
+    CONTRACT CHANGED 2026-11-16 (user decision, F4-2): with real corrections
+    «Annulla» and Escape first ask «Scartare le correzioni fatte?»; the
+    reviewer answers «Scarta» here. A close made by the program never asks.
+    """
+    asked = []
+    monkeypatch.setattr(dialog, "_ask_discard", lambda: asked.append(True) or True)
     original = deepcopy(components)
     spy = QSignalSpy(dialog.components_applied)
     dialog.fields["x_mm"].setValue(3)
@@ -695,6 +703,7 @@ def test_cancel_never_emits_or_mutates_inputs(dialog, components, cancel):
         QTest.keyClick(dialog, Qt.Key.Key_Escape)
     else:
         dialog.close()
+    assert asked == ([] if cancel == "close" else [True])
     assert dialog.result() == QDialog.DialogCode.Rejected
     assert len(spy) == 0
     assert components == original

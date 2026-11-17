@@ -210,9 +210,18 @@ def push_marker_clear(center, direction, radius: float, keepouts: Sequence[Box],
     return (round(x, 6) + 0.0, round(y, 6) + 0.0)
 
 
+#: Radius of the filled pin-1 dot (circle geometry), mm.
+PIN_ONE_DOT_RADIUS_MM = 0.25
+#: Stroke width of the pin-1 dot's outline, mm (the silk stroke).
+PIN_ONE_DOT_WIDTH_MM = 0.12
+#: Distance from the dot's centre to the copper it must keep: its ink
+#: radius (radius plus half the stroke) plus the silk-to-pad clearance.
+PIN_ONE_DOT_COPPER_DISTANCE_MM = PIN_ONE_DOT_RADIUS_MM + PIN_ONE_DOT_WIDTH_MM / 2 + SILK_PAD_CLEARANCE_MM
+
+
 def pin_one_marker(center, keepouts: Sequence[Box], direction,
-                   radius: float = 0.25, layer: str = "F.SilkS",
-                   width: float = 0.12) -> FpCircle:
+                   radius: float = PIN_ONE_DOT_RADIUS_MM, layer: str = "F.SilkS",
+                   width: float = PIN_ONE_DOT_WIDTH_MM) -> FpCircle:
     """@brief Filled silk dot for pin 1, pushed off the copper if needed.
 
     @param center Preferred centre, mm.
@@ -231,6 +240,95 @@ def pin_one_marker(center, keepouts: Sequence[Box], direction,
     ink_radius = radius + width / 2
     return FpCircle(center=push_marker_clear(center, direction, ink_radius, keepouts),
                     radius=radius, layer=layer, width=width, fill=True)
+
+
+#: Note appended to a footprint description (fixed file language, see
+#: `core.footprint.FOOTPRINT_TEXT_LANGUAGE`) when pad 1 exists but no spot
+#: next to it is free of copper: the dot is left out rather than drawn next
+#: to another pad or blocking the footprint (review 2026-11-16, R11-2).
+PIN_ONE_NO_ROOM_NOTE = "pin 1 not marked: no room free of copper next to pad 1"
+
+#: Copper of one pad as a rounded box (x0, y0, x1, y1, radius), mm: the
+#: points within `radius` of the axis-aligned core box. A rectangle has
+#: radius 0, a round pad a degenerate core box, a stadium its axis segment.
+RoundedBox = Tuple[float, float, float, float, float]
+
+
+def rounded_box_distance(point, copper: RoundedBox) -> float:
+    """@brief Distance, mm, from a point to the copper of one pad given as a rounded box (0 inside).
+
+    @param point (x, y), mm.
+    @param copper (x0, y0, x1, y1, radius), mm.
+    @return The Euclidean distance to the copper, never negative.
+    """
+    x0, y0, x1, y1, radius = copper
+    dx = max(min(x0, x1) - point[0], 0.0, point[0] - max(x0, x1))
+    dy = max(min(y0, y1) - point[1], 0.0, point[1] - max(y0, y1))
+    return max(math.hypot(dx, dy) - radius, 0.0)
+
+
+def marker_points_at(center, owner: Sequence[RoundedBox], others: Sequence[RoundedBox]) -> bool:
+    """@brief Whether a mark at `center` points at the owner pad: nearer to its copper than to any other pad's.
+
+    @param center Mark centre (x, y), mm.
+    @param owner Copper of the pad(s) the mark belongs to (pin 1).
+    @param others Copper of every other pad.
+    @return True when the nearest copper to `center` is the owner's, strictly.
+    @note The criterion of `services.footprint_checks.has_pin_one_marker`
+        (a circle marks the pad whose copper is nearest to its centre), so a
+        dot placed here is recognised by the check.
+    """
+    if not owner:
+        return False
+    mine = min(rounded_box_distance(center, copper) for copper in owner)
+    return all(mine < rounded_box_distance(center, copper) - 1e-9 for copper in others)
+
+
+def pin_one_marker_beside(candidates, keepouts: Sequence[Box], owner: Sequence[RoundedBox],
+                          others: Sequence[RoundedBox], radius: float = PIN_ONE_DOT_RADIUS_MM,
+                          layer: str = "F.SilkS", width: float = PIN_ONE_DOT_WIDTH_MM,
+                          step: float = 0.1, limit_mm: float = 50.0) -> Optional[FpCircle]:
+    """@brief Filled silk dot next to pin 1 itself, or None when no spot next to it is free.
+
+    @param candidates (centre, direction) pairs in order of preference, mm:
+        each centre is moved along its direction while the dot lies on copper.
+    @param keepouts Boxes from keepout_box(..., line_width=0) for every pad.
+    @param owner Copper of the pin-1 pad(s), rounded boxes (`RoundedBox`).
+    @param others Copper of every other pad, rounded boxes.
+    @param radius Dot radius (geometry of the circle), mm.
+    @param layer Silk layer.
+    @param width Stroke width of the circle outline, mm.
+    @param step Search step along a direction, mm.
+    @param limit_mm Longest walk of one candidate, mm (the bound of
+        `push_marker_clear`); reached only when pin 1 is the only pad.
+    @return The first FpCircle whose ink clears every keepout while its
+        centre still points at pin 1 (`marker_points_at`); None when every
+        candidate reaches another pad first.
+    @note Unlike `push_marker_clear`, the search of one candidate stops as
+        soon as the dot would point at another pad, not after a fixed
+        distance: a dot pushed along a row until it clears the copper used
+        to land next to another contact, 26 mm away on a 41-contact module,
+        or to block the whole footprint (review 2026-11-16, R11-2). Each
+        candidate ends there, so the search is bounded by the pads around
+        pin 1, whatever the part.
+    """
+    ink_radius = radius + width / 2
+    for center, direction in candidates:
+        norm = math.hypot(*direction)
+        # A zero direction cannot move: only its own centre is tried. The
+        # limit only guards a pin 1 with no other pad, where nothing else
+        # ends the walk; a walk away from a bounded pad clears it long before.
+        ux, uy = (direction[0] / norm, direction[1] / norm) if norm > 0 else (0.0, 0.0)
+        limit = limit_mm if norm > 0 else 0.0
+        moved = 0.0
+        x, y = center
+        while moved <= limit + 1e-9 and marker_points_at((x, y), owner, others):
+            if marker_clear_of((x, y), ink_radius, keepouts):
+                return FpCircle(center=(round(x, 6) + 0.0, round(y, 6) + 0.0), radius=radius,
+                                layer=layer, width=width, fill=True)
+            moved += step
+            x, y = center[0] + ux * moved, center[1] + uy * moved
+    return None
 
 
 def marker_ink_box(marker: FpCircle) -> Box:

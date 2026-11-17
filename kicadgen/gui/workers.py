@@ -36,6 +36,7 @@ from ..generators.pin_header import PinHeaderParams
 from ..services.ai_diagnostics import CallCancelled
 from ..services.datasheet_extractor import ExtractionError
 from ..services.messages import tx
+from .quit_wait import connect_quit_wait, disconnect_quit_wait
 
 
 def _patch_point(name: str):
@@ -514,9 +515,15 @@ class GenerateWorker(_Cad3DRunWorker):
             # User drawings (preview palette): records already validated,
             # added after the generated ones so they do not touch the
             # computed geometry (pads, courtyard, outlines).
-            from ..core.footprint import drawing_graphics
-            for item in drawing_graphics(self.drawings):
+            from ..core.footprint import drawing_graphics, skipped_drawings_note
+            # Drawings that collapsed to a point or an arealess line are left
+            # out instead of blocking the write, and the user is told so
+            # (review R11-8, 2026-11-16).
+            skipped: list = []
+            for item in drawing_graphics(self.drawings, skipped=skipped):
                 footprint.add_graphic(item)
+            if skipped:
+                self.progress.emit(skipped_drawings_note(len(skipped)))
             # Once, on the footprint built for this file only (nothing else
             # holds it): every pad, graphic, zone and text moves by -anchor.
             footprint.shift_origin(*self.anchor)
@@ -642,8 +649,9 @@ class UpdateCheckWorker(QThread):
         it, the same pattern as `model_dialog._ModelsWorker`: closing the
         window during the check (up to the 5 s HTTP timeout) must not destroy
         a running QThread, which would abort the whole process. Application
-        exit waits for it through `aboutToQuit`, bounded by that timeout, and
-        the thread deletes itself once finished.
+        exit waits for it at most `quit_wait.QUIT_WAIT_MS` (a DNS lookup is
+        not bound by the HTTP timeout), and the thread deletes itself once
+        finished.
     """
     done = pyqtSignal(object)
 
@@ -655,23 +663,18 @@ class UpdateCheckWorker(QThread):
         """
         application = QApplication.instance()
         super().__init__(parent if parent is not None else application)
-        if application is not None:
-            application.aboutToQuit.connect(self.wait)
+        # Bounded exit wait: the HTTP read cannot be interrupted, so the
+        # thread is let go after the wait (see quit_wait).
+        connect_quit_wait(self)
         self.finished.connect(self._release)
 
     def _release(self) -> None:
         """Drop the exit-time wait and delete the finished thread.
 
-        The `wait` promise is valid only while the object exists: left
-        connected, Qt would call it on a thread already removed by
-        `deleteLater` at exit.
+        The exit hook is valid only while the object exists: left connected,
+        Qt would call it on a thread already removed by `deleteLater` at exit.
         """
-        application = QApplication.instance()
-        if application is not None:
-            try:
-                application.aboutToQuit.disconnect(self.wait)
-            except TypeError:
-                pass  # never connected, or already released
+        disconnect_quit_wait(self)
         self.deleteLater()
 
     def run(self):
@@ -698,8 +701,10 @@ class PreviewRenderWorker(QThread):
     @note Same ownership as `UpdateCheckWorker`: the thread belongs to
         QApplication, so closing the window during a render (bounded by
         `kicad_library.PREVIEW_RENDER_TIMEOUT_S`) never destroys a running
-        QThread; application exit waits for it, and the finished thread
-        deletes itself.
+        QThread; application exit kills the kicad-cli render (`stop`) and
+        waits for the thread at most `quit_wait.QUIT_WAIT_MS` instead of up to
+        `PREVIEW_RENDER_TIMEOUT_S` (super review 2026-11-16, R4-5); the
+        finished thread deletes itself.
     @note `render_preview_image` is looked up on `kicad_library` at run time,
         so a test that replaces it there reaches the code that runs.
     @note `done` carries (result, token): the receiver is a bound method of
@@ -723,19 +728,66 @@ class PreviewRenderWorker(QThread):
         self.kicad_cli = kicad_cli
         self.has_step = bool(has_step)
         self.token = token
-        if application is not None:
-            application.aboutToQuit.connect(self.wait)
+        #: Set by `stop`: no render starts after it.
+        self.cancel = threading.Event()
+        #: kicad-cli process of the render in flight, guarded by `_lock`.
+        self._process = None
+        self._lock = threading.Lock()
+        connect_quit_wait(self, stop=self.stop)
         self.finished.connect(self._release)
 
     def _release(self) -> None:
         """Drop the exit-time wait and delete the finished thread (see `UpdateCheckWorker._release`)."""
-        application = QApplication.instance()
-        if application is not None:
-            try:
-                application.aboutToQuit.disconnect(self.wait)
-            except TypeError:
-                pass  # never connected, or already released
+        disconnect_quit_wait(self)
         self.deleteLater()
+
+    def stop(self) -> None:
+        """@brief End the render now: the kicad-cli process tree in flight is killed.
+
+        @note Idempotent, non-blocking and callable from any thread. The
+            killed render ends as a failed `PreviewRender`, which a quitting
+            application never reads.
+        """
+        self.cancel.set()
+        with self._lock:
+            process = self._process
+        if process is not None:
+            from ..cad3d.process_log import kill_process_tree
+            try:
+                kill_process_tree(process)
+            except OSError:
+                pass  # already gone between the read and the kill
+
+    def _run(self, args, *, timeout=None, **kwargs):
+        """`subprocess.run` for the render, keeping the process so that `stop` can kill it.
+
+        Same contract as `subprocess.run` for what `render_preview_image`
+        passes (capture_output, text, errors, timeout, cwd, creationflags):
+        a timeout kills the process tree and raises TimeoutExpired.
+        The command runs through `kicad_library._run_contained` (review
+        2026-11-16, R9-5 follow-up): Job Object, stdin from the null device,
+        tree kill and BOUNDED reap; this worker only registers the process
+        through its `on_start` hook, refusing it when a stop came first.
+        """
+        import subprocess
+        from ..services import kicad_library
+
+        def register(process):
+            """Keep the process for `stop`; a stop asked before the start refuses it."""
+            with self._lock:
+                if self.cancel.is_set():
+                    raise subprocess.SubprocessError("render stopped before it started")
+                self._process = process
+        with self._lock:
+            if self.cancel.is_set():
+                raise subprocess.SubprocessError("render stopped before it started")
+        try:
+            return kicad_library._run_contained(
+                args, timeout=timeout, cwd=kwargs.get("cwd"),
+                errors=kwargs.get("errors", "replace"), on_start=register)
+        finally:
+            with self._lock:
+                self._process = None
 
     def run(self):
         """@brief QThread override: always emit one `kicad_library.PreviewRender`.
@@ -745,9 +797,12 @@ class PreviewRenderWorker(QThread):
             nothing reaches sys.excepthook from this thread.
         """
         from ..services import kicad_library
+        render = kicad_library.render_preview_image
         try:
-            result = kicad_library.render_preview_image(
-                self.preview, self.kicad_cli, has_step=self.has_step)
+            # The killable runner only where the function takes one (a test
+            # may replace it with a function that does not).
+            result = render(self.preview, self.kicad_cli, has_step=self.has_step,
+                            **accepted_kwargs(render, runner=self._run))
         except Exception as exc:  # noqa: BLE001 - the signal must always fire
             result = kicad_library.PreviewRender(None, "render_failed",
                                                  f"{type(exc).__name__}: {exc}")
@@ -787,9 +842,58 @@ class TerminalDetailWorker(QThread):
         # PROJECT cache (see photo_inventory.PHOTO_CACHE_SUBDIR); None = no
         # cache, never a shared folder.
         self.cache_dir = cache_dir
+        #: Set by `stop` (the window's close box, review 2026-11-16, R1-6):
+        #: the service checks it before each component and closes the request
+        #: in flight (`photo_terminals.observe_terminals(cancel=...)`).
+        self.cancel = threading.Event()
+        #: True once the pass ended because of `stop`: no result, no error.
+        self.cancelled = False
+
+    def stop(self) -> None:
+        """@brief Ask the pass to end now; idempotent, callable from any thread.
+
+        @note Only the terminal pass takes the cancel (`accepted_kwargs`):
+            `refine_leads`, which shares this worker, has no cancel channel
+            and runs to its end (`can_cancel` is False for it, and the window
+            drops a result that arrives after a stop).
+        """
+        self.cancel.set()
+
+    def _operation(self):
+        """The service function this pass runs (imported lazily, as in `run`)."""
+        if self.only_leads:
+            from ..services.photo_leads import refine_leads
+            return refine_leads
+        from ..services.photo_terminals import observe_terminals
+        return observe_terminals
+
+    def can_cancel(self) -> bool:
+        """@brief Whether a stop can really end this pass early.
+
+        @return True when the service function of the pass declares `cancel`
+            (`observe_terminals`); False for `refine_leads`, or when the
+            service cannot be imported.
+        """
+        try:
+            return bool(accepted_kwargs(self._operation(), cancel=self.cancel))
+        except Exception:  # noqa: BLE001 - only decides whether a button is offered
+            return False
 
     def run(self):
-        """@brief QThread override: observe terminals (or refine leads only) and emit the updated components."""
+        """@brief QThread override: observe terminals (or refine leads only) and emit the updated components.
+
+        @note A stop (`stop`) ends the pass with `CallCancelled`: it is the
+            user's decision, so it sets `cancelled` and emits neither `done`
+            nor «Dettaglio terminali fallito».
+        @note Run inside the pass's own usage scope (`_usage_scope_of`, set
+            by the window): the per-call cost deltas of the log never mix
+            with an analysis running at the same time.
+        """
+        with _usage_scope_of(self):
+            self._run_pass()
+
+    def _run_pass(self):
+        """Body of `run`: the service call and its outcome signals."""
         try:
             # Imported inside the guard: a failed import must reach the error
             # signal, not sys.excepthook (which ends the process).
@@ -803,9 +907,33 @@ class TerminalDetailWorker(QThread):
                 self.cache_dir,
                 **({'system_prompt': self.system_prompt} if self.system_prompt else {}),
                 **(accepted_kwargs(operation, step_models=self.step_models)
-                   if getattr(self, "step_models", None) is not None else {})))
+                   if getattr(self, "step_models", None) is not None else {}),
+                **accepted_kwargs(operation, cancel=self.cancel)))
+        except CallCancelled:
+            self.cancelled = True
         except Exception as exc:
+            if self.cancel.is_set():
+                # A failure caused by the stop (the request closed under it).
+                self.cancelled = True
+                return
             self.error.emit(tx("Dettaglio terminali fallito: {exc}", exc=exc))
+
+
+def _usage_scope_of(worker):
+    """@brief The context that makes a paid worker's calls count in its run's cost tally.
+
+    @param worker A worker whose `usage_scope` attribute the window set before
+        `start()` (`MainWindow._attach_usage_scope`), or left unset.
+    @return ``usage_scope.active()`` (an `openrouter.UsageScope`), so every
+        paid call made on this thread reaches the run's own tally and only it
+        (review R6-8, 2026-11-16); a no-op context when no scope was given,
+        and the calls then count only in the process-wide tally as before.
+    @note The scope is a ContextVar: it must be entered on the worker's own
+        thread, inside `run()`, never by the window before `start()`.
+    """
+    from contextlib import nullcontext
+    scope = getattr(worker, "usage_scope", None)
+    return scope.active() if scope is not None else nullcontext()
 
 
 class ExtractWorker(QThread):
@@ -1016,6 +1144,11 @@ class ExtractWorker(QThread):
         self.phase.emit(str(tool or ""), str(detail or ""), int(done or 0), int(total or 0))
 
     def run(self) -> None:
+        """@brief Run the extraction inside the run's usage scope (see `_usage_scope_of`)."""
+        with _usage_scope_of(self):
+            self._run_job()
+
+    def _run_job(self) -> None:
         """@brief Forward the captured settings and emit extracted data or an error."""
         try:
             # Resolved only once by `main_window` (see `_patch_point`): the
@@ -1070,7 +1203,11 @@ class YoloPretestWorker(ExtractWorker):
     """@brief Local YOLO detection on the top view only: the «Solo YOLO locale» pretest.
 
     Reuses ExtractWorker's review hand-off (review_requested /
-    deliver_review) and its signals; nothing else of the extraction runs.
+    deliver_review), its signals and its `cancel_event`; nothing else of the
+    extraction runs.
+    @note `cancel_event` reaches `extract_inventory(cancel=...)` only when the
+        installed function declares that keyword (`accepted_kwargs`), so the
+        worker is right before and after the detector learns to stop.
     """
 
     def __init__(self, doc_paths, document_roles, length_mm, width_mm,
@@ -1145,12 +1282,22 @@ class YoloPretestWorker(ExtractWorker):
                 yolo_model_path=self.yolo_model_path,
                 yolo_confidence=self.yolo_confidence,
                 yolo_settings=self.yolo_settings,
-                review_proposals=self._review_proposals)
+                review_proposals=self._review_proposals,
+                # «Interrompi» (stop) sets `cancel_event`; extract_inventory
+                # hands it on to the detector where the detector takes it.
+                **accepted_kwargs(extract_inventory, cancel=self.cancel_event))
             self.done.emit(report)
         except ReviewCancelled:
             self.done.emit(None)
         except Exception as exc:  # noqa: BLE001 - reported in the UI like every worker error
-            self.error.emit(str(exc))
+            if self.cancel_event.is_set():
+                # Stopped by the user: whatever the detector raised on its
+                # way out is no failure to report; no report, as for a
+                # cancelled review. Decided from the channel, never from the
+                # exception's type or text.
+                self.done.emit(None)
+            else:
+                self.error.emit(str(exc))
 
 
 class ReconcileWorker(QThread):
@@ -1258,6 +1405,11 @@ class ReconcileWorker(QThread):
                                    "nuova richiesta."))
 
     def run(self) -> None:
+        """@brief Run the reconciliation inside the run's usage scope (see `_usage_scope_of`)."""
+        with _usage_scope_of(self):
+            self._run_job()
+
+    def _run_job(self) -> None:
         """@brief Run the reconciliation with the same logged call as the extraction."""
         try:
             # Imported inside the guard: a failed import must reach the error
@@ -1457,6 +1609,11 @@ class RereadWorker(QThread):
                       self.progress.emit, None)
 
     def run(self) -> None:
+        """@brief Run the re-read inside the run's usage scope (see `_usage_scope_of`)."""
+        with _usage_scope_of(self):
+            self._run_job()
+
+    def _run_job(self) -> None:
         """@brief Run the one re-read with the same logged call as the extraction."""
         try:
             # Imported inside the guard: a failed import must reach the error

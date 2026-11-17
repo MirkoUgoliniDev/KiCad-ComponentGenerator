@@ -16,6 +16,18 @@ from kicadgen.cad3d import kicad_models
 from kicadgen.gui import photo_review_dialog as prd
 
 
+@pytest.fixture(autouse=True)
+def _fresh_exit_deadline(monkeypatch):
+    """Each test starts before the exit: the exit hooks share ONE process-wide deadline.
+
+    Since 2026-11-16 (`quit_wait.begin_exit`) a hook that ran in an earlier
+    test would leave the deadline in the past, and this test's wait would be 0.
+    """
+    from kicadgen.gui import quit_wait
+    monkeypatch.setattr(quit_wait, "_deadline", None)
+    monkeypatch.setattr(quit_wait, "_quitting", False)
+
+
 def test_a_search_deaf_to_the_stop_leaves_qapplication(qapp, monkeypatch):
     """@brief Positive: after the bounded wait the running thread has no owner."""
     release, entered = threading.Event(), threading.Event()

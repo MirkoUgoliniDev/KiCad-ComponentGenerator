@@ -26,6 +26,18 @@ from kicadgen.services.component_check import Check
 ROOT = Path(__file__).resolve().parents[1]
 
 
+@pytest.fixture(autouse=True)
+def _fresh_exit_deadline(monkeypatch):
+    """Each test starts before the exit: the exit hooks share ONE process-wide deadline.
+
+    Since 2026-11-16 (`quit_wait.begin_exit`) a hook that ran in an earlier
+    test would leave the deadline in the past, and this test's wait would be 0.
+    """
+    from kicadgen.gui import quit_wait
+    monkeypatch.setattr(quit_wait, "_deadline", None)
+    monkeypatch.setattr(quit_wait, "_quitting", False)
+
+
 def _png():
     image = QImage(400, 100, QImage.Format.Format_RGB32)
     image.fill(QColor("#243b28"))

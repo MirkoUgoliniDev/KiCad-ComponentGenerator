@@ -196,6 +196,8 @@ from typing import Mapping, Sequence
 import cv2
 import numpy as np
 
+from .photo_orientation import decode_upright
+
 # ---------------------------------------------------------------------------
 # Declared limits and constants
 # ---------------------------------------------------------------------------
@@ -964,12 +966,19 @@ def _read_image(path: Path) -> np.ndarray | None:
     The bytes are decoded from memory so that non-ASCII Windows paths work.
     A format OpenCV does not decode (GIF) is read through Pillow, first frame
     only, as RGBA.
+
+    The EXIF orientation is applied as the AI request applies it
+    (`photo_orientation.decode_upright`): a phone photo of a drawing stores
+    its pixels sideways with an orientation tag, the model reads it upright,
+    and the holes must be looked for in the same upright picture (review
+    2026-11-16, R8-1: decoded with IMREAD_UNCHANGED it was checked sideways
+    and gave a false «holes do not match»).
     """
     try:
         data = np.fromfile(str(path), dtype=np.uint8)
         if data.size == 0:
             return None
-        image = cv2.imdecode(data, cv2.IMREAD_UNCHANGED)
+        image = decode_upright(data, keep_alpha=True)
     except (OSError, ValueError, cv2.error):
         return None
     if image is None:
@@ -998,8 +1007,10 @@ def _read_with_pillow(data: np.ndarray) -> np.ndarray | None:
     import io
     try:
         from PIL import Image
+        from PIL import ImageOps
         with Image.open(io.BytesIO(data.tobytes())) as picture:
-            rgba = np.asarray(picture.convert("RGBA"))
+            # Upright as the AI request sends it (see _read_image).
+            rgba = np.asarray(ImageOps.exif_transpose(picture).convert("RGBA"))
     except Exception:  # noqa: BLE001 - any decoder failure means «not readable», as above
         return None
     return cv2.cvtColor(rgba, cv2.COLOR_RGBA2BGRA)

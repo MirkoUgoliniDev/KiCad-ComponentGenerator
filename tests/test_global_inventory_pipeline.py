@@ -110,7 +110,9 @@ def pipeline(monkeypatch, tmp_path):
     pixels = np.zeros((100, 200, 3), np.uint8)
     photo = tmp_path/'top.png'
     assert cv2.imwrite(str(photo), pixels)
-    monkeypatch.setattr(photo_inventory, 'prepare_photo', lambda *args: pixels.copy())
+    # **kwargs: a run with a cancellation channel passes `cancel` to the
+    # calibration too (review 2026-11-16, R8-2).
+    monkeypatch.setattr(photo_inventory, 'prepare_photo', lambda *args, **kwargs: pixels.copy())
     detection = Mock(return_value=[_proposal(1), _proposal(2)])
     monkeypatch.setattr(photo_yolo, 'detect_yolo_components', detection)
     global_review = Mock(wraps=global_inventory.review_global_inventory)

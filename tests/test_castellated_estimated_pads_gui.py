@@ -117,6 +117,10 @@ def test_an_old_project_without_per_side_pads_behaves_as_before(window):
     state["sides"] = [{k: v for k, v in side.items() if not k.startswith("pad_")}
                       for side in state["sides"]]
     state["widgets"]["field_cast_pad_width"] = 2.54     # quello che il difetto vi copiava
+    # A project of that time has no «cast_declared_sizes» either (review
+    # 2026-11-16, R2-8): without the key the old comparison applies, a value
+    # other than the reference reads as declared, as this test always meant.
+    state.pop("cast_declared_sizes", None)
     window._sides.clear()
     window._apply_project_state(state)
     params = window._current_castellated_params()

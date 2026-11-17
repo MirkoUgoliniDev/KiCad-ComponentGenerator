@@ -20,6 +20,9 @@ adding an external dependency for two calls would not be justified.
 from __future__ import annotations
 
 import contextlib
+import contextvars
+import errno
+import hashlib
 import json
 import http.client
 from http.client import IncompleteRead
@@ -118,7 +121,8 @@ LOW_CREDIT_USD = 2.00
 #: The credit changes only when money is spent: a chain of dozens of calls
 #: must not query the endpoint at every step.
 _CREDIT_CACHE_TTL_S = 60
-_credit_cache: Optional[tuple[float, "CreditStatus"]] = None
+#: (time read, digest of the key it was read with, status); see credit_status.
+_credit_cache: Optional[tuple[float, str, "CreditStatus"]] = None
 
 
 class OpenRouterError(Exception):
@@ -350,17 +354,20 @@ def _dotenv_key() -> tuple[str, Optional[Path]]:
 
     Same files and same parser as the launcher used to load into the process
     environment (`app_paths.env_files`, python-dotenv). Without python-dotenv
-    no `.env` is read, exactly as before.
+    no `.env` is read, exactly as before. Each file is decoded as the
+    launcher decodes it (`dotenv_keys.file_values`): a UTF-16 file with its
+    mark is read, an undecodable one is skipped as before.
     """
     try:
-        from dotenv import dotenv_values
+        import dotenv  # noqa: F401 - only to tell whether python-dotenv is there
     except ImportError:
         return "", None
+    from .dotenv_keys import file_values
     for path in env_files():
         try:
             if not path.is_file():
                 continue
-            value = dotenv_values(path).get(API_KEY_ENV)
+            value = file_values(path).get(API_KEY_ENV)
         except (OSError, ValueError):
             continue
         if value and value.strip():
@@ -556,6 +563,11 @@ class CreditStatus:
             differs; or a line saying the API reported no limit.
         """
         remaining = self.remaining
+        if remaining is None and self.account_error:
+            # The account balance was NOT read and the key has no ceiling of
+            # its own: the credit is unknown, not unlimited (review R7-7).
+            return tx("Credito OpenRouter non verificabile: saldo dell'account non letto "
+                      "({error}).", error=self.account_error)
         if remaining is None:
             return tx("Credito OpenRouter: nessun limite riportato dall'API.")
         detail = tx("Credito OpenRouter: {remaining} USD residui ({limit})",
@@ -745,9 +757,95 @@ _usage_lock = threading.Lock()
 _usage_totals = UsageTotals()
 
 
+def _snapshot(totals: UsageTotals) -> UsageTotals:
+    """Independent copy of `totals`; the caller holds `_usage_lock`."""
+    # The per-model lists are copied too: the snapshot must not move with later calls.
+    return UsageTotals(**{**vars(totals),
+                          "by_model": {key: list(value) for key, value in totals.by_model.items()},
+                          "cached_by_model": dict(totals.cached_by_model)})
+
+
+class UsageScope:
+    """@brief The tally of ONE run's paid calls, apart from the other runs of the process.
+
+    The process-wide tally (`reset_usage` / `usage_totals` outside a scope)
+    is shared: a run that resets it at its start zeroes the costs of another
+    paid run still going in another thread (fixer C6, 2026-11-16). A scope
+    counts only the calls made while it is active in the thread that makes
+    them (a `contextvars.ContextVar`, so it is per thread and never leaks to
+    another one).
+
+    Adoption, for a caller that starts a paid run in a worker thread:
+
+    * create the scope where the run is started (the GUI thread), keep it;
+    * in the worker, run the whole job inside ``with scope.active():``;
+    * read the run's cost with ``scope.totals()`` -- from any thread, also
+      after the worker ended -- instead of `usage_totals()`.
+
+    Inside an active scope `reset_usage` and `usage_totals` act on the scope
+    (so a job that resets its tally at its start, as the extraction does,
+    resets only its own), and the per-call delta of `ai_diagnostics` is the
+    scope's. Every call is still added to the process-wide tally too, so the
+    callers not yet adopting scopes keep working as before.
+    """
+
+    def __init__(self):
+        """@brief A scope with an empty tally, not active yet."""
+        self._totals = UsageTotals()
+
+    @contextlib.contextmanager
+    def active(self):
+        """@brief Make this scope the tally of the calls made in the current thread.
+
+        @return Context manager yielding the scope; nesting restores the
+            outer scope on exit.
+        """
+        token = _active_scope.set(self)
+        try:
+            yield self
+        finally:
+            _active_scope.reset(token)
+
+    def totals(self) -> UsageTotals:
+        """@brief Snapshot of this scope's tally.
+
+        @return A UsageTotals copy, independent of later calls.
+        """
+        with _usage_lock:
+            return _snapshot(self._totals)
+
+    def reset(self) -> None:
+        """@brief Empty this scope's tally (the process-wide one is untouched)."""
+        with _usage_lock:
+            self._totals = UsageTotals()
+
+
+#: The usage scope active in the current thread (see UsageScope), or None.
+_active_scope: contextvars.ContextVar = contextvars.ContextVar("kicadgen_usage_scope",
+                                                              default=None)
+
+
+def _tallies() -> list:
+    """The tallies a usage update goes to: the process-wide one, plus the active scope's.
+
+    The caller holds `_usage_lock` (a scope's tally object is replaced by
+    `UsageScope.reset` under the same lock).
+    """
+    scope = _active_scope.get()
+    return [_usage_totals] if scope is None else [_usage_totals, scope._totals]
+
+
 def reset_usage() -> None:
-    """@brief Start a new accounting run, discarding the previous totals."""
+    """@brief Start a new accounting run, discarding the previous totals.
+
+    @note Inside an active UsageScope only that scope's tally is emptied:
+        another run counting in the process-wide tally is left alone.
+    """
     global _usage_totals
+    scope = _active_scope.get()
+    if scope is not None:
+        scope.reset()
+        return
     with _usage_lock:
         _usage_totals = UsageTotals()
 
@@ -756,14 +854,14 @@ def usage_totals() -> UsageTotals:
     """@brief Return a snapshot of the current run totals.
 
     @return A UsageTotals copy taken under the usage lock, independent of
-        later updates.
+        later updates: the active UsageScope's tally inside one, else the
+        process-wide tally.
     """
+    scope = _active_scope.get()
+    if scope is not None:
+        return scope.totals()
     with _usage_lock:
-        # The per-model lists are copied too: the snapshot must not move with later calls.
-        return UsageTotals(**{**vars(_usage_totals),
-                              "by_model": {key: list(value)
-                                           for key, value in _usage_totals.by_model.items()},
-                              "cached_by_model": dict(_usage_totals.cached_by_model)})
+        return _snapshot(_usage_totals)
 
 
 def _usage_int(container: Any, key: str) -> int:
@@ -844,8 +942,9 @@ def record_cached_answer(model: str) -> None:
     """
     model_key = str(model or "") or "?"
     with _usage_lock:
-        counts = _usage_totals.cached_by_model
-        counts[model_key] = counts.get(model_key, 0) + 1
+        for totals in _tallies():
+            counts = totals.cached_by_model
+            counts[model_key] = counts.get(model_key, 0) + 1
     listener = _cached_answer_listener
     if listener is None:
         return
@@ -1001,13 +1100,41 @@ def _closable_context() -> ssl.SSLContext:
         return _closable_context_cache
 
 
+#: Threads whose cancellation arrived while they had NO request in flight
+#: (`abort_request` with `sticky`): their next request is refused before it
+#: is sent, until `clear_abort` (review R7-4).
+_pending_aborts: set = set()
+
+
 class _ClosableRequest:
-    """Context manager registering this thread's paid request in `_inflight`."""
+    """Context manager registering this thread's request in `_inflight`.
+
+    @note A cancellation that reached this thread before the request was
+        registered (`abort_request(..., sticky=True)`) is not lost: entering
+        raises RequestCancelled at once, before anything is sent, so the
+        paid call never starts (review R7-4).
+    """
+
+    def __init__(self, provider: str = "OpenRouter"):
+        """@brief Prepare the registration of one request.
+
+        @param provider Provider name said by a RequestCancelled raised on entry.
+        """
+        self.provider = provider
 
     def __enter__(self) -> _InflightRequest:
         self.record = _InflightRequest()
+        thread_id = threading.get_ident()
         with _inflight_lock:
-            _inflight[threading.get_ident()] = self.record
+            if thread_id in _pending_aborts:
+                refused = True
+            else:
+                refused = False
+                _inflight[thread_id] = self.record
+        if refused:
+            # Never sent: nothing was paid.
+            raise RequestCancelled(tx("Richiesta a {provider} interrotta dall'utente.",
+                                      provider=self.provider))
         return self.record
 
     def __exit__(self, *exc_info) -> bool:
@@ -1018,10 +1145,16 @@ class _ClosableRequest:
         return False
 
 
-def abort_request(thread_id: int) -> bool:
+def abort_request(thread_id: int, *, sticky: bool = False) -> bool:
     """@brief Close the connection of the paid request that thread `thread_id` has in flight.
 
     @param thread_id `threading.get_ident()` of the thread running the request.
+    @param sticky True to also refuse the requests that thread registers
+        LATER, until `clear_abort(thread_id)`: a Cancel that arrives while
+        the thread is still preparing its request (encoding files, resolving
+        the model) is otherwise lost and the paid call runs to the end
+        (review R7-4). The caller that passes it must call `clear_abort`
+        when its cancellable scope ends.
     @return True when that thread had a request in flight (it is now
         aborted), False when it had none.
     @note Thread-safe; meant for the cancel path (`ai_diagnostics`), which
@@ -1030,6 +1163,8 @@ def abort_request(thread_id: int) -> bool:
         possibly billed when the request had been sent (review 2026-10-29, E6).
     """
     with _inflight_lock:
+        if sticky:
+            _pending_aborts.add(thread_id)
         record = _inflight.get(thread_id)
         if record is None:
             return False
@@ -1038,6 +1173,17 @@ def abort_request(thread_id: int) -> bool:
     if sock is not None:
         _shutdown_socket(sock)
     return True
+
+
+def clear_abort(thread_id: int) -> None:
+    """@brief Forget a sticky cancellation of thread `thread_id` (see `abort_request`).
+
+    @param thread_id `threading.get_ident()` of the thread.
+    @note Called when the cancellable scope that asked for it ends, so a
+        thread reused for later work (a pool, the next run) is not refused.
+    """
+    with _inflight_lock:
+        _pending_aborts.discard(thread_id)
 
 
 def _cancelled_error(exc: OpenRouterError, provider: str) -> RequestCancelled:
@@ -1085,19 +1231,21 @@ def _record_usage(payload: Any, *, sent_at: Optional[datetime] = None,
     answered = payload.get("model") if isinstance(payload, dict) else ""
     model_key = str(model or answered or "") or "?"
     with _usage_lock:
-        _usage_totals.calls += 1
-        entry = _usage_totals.by_model.setdefault(model_key, [0.0, 0, 0])
-        entry[1] += 1
-        if cost is None:
-            _usage_totals.calls_without_cost += 1
-            entry[2] += 1
-        else:
-            _usage_totals.cost_usd += cost
-            entry[0] += cost
-        _usage_totals.prompt_tokens += prompt_delta
-        _usage_totals.completion_tokens += completion_delta
-        _usage_totals.cached_tokens += cached_delta
-        _usage_totals.reasoning_tokens += reasoning_delta
+        # The process-wide tally and, inside one, the run's own UsageScope.
+        for totals in _tallies():
+            totals.calls += 1
+            entry = totals.by_model.setdefault(model_key, [0.0, 0, 0])
+            entry[1] += 1
+            if cost is None:
+                totals.calls_without_cost += 1
+                entry[2] += 1
+            else:
+                totals.cost_usd += cost
+                entry[0] += cost
+            totals.prompt_tokens += prompt_delta
+            totals.completion_tokens += completion_delta
+            totals.cached_tokens += cached_delta
+            totals.reasoning_tokens += reasoning_delta
     listener = _usage_listener
     if listener is not None:
         moment = sent_at or datetime.now(timezone.utc)
@@ -1147,25 +1295,86 @@ def _get_json(url: str, timeout: int, key: Optional[str] = None) -> dict:
                  **_APP_HEADERS},
     )
     _refuse_unsendable_headers(request)
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            # Bounded read (review 2026-10-27, E6): an over-sized body is a
-            # ValueError, hence «risposta non decodificabile» below.
-            payload = _json_from_response(response)
-    except urllib.error.HTTPError as exc:
-        status = exc.code if type(exc.code) is int else None
-        raise OpenRouterError(_error_message(exc), http_status=status) from None
-    except urllib.error.URLError as exc:
-        raise OpenRouterError(tx("connessione fallita: {safe_error_text}",
-                                 safe_error_text=_safe_error_text(exc.reason))
-                              + _diagnostic_context(), unreachable=True) from None
-    except (ValueError, OSError, http.client.HTTPException) as exc:
-        # An OSError is a transport failure (read timeout, connection
-        # closed): the answer did not arrive. A ValueError or a malformed
-        # status line (HTTPException) is an answer that arrived broken.
-        raise OpenRouterError(tx("risposta non decodificabile") + _diagnostic_context(),
-                              unreachable=isinstance(exc, OSError)) from None
+
+    def fetch():
+        """The GET itself, every failure turned into an OpenRouterError."""
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                # Bounded read (review 2026-10-27, E6): an over-sized body is a
+                # ValueError, hence «risposta non decodificabile» below.
+                return _json_from_response(response)
+        except urllib.error.HTTPError as exc:
+            status = exc.code if type(exc.code) is int else None
+            raise OpenRouterError(_error_message(exc), http_status=status) from None
+        except urllib.error.URLError as exc:
+            error = OpenRouterError(tx("connessione fallita: {safe_error_text}",
+                                       safe_error_text=network_reason(exc))
+                                    + _diagnostic_context(), unreachable=True)
+            # urllib wraps in URLError only the failures while CONNECTING or
+            # sending (DNS, refused, no route, connect timeout): the host was
+            # not reached at all, which `credit_status` reads.
+            error.not_connected = True
+            raise error from None
+        except OSError as exc:
+            # A transport failure (read timeout, connection closed): the
+            # answer did not arrive, which is not an undecodable answer
+            # (review R7-9: it was reported as one, without its reason).
+            raise OpenRouterError(tx("connessione fallita: {safe_error_text}",
+                                     safe_error_text=network_reason(exc))
+                                  + _diagnostic_context(), unreachable=True) from None
+        except (ValueError, http.client.HTTPException):
+            # A ValueError or a malformed status line (HTTPException) is an
+            # answer that arrived broken.
+            raise OpenRouterError(tx("risposta non decodificabile")
+                                  + _diagnostic_context()) from None
+
+    payload = run_abandonable(fetch, "OpenRouter")
     return payload if isinstance(payload, dict) else {}
+
+
+#: Granularity (s) with which a thread waiting for a free request notices
+#: that the user cancelled (`run_abandonable`). A reaction time, not a tuning.
+_ABANDON_POLL_S = 0.1
+
+
+def run_abandonable(action, provider: str):
+    """@brief Run one FREE request so that the calling thread's Cancel stops waiting for it.
+
+    @param action Callable without arguments doing the request; it runs in
+        a daemon helper thread.
+    @param provider Provider name said by the RequestCancelled.
+    @return What `action` returns.
+    @throws BaseException What `action` raises, unchanged.
+    @throws RequestCancelled When `abort_request` targets the calling thread
+        meanwhile (a `cancel_scope` of ai_diagnostics, review R7-5): the
+        caller returns within _ABANDON_POLL_S, and the abandoned request ends
+        on its own timeout in the background. Also on entry, before the
+        request starts, after a sticky abort.
+    @note Only for free status requests (credit, balance, key check): a
+        paid request is never abandoned, its connection is closed instead
+        (`_ClosableRequest`), so its usage is recorded. Running the request
+        in a helper thread keeps `urllib.request.urlopen` called exactly as
+        before, with no TLS context of its own.
+    """
+    outcome = {}
+
+    def run():
+        try:
+            outcome["value"] = action()
+        except BaseException as exc:  # noqa: BLE001 - handed to the caller as it is
+            outcome["error"] = exc
+
+    with _ClosableRequest(provider) as inflight:
+        worker = threading.Thread(target=run, name="free-request", daemon=True)
+        worker.start()
+        while worker.is_alive():
+            worker.join(_ABANDON_POLL_S)
+            if worker.is_alive() and inflight.aborted:
+                raise RequestCancelled(tx("Richiesta a {provider} interrotta dall'utente.",
+                                          provider=provider))
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome.get("value")
 
 
 def credit_status(force_refresh: bool = False) -> CreditStatus:
@@ -1180,35 +1389,63 @@ def credit_status(force_refresh: bool = False) -> CreditStatus:
     @note The two endpoints are independent: one answering is enough for the
         check to have a limit to apply.
     @note The result stays cached for :data:`_CREDIT_CACHE_TTL_S` seconds: a
-        chain of dozens of calls must not query the API at every step.
+        chain of dozens of calls must not query the API at every step. The
+        cache belongs to the key it was read with (a digest of it, never the
+        key): a key changed in any way -- «Account AI...», the environment,
+        a `.env` edit -- reads the credit again (review R7-10).
+    @note When the host of the first endpoint could not even be connected to
+        (`not_connected`: DNS, refused, no route, connect timeout), the
+        second, on the same host, is not tried: it would fail the same way
+        after the same wait (review R7-5). A READ timeout or an HTTP refusal
+        of the first still lets the second be read: the host is there, and
+        a key ceiling below the minimum must still be seen (adversarial
+        review of R7-5).
+    @throws RequestCancelled When the user's Cancel closed a request
+        (`cancel_scope`): never reported as «credit not verifiable».
     """
     global _credit_cache
+    try:
+        fingerprint = _key_fingerprint(api_key())
+    except OpenRouterError:
+        fingerprint = ""
     if not force_refresh and _credit_cache is not None:
-        stamp, cached = _credit_cache
-        if time.time() - stamp <= _CREDIT_CACHE_TTL_S:
+        stamp, cached_fingerprint, cached = _credit_cache
+        if cached_fingerprint == fingerprint and time.time() - stamp <= _CREDIT_CACHE_TTL_S:
             return cached
 
     failures = []
     account_error = ""
     account = (None, None, None)
+    limits = (None, False, "")
     try:
         account = _account_balance(None)
+    except RequestCancelled:
+        raise
     except OpenRouterError as exc:
         account_error = str(exc)
         failures.append(tx("saldo account ({exc})", exc=exc))
+        if getattr(exc, "not_connected", False):
+            failures.append(tx("stato chiave (non provato: OpenRouter non raggiungibile)"))
 
-    limits = (None, False, "")
-    try:
-        limits = _key_limits(None)
-    except OpenRouterError as exc:
-        failures.append(tx("stato chiave ({exc})", exc=exc))
+    if len(failures) < 2:
+        try:
+            limits = _key_limits(None)
+        except RequestCancelled:
+            raise
+        except OpenRouterError as exc:
+            failures.append(tx("stato chiave ({exc})", exc=exc))
 
     if len(failures) == 2:
         raise OpenRouterError("; ".join(failures))
 
     status = _status_from(account, limits, account_error)
-    _credit_cache = (time.time(), status)
+    _credit_cache = (time.time(), fingerprint, status)
     return status
+
+
+def _key_fingerprint(key: str) -> str:
+    """Digest naming the key a cached credit was read with; never the key itself."""
+    return hashlib.sha256(key.encode("utf-8")).hexdigest() if key else ""
 
 
 def _account_balance(key: Optional[str]) -> tuple:
@@ -1307,6 +1544,8 @@ def check_credit(minimum_usd: float = MIN_CREDIT_USD, progress=None,
         again instead of using the cached status.
     @return The status read, or None when it could not be read.
     @throws OpenRouterError When the credit is known and below `minimum_usd`.
+    @throws RequestCancelled When the user's Cancel stopped the reading
+        (`ai_diagnostics.cancel_scope`).
     @note Three distinct outcomes, because they must be treated differently:
 
         * credit known and below `minimum_usd` -> OpenRouterError: the work
@@ -1321,6 +1560,9 @@ def check_credit(minimum_usd: float = MIN_CREDIT_USD, progress=None,
     log = progress or (lambda message: None)
     try:
         status = credit_status(force_refresh=force_refresh)
+    except RequestCancelled:
+        # The user's Cancel, not an unverifiable credit (review R7-5).
+        raise
     except OpenRouterError as exc:
         log(tx("Credito OpenRouter non verificabile: {exc}. Si prosegue comunque.", exc=exc))
         return None
@@ -1347,20 +1589,22 @@ def check_credit(minimum_usd: float = MIN_CREDIT_USD, progress=None,
 def _parse_price(value: Any) -> float:
     """Price of one token (string from the API) -> dollars for a million tokens.
 
-    A nonfinite price ("nan", "inf") is not a price: it is unknown (NaN, the
-    same marker DeepSeek's models carry) and never free, so the model is not
-    offered as a free one. An absent or unparsable price keeps the historical
-    0.0; the negative sentinels of the "auto" models are 0 as well.
+    Only a declared zero is free. Anything that is not a price is unknown
+    (NaN, the same marker DeepSeek's models carry), never free, so the model
+    is not offered as a free one: a nonfinite price ("nan", "inf"), an absent
+    or unparsable one, a boolean (review R7-6: those used to read 0.0, shown
+    as «gratis»), and the negative sentinels of the "auto" router models,
+    whose real price depends on the model chosen at call time.
     """
+    if isinstance(value, bool):
+        return math.nan
     try:
         price = float(value)
     except (TypeError, ValueError, OverflowError):
-        return 0.0
-    if not math.isfinite(price):
         return math.nan
-    # The "auto" router models publish negative sentinel prices (the real
-    # price depends on the model chosen at call time): they count as 0 here.
-    return price * 1_000_000 if price > 0 else 0.0
+    if not math.isfinite(price) or price < 0:
+        return math.nan
+    return price * 1_000_000
 
 
 def _price_sort_key(price: float) -> tuple:
@@ -1687,6 +1931,45 @@ def _safe_error_text(value):
     return tx("dettagli del provider omessi")
 
 
+def network_reason(exc: BaseException) -> str:
+    """@brief Fixed category of a network failure, recognised by its type, never by its text.
+
+    @param exc The exception raised while connecting or waiting: a URLError
+        (its `reason` is examined), an OSError, an HTTPException.
+    @return A translated category («timed out», unresolved address, refused
+        or closed connection, TLS certificate ...); for a type with no
+        category, the provider-details-omitted text followed by the exception
+        CLASS name, which the code defines and which carries no request data.
+    @note Review R7-9: every network failure used to read «dettagli del
+        provider omessi» (provider details omitted), because the safe-text
+        filter accepts only strings and a socket error is an object. The
+        free text of the error is still never shown: a proxy error can echo
+        its URL with credentials, a socket error a host name.
+    """
+    reason = getattr(exc, "reason", None)
+    candidate = reason if isinstance(reason, BaseException) else exc
+    if isinstance(reason, str):
+        return _safe_error_text(reason)
+    if isinstance(candidate, TimeoutError):
+        return _safe_error_text("timed out")
+    if isinstance(candidate, socket.gaierror):
+        return tx("indirizzo del server non risolto (DNS o rete assente)")
+    if isinstance(candidate, ConnectionRefusedError):
+        return tx("connessione rifiutata")
+    if isinstance(candidate, (ConnectionResetError, ConnectionAbortedError, BrokenPipeError,
+                              http.client.RemoteDisconnected)):
+        return tx("connessione chiusa dal server o dalla rete")
+    if isinstance(candidate, ssl.SSLCertVerificationError):
+        return tx("certificato TLS del server non verificato")
+    if isinstance(candidate, ssl.SSLError):
+        return tx("errore TLS")
+    if isinstance(candidate, OSError) and (
+            candidate.errno in (errno.ENETUNREACH, errno.EHOSTUNREACH, errno.ENETDOWN)
+            or getattr(candidate, "winerror", None) in (10050, 10051, 10065)):
+        return tx("rete o server non raggiungibile")
+    return f"{tx('dettagli del provider omessi')} ({type(candidate).__name__})"
+
+
 def _diagnostic_context(payload=None, status=None):
     """Allowlist completion reasons and provider codes without inspecting raw metadata."""
     payload = payload if isinstance(payload, dict) else {}
@@ -1828,14 +2111,14 @@ def _post_chat(request: urllib.request.Request, content_blocks: Sequence[dict]) 
         ) from None
     except urllib.error.URLError as exc:
         raise OpenRouterError(tx("Connessione a OpenRouter fallita: {reason}",
-                                 reason=_safe_error_text(exc.reason))
+                                 reason=network_reason(exc))
                               + _diagnostic_context()) from None
     except OSError as exc:
         # Sent, then the connection failed while waiting for or reading the
         # answer: possibly billed, never silently free (B10, E5).
         _record_usage(None)
         error = OpenRouterError(tx("Connessione a OpenRouter fallita: {reason}",
-                                   reason=_safe_error_text(str(exc)))
+                                   reason=network_reason(exc))
                                 + _diagnostic_context())
         error.possibly_billed = True
         raise error from None

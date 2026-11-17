@@ -117,8 +117,10 @@ def test_a_module_with_assumed_sizes_records_them_in_english():
 
 
 def test_a_module_with_declared_sizes_writes_no_assumption():
+    # CONTRACT CHANGED 2026-11-16 (review follow-up): the overhang left at its
+    # reference is an assumed size, so «every size declared» includes it.
     text = build_castellated_module(_module(hole_diameter=1.0, hole_inset=0.3, pad_length=2.5,
-                                            pad_width=1.2)).render()
+                                            pad_width=1.2, pad_overhang=1.4)).render()
     assert "assumed" not in text and italian_words(text) == []
 
 

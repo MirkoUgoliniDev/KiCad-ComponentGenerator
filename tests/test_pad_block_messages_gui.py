@@ -332,7 +332,13 @@ def test_the_cause_is_session_text_and_a_reopened_project_shows_none(window, mon
     _single_tht(window, monkeypatch, tmp_path)
     run_extraction(window, _holeless({"5"}, conflict=CAUSE))
     state = window._project_state()
-    assert CAUSE not in str(state)
+    # CONTRACT CHANGED (review D, 2026-11-16): an unverified conflict survives
+    # a reopen so that a manual generation still asks (generality audit S1);
+    # its FULL text is saved in that one record, nowhere else, and the
+    # unread-pad block of a reopened project still shows no session account.
+    assert state["pin_map_conflict"] == {"text": CAUSE, "confirmed": False}
+    assert CAUSE not in str({key: value for key, value in state.items()
+                             if key != "pin_map_conflict"})
     window._switch_project("OTHER", window._general_project_state)
     window._switch_project("RLY", state)
     block = window._unread_pads_block()

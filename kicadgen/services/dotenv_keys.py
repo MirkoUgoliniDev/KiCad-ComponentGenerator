@@ -8,12 +8,15 @@ providers._deepseek_dotenv_key): every binding it reports carries its
 original text, so the file is rebuilt from those texts minus the bindings
 of one name -- a quoted value spanning several lines, an «export» prefix, a
 quoted name, comments and line endings are handled exactly as the parser
-sees them. A leading UTF-8 BOM is kept. The new file replaces the old one
+sees them. The file is decoded as the launcher decodes it (byte-order mark or
+strict UTF-8) and written back in the same encoding with the same mark. The
+new file replaces the old one
 atomically (temporary file in the same folder, then os.replace on the
 resolved path, so a symbolic link keeps pointing at the edited file).
 """
 from __future__ import annotations
 
+import codecs
 import io
 import os
 import tempfile
@@ -32,7 +35,27 @@ ABSENT = "absent"
 #: leave the secret in that other variable, so nothing changed.
 INDIRECT = "indirect"
 
-_BOM = "﻿"
+
+def file_values(path) -> dict:
+    """@brief The variables python-dotenv reads in the `.env` file `path`, decoded as the launcher does.
+
+    @param path The `.env` file.
+    @return Name -> value (interpolated as python-dotenv does).
+    @throws OSError When the file cannot be read.
+    @throws ValueError When its bytes are not text in a supported encoding
+        (`app_paths.EnvFileEncodingError`).
+    @throws ImportError When python-dotenv is not installed.
+    @note The text is decoded by `app_paths.read_env_text` (byte-order mark
+        or strict UTF-8), the reader of the launcher: a UTF-16 `.env` written
+        by PowerShell or Notepad, which the launcher loads, was skipped here
+        because python-dotenv opens files as UTF-8 only, so its key was
+        invisible to the key lookups (review R12-1 follow-up). One reader for
+        every key lookup (openrouter._dotenv_key,
+        providers._deepseek_dotenv_key, `read_key`).
+    """
+    from dotenv import dotenv_values
+    from ..app_paths import read_env_text
+    return dotenv_values(stream=io.StringIO(read_env_text(path)))
 
 
 def read_key(path, name: str) -> str:
@@ -43,12 +66,8 @@ def read_key(path, name: str) -> str:
     @return The value (interpolated as python-dotenv does), never logged by this module.
     """
     try:
-        from dotenv import dotenv_values
-    except ImportError:
-        return ""
-    try:
-        return (dotenv_values(Path(path)).get(name) or "").strip()
-    except (OSError, ValueError):
+        return (file_values(Path(path)).get(name) or "").strip()
+    except (ImportError, OSError, ValueError):
         return ""
 
 
@@ -66,17 +85,23 @@ def remove_key_result(path, name: str) -> str:
     @return REMOVED, ABSENT (no binding of `name`) or INDIRECT (a binding of
         `name` only refers to another variable with «${…}»: nothing removed,
         because the secret lives in that other variable).
-    @throws OSError When the file cannot be read, decoded as UTF-8, parsed
-        or replaced; the file is then unchanged.
+    @throws OSError When the file cannot be read, decoded (`app_paths.read_env_text`:
+        byte-order mark or strict UTF-8), parsed or replaced; the file is
+        then unchanged.
+    @note The file is written back in the encoding it was read in, with the
+        same byte-order mark: the readers find keys in a UTF-16 `.env`
+        (`file_values`), so «Spostala in Windows» (move it to Windows) must
+        be able to remove them from one too (adversarial review of R12-1).
+        The new content is flushed and fsynced before the atomic replace.
     """
+    from ..app_paths import read_env_text
     path = Path(path).resolve()
     raw = path.read_bytes()
     try:
-        text = raw.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise OSError(f"{path}: not UTF-8 ({exc.reason})") from exc
-    bom = text.startswith(_BOM)
-    body = text[len(_BOM):] if bom else text
+        body = read_env_text(path)
+    except ValueError as exc:
+        raise OSError(str(exc)) from exc
+    mark, codec = _file_encoding(raw)
     try:
         bindings = _bindings(body)
     except ImportError as exc:
@@ -91,11 +116,13 @@ def remove_key_result(path, name: str) -> str:
     if any("${" in (binding.value or "") for binding in mine):
         return INDIRECT
     kept = "".join(binding.original.string for binding in bindings if binding.key != name)
-    data = ((_BOM if bom else "") + kept).encode("utf-8")
+    data = mark + kept.encode(codec)
     handle, temporary = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=str(path.parent))
     try:
         with os.fdopen(handle, "wb") as out:
             out.write(data)
+            out.flush()
+            os.fsync(out.fileno())
         os.replace(temporary, path)
     except BaseException:
         try:
@@ -104,6 +131,26 @@ def remove_key_result(path, name: str) -> str:
             pass
         raise
     return REMOVED
+
+
+#: Byte-order marks of a `.env` file and the codec that writes the text after
+#: each one (no mark of its own): the marks `app_paths.read_env_text` decodes.
+#: UTF-32 LE comes before UTF-16 LE, whose mark is its prefix.
+_MARKED_CODECS = (
+    (codecs.BOM_UTF32_LE, "utf-32-le"),
+    (codecs.BOM_UTF32_BE, "utf-32-be"),
+    (codecs.BOM_UTF8, "utf-8"),
+    (codecs.BOM_UTF16_LE, "utf-16-le"),
+    (codecs.BOM_UTF16_BE, "utf-16-be"),
+)
+
+
+def _file_encoding(raw: bytes) -> tuple[bytes, str]:
+    """(byte-order mark, codec of the text after it) of a `.env` file's bytes; no mark is UTF-8."""
+    for mark, codec in _MARKED_CODECS:
+        if raw.startswith(mark):
+            return mark, codec
+    return b"", "utf-8"
 
 
 def remove_key(path, name: str) -> bool:

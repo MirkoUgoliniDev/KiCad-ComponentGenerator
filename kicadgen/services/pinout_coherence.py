@@ -54,6 +54,11 @@ FINDING_LABEL_DIFFERS = "label_differs"
 #: on other contacts than the analysis did, with strong support
 #: (`strong_label_conflicts`): «da rivedere prima dell'uso», never a move.
 FINDING_LABEL_PLACEMENT = "label_placement"
+#: Kind of a document finding: the contact count of the sides is not usable
+#: (infinite, or a total above `pad_limits.MAX_PAD_POSITIONS`, the bound the
+#: castellated generator applies), so nothing is judged against the pinout
+#: (`count_unusable`); carries "total" (None when infinite) and "limit".
+FINDING_COUNT_UNUSABLE = "count_unusable"
 
 #: Least number of agreements on UNIQUE names (a name that occurs once in the
 #: pinout, the label not a bare number) that makes a label placement strong
@@ -213,31 +218,97 @@ def pin_text(value) -> str:
     return str(value if value is not None else "").strip()
 
 
+def is_integer_text(text: str) -> bool:
+    """@brief Whether a pin number text is a plain decimal integer that int() reads.
+
+    @param text A pin number as text (`pin_text`).
+    @return True for ASCII digits only («12»). False for labels («A1»,
+        «EP») and for the Unicode characters str.isdigit() accepts but int()
+        refuses («①», «²»): a model can write them in a pinout, and int()
+        then raised ValueError after the paid call (review 2026-11-16, R8-4).
+        Such a pin stays a label, sorted and compared as text.
+    """
+    return text.isascii() and text.isdigit()
+
+
 def pin_sort_key(text: str):
     """@brief Natural sort key of a pin number text.
 
     @param text A pin number as text (`pin_text`).
-    @return A key that orders numbers by value first, then labels («A1»).
+    @return A key that orders numbers by value first, then labels («A1»,
+        «①»): see `is_integer_text`.
     """
-    return (0, int(text), "") if text.isdigit() else (1, 0, text)
+    return (0, int(text), "") if is_integer_text(text) else (1, 0, text)
 
 
 def _first_pin(side: dict) -> int:
-    """The first pad number of a side (1 when missing or unusable, as the GUI did)."""
+    """The first pad number of a side (1 when missing or unusable, as the GUI did).
+
+    An infinite value is unusable too: int(inf) raises OverflowError, which
+    escaped every caller (review 2026-11-16, R8-4).
+    """
     try:
         value = side.get("first_pin", 1)
         return int(value) if value is not None and not isinstance(value, bool) else 1
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return 1
 
 
 def _count(side: dict) -> int:
-    """The number of contacts of a side (0 when missing or unusable)."""
+    """The number of contacts of a side, for enumeration (0 when missing or unusable, infinity included).
+
+    A count above `pad_limits.MAX_PAD_POSITIONS` enumerates nothing: a count
+    of 1e9 would build a list of that length (review 2026-11-16). Whether the
+    counts are usable at all is decided by `count_unusable`, on the TOTAL, and
+    the report checks it first: a 0 here is never read as «no contacts» by it.
+    """
+    from ..core.pad_limits import MAX_PAD_POSITIONS
     try:
         value = side.get("count")
-        return max(int(value), 0) if value is not None and not isinstance(value, bool) else 0
-    except (TypeError, ValueError):
+        count = max(int(value), 0) if value is not None and not isinstance(value, bool) else 0
+    except (TypeError, ValueError, OverflowError):
         return 0
+    return count if count <= MAX_PAD_POSITIONS else 0
+
+
+def _sum_counts(sides) -> Optional[int]:
+    """Sum of the declared counts of the sides; None when one is infinite.
+
+    Missing, boolean or non-numeric counts add 0 and negative ones 0, as
+    `_count` reads them.
+    """
+    total = 0
+    for side in sides:
+        value = side.get("count")
+        if value is None or isinstance(value, bool):
+            continue
+        try:
+            total += max(int(value), 0)
+        except OverflowError:
+            return None
+        except (TypeError, ValueError):
+            continue
+    return total
+
+
+def count_unusable(sides) -> Optional[dict]:
+    """@brief Whether the contact counts of the sides cannot describe a module.
+
+    @param sides Castellated sides (non-dict items are ignored).
+    @return None when the counts are usable; otherwise {"total": the sum of
+        the counts (None when one is infinite), "limit":
+        `pad_limits.MAX_PAD_POSITIONS`}.
+    @note The TOTAL over all sides is bounded, exactly as the castellated
+        generator bounds it (`CastellatedModuleParams` validation): four
+        sides of 3000 contacts are refused by both, one side of 3000 by
+        neither. The bound is the generators' declared one, not a threshold
+        of this module (generality audit 2026-11-16, S3).
+    """
+    from ..core.pad_limits import MAX_PAD_POSITIONS
+    total = _sum_counts([side for side in sides or () if isinstance(side, dict)])
+    if total is None or total > MAX_PAD_POSITIONS:
+        return {"total": total, "limit": MAX_PAD_POSITIONS}
+    return None
 
 
 def side_pad_numbers(side: dict) -> list[int]:
@@ -376,7 +447,9 @@ def _placement_relations(labels: Sequence[str], numbers: Sequence[int], names: d
                 # A bare number may be a position, not a name (audit H3), and
                 # a label printed on more than one contact of the board (TX on
                 # two UARTs) names no single contact (final audit M4): neither
-                # counts as strong evidence.
+                # counts as strong evidence. str.isdigit() on purpose, not
+                # `is_integer_text`: a «①» or «²» printed on the board is a
+                # bare number too, and nothing here converts it with int().
                 key = primary_name(label)
                 if not key.isdigit() and (board or {}).get(key, 1) <= 1:
                     found["named"] += 1
@@ -410,7 +483,7 @@ def side_placements(side: dict, entries: Sequence[tuple[str, str]],
         return []
     names = dict(entries)
     counts = _name_counts(entries)
-    integers = {int(number) for number, _name in entries if number.isdigit()}
+    integers = {int(number) for number, _name in entries if is_integer_text(number)}
     labelled = sum(1 for label in labels if primary_name(label))
     found, seen = [], set()
     for first in sorted(integers):
@@ -501,14 +574,14 @@ def uniform_shifts(sides, pinout) -> list[int]:
     # A number declared off the sides (an exposed pad) is no contact's: a
     # shift never moves a side contact onto it (audit L5).
     integers = {int(number) for number, _name in entries
-                if number.isdigit() and number not in declared}
+                if is_integer_text(number) and number not in declared}
     pads = [number for side in sides or () if isinstance(side, dict)
             for number in side_pad_numbers(side)]
     if not pads or not integers:
         return []
     pad_set = {str(number) for number in pads}
     wanted = {int(number) for number, _name in entries
-              if number not in pad_set and number not in declared and number.isdigit()}
+              if number not in pad_set and number not in declared and is_integer_text(number)}
     found = []
     for delta in sorted({value - min(pads) for value in integers}):
         if delta == 0:
@@ -565,7 +638,10 @@ def side_pinout_report(sides, pinout) -> dict:
         - "recommended": renumberable, covers_pinout, no weak and no
           contested side (no threshold, the support is shown);
         - "already_aligned": the current numbering IS that alignment;
-        - "label_conflicts": `strong_label_conflicts` of the sides.
+        - "label_conflicts": `strong_label_conflicts` of the sides;
+        - "count_unusable": None, or `count_unusable(sides)` when the contact
+          counts cannot describe a module; "applicable" is then False and
+          nothing else is computed.
     """
     sides = [side for side in sides or () if isinstance(side, dict)]
     entries = document_pinout_entries(pinout)
@@ -574,7 +650,15 @@ def side_pinout_report(sides, pinout) -> dict:
               "ambiguous": [], "unplaced": [], "support": {}, "renumberable": False,
               "recommended": False, "already_aligned": False, "off_side_entries": [],
               "unexplained_entries": [], "needs_question": False, "covers_pinout": False,
-              "weak_sides": [], "contested_sides": {}, "label_conflicts": []}
+              "weak_sides": [], "contested_sides": {}, "label_conflicts": [],
+              "count_unusable": None}
+    unusable = count_unusable(sides)
+    if unusable is not None:
+        # Nothing is judged against counts that cannot be a module's: an
+        # empty side would make every pinout entry look «off the sides»
+        # (generality audit 2026-11-16, S3). The report says why instead.
+        report.update(applicable=False, count_unusable=unusable)
+        return report
     if not report["applicable"]:
         return report
     names = dict(entries)
@@ -751,13 +835,13 @@ def pin_ranges_text(numbers: Iterable) -> str:
     texts = sorted({pin_text(number) for number in numbers if pin_text(number)}, key=pin_sort_key)
     parts, run = [], []
     for text in texts:
-        if text.isdigit() and run and int(text) == int(run[-1]) + 1:
+        if is_integer_text(text) and run and int(text) == int(run[-1]) + 1:
             run.append(text)
             continue
         if run:
             parts.append(run[0] if len(run) == 1 else f"{run[0]}-{run[-1]}")
             run = []
-        if text.isdigit():
+        if is_integer_text(text):
             run = [text]
         else:
             parts.append(text)
@@ -959,8 +1043,13 @@ def document_findings(report: dict, *, kept_sides: bool = False) -> list[dict]:
         labels strongly place the names elsewhere (`label_conflicts`, to
         review before use), one FINDING_LABEL_DIFFERS per heuristic name
         difference (with "edge", "label", "name"); each carries "kept_sides".
-        Empty when not applicable.
+        Empty when not applicable, except one FINDING_COUNT_UNUSABLE (with
+        "total" and "limit") when the contact counts are not usable.
     """
+    if report and report.get("count_unusable"):
+        unusable = report["count_unusable"]
+        return [{"kind": FINDING_COUNT_UNUSABLE, "pins": [], "total": unusable.get("total"),
+                 "limit": unusable.get("limit"), "kept_sides": kept_sides}]
     if not report or not report.get("applicable"):
         return []
     findings = []

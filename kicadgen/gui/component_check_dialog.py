@@ -7,7 +7,7 @@ from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (QApplication, QLabel,
                              QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QVBoxLayout,
                              QToolButton, QHBoxLayout, QWidget)
-from PyQt6 import sip
+from . import quit_wait
 from .theme import GREEN
 from ..services import component_check
 from ..services.component_check import (verify_component, Check, CliStopped, pin_ranges,
@@ -78,6 +78,9 @@ PAD_NUMBER_CODES = frozenset({'estimated_pads', 'footprint_pads_overlap'})
 #: channel: the stop is seen only between two KiCad commands, and one command
 #: may run for its whole 60 s limit. Same bound and reasoning as
 #: photo_review_dialog.MATCH_QUIT_WAIT_MS: a quit must never look like a hang.
+#: It is the budget of the WHOLE exit when this hook is the first to run;
+#: otherwise the wait gets what is left of the exit deadline already set
+#: (`quit_wait.begin_exit`).
 CHECK_QUIT_WAIT_MS = 5000
 
 #: Code of the row written when the verification failed BEFORE emitting any
@@ -167,6 +170,10 @@ class _CheckWorker(QThread):
         #: Checks emitted so far: tells a verification that never started
         #: (`check_failed`) from one that stopped half-way (`check_crashed`).
         self.emitted = 0
+        #: The service's stop epoch when this run was CREATED (review
+        #: 2026-11-16, follow-up 3): a stop asked before `run` reaches the
+        #: service still stops every kicad-cli command of this run.
+        self.stop_epoch = component_check.current_stop_epoch()
         if application is not None:
             # Quitting while a KiCad command is in flight would destroy the
             # running thread: stop it after the current command and wait at
@@ -193,12 +200,11 @@ class _CheckWorker(QThread):
         away from QApplication and handed to C++ with no owner: destroyed with
         the application while running, it would abort the process (Qt's
         «Destroyed while thread is still running»). The process exit ends it.
+        The wait is what is left of the ONE exit deadline shared by every
+        exit hook (`quit_wait`), which also marks the exit as begun
+        (`quit_wait.is_quitting`).
         """
-        self.stop()
-        if self.wait(CHECK_QUIT_WAIT_MS):
-            return
-        self.setParent(None)
-        sip.transferto(self, None)
+        quit_wait.stop_and_wait(self, self.stop, quit_wait.begin_exit(CHECK_QUIT_WAIT_MS))
 
     def _emit(self, result):
         """Forward one check, then leave the verification if a stop was asked."""
@@ -228,7 +234,10 @@ class _CheckWorker(QThread):
             if self.error is not None:
                 self.result.emit(_self_check(CODE_CHECK_FAILED, str(self.error)))
                 return
-            verify_component(**self.args, emit=self._emit)
+            from .workers import accepted_kwargs
+            # Only where the function takes it (a test may replace it).
+            verify_component(**self.args, emit=self._emit,
+                             **accepted_kwargs(verify_component, stop_epoch=self.stop_epoch))
         except (_CheckAborted, CliStopped):
             self.aborted = True
         except Exception as exc:

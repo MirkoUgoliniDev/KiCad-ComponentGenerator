@@ -37,6 +37,7 @@ from ..services.providers import (PROVIDER_DEEPSEEK, PROVIDER_LABELS, PROVIDER_S
                                   PROVIDERS,
                                   deepseek_models, provider_of)
 from ..services.messages import tx
+from .quit_wait import connect_quit_wait, disconnect_quit_wait
 
 #: What each required capability is called, for the viewer.
 _CAPABILITY_LABELS = {"tools": "tool calling", "images": "immagini", "files": "PDF"}
@@ -80,7 +81,8 @@ class _ModelsWorker(QThread):
     timeout makes the window closed early the normal case, not the
     exception. With the ownership in Qt's hands the worker outlives the
     window, deletes itself when finished and the application exit waits for
-    it instead of destroying it.
+    it at most `quit_wait.QUIT_WAIT_MS` instead of destroying it (super
+    review 2026-11-16, R4-5: the wait had no deadline).
     """
 
     #: (models, {model id: image capability}); the capabilities are computed
@@ -100,13 +102,10 @@ class _ModelsWorker(QThread):
         super().__init__(parent)
         self.force_refresh = force_refresh
         self.provider = provider
-        application = QApplication.instance()
-        if application is not None:
-            # Quitting the application while the download is in flight would
-            # destroy the running thread: instead we wait for it to leave
-            # list_models. The wait is not unbounded, the limit is the HTTP
-            # timeout of the request.
-            application.aboutToQuit.connect(self.wait)
+        # Quitting the application while the download is in flight would
+        # destroy the running thread: the exit waits a bounded time for it to
+        # leave list_models, then lets it go (the HTTP timeout is 30 s).
+        connect_quit_wait(self)
         self.finished.connect(self._release)
 
     def run(self) -> None:
@@ -130,14 +129,7 @@ class _ModelsWorker(QThread):
         by `deleteLater` and the application would terminate with a
         RuntimeError. It is the same sequence as the photo review workers.
         """
-        application = QApplication.instance()
-        if application is not None:
-            try:
-                application.aboutToQuit.disconnect(self.wait)
-            except TypeError:
-                # Never connected (no QApplication at construction) or already
-                # disconnected: in both cases there is nothing to disconnect.
-                pass
+        disconnect_quit_wait(self)
         self.deleteLater()
 
 

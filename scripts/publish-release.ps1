@@ -84,9 +84,26 @@ function Assert-TestsGreenOnGitHub([string]$sha) {
     throw "No successful «Tests» run for commit $sha (latest: '$($runs[0].conclusion)'): re-run it on GitHub, then publish ($($runs[0].url))."
 }
 
+function Assert-NoUntrackedFiles() {
+    # The local run tests the checkout, the tag carries the commit: a file
+    # that is neither committed nor ignored (a new module, a test, a data
+    # file) takes part in the first and is missing from the second, so a
+    # green local run would prove code the tag does not contain (review
+    # 2026-11-16, R12-7; the tracked-files check alone let it through).
+    # Ignored files (caches, .venv, weights) are not listed: they are
+    # outside the release by design.
+    $untracked = @(& git ls-files --others --exclude-standard)
+    Assert-LastCommand 'Listing the untracked files'
+    if ($untracked.Count -gt 0) {
+        $shown = ($untracked | Select-Object -First 10) -join ', '
+        throw "Untracked files would take part in the local test run but not in the tag: $shown. Commit, remove or ignore them first."
+    }
+}
+
 function Invoke-TestsLocally() {
     # The same two-process run as CI (tools/run_test_halves.py both), with
     # the project's own interpreter; a failing half stops the publication.
+    Assert-NoUntrackedFiles
     $python = Join-Path $Root '.venv\Scripts\python.exe'
     if (-not (Test-Path $python)) { throw "Project interpreter not found: $python" }
     Write-Host 'Running the full test suite locally (two halves)...' -ForegroundColor Cyan

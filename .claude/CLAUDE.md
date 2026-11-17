@@ -232,7 +232,22 @@ contradicts the measure; point 150, `FIX` only: profile field «Modello lettura 
 checkbox, one review window in two stages with the detector's reading kept beside the AI's,
 three-section «Parametri» modal, phantom sides excluded by the photo, pulsing running mark,
 unread row spacing ignored, pad width at the pitch downgraded, lands measured on the photo)
-is 15745 passed,
+is 16343 passed,
+13 skipped and 19 subtests (2026-11-17, branch `FOOTPRINT-ADVANCE` merged into `main`, halves 9883/9/19 and 6460/4,
+no red: defects of an offline real run on three user projects -- misleading «pad changes not applied» while the
+sides table is rebuilt (one batched refresh), false 3D-annotation warning on footprint-only writes, castellated
+estimated pads in the «Pad stimati» check, duplicate pin-rename log lines, install lock files leaked by the suite --
+plus the castellated assumed pad overhang (description only, reduced to cover the half-hole; three medium findings
+left open, see HANDOFF.md «STATO 17/11/2026»); before that, 16306 passed,
+13 skipped and 19 subtests (2026-11-16 evening, branch `FOOTPRINT-ADVANCE`, commit `18c2be6`, NOT merged into `main`, halves 9881/9/19
+and 6425/4 with four red tests -- contracts changed by this round, updated and re-run alone, not a second full run:
+full-codebase «super check» by twelve read-only reviewers on race conditions, blocking work and grey zones, every
+finding fixed by ten fixers on disjoint files and re-reviewed in five adversarial rounds -- .env in UTF-16, symbol
+library rollback with hard links, drag/band/pan surviving a lost release, KiCad 3D library chosen by version,
+import crashes confirmed alone, castellated reductions marked as estimates, per-cause analysis blocks, EXIF
+drawings, «Interrompi» in the local photo phases, per-run AI cost scope, per-project lock with several windows,
+config.json merged per key, crash notice at restart, two-step Escape in the Properties panel; see HANDOFF.md
+«STATO 16/11/2026 SERA»); before that, 15745 passed,
 13 skipped and 19 subtests (2026-11-16, branch `FOOTPRINT-ADVANCE`, commit `c202211`, merged into `main`, halves 9883/9/19 and 5862/4, no red, run on frozen code: professional review of the guided KiCad tab and five fix rounds — kicad-cli outcomes by declared exit codes and a differential read of a minimal control file, declared blocking checks, check states crash_incomplete/crashed/unread/cli_unusable/file_busy, install gated on metadata re-read from the symbol file, identical reinstall writes nothing, BOM removed from shared libraries, '%' forbidden in names, check rows retranslated on language change, file notes in English, pin-type AI source as an enum; see HANDOFF.md «STATO 16/11/2026»); before that, 15090 passed,
 13 skipped and 19 subtests (2026-11-15 evening, branch `FOOTPRINT-ADVANCE`, commit `8ea6323`, halves 9344/9/19 and 5746/4 with two red tests -- contracts changed by this round: the NC question's remedy now names the KiCad tab's step 1 check, the global install needs KiCad's global sym-lib-table -- rewritten and re-run alone, not a second full run: AI cost with one model named in the total and a grey row of cached readings, step results aligned under their text, guided KiCad tab with an automatic component check gating the install, the install also brings the symbol (KiCadGen.kicad_sym + sym-lib-table) with the same rollback, «Applica ai file» and ⓘ help on the install options, AI pin-type sources that name an attached file; see HANDOFF.md «STATO 15/11/2026 SERA»); before that, 14965 passed,
 13 skipped and 19 subtests (2026-11-14 night, branch `FOOTPRINT-ADVANCE`, commit `64dd045`, merged into `main`, halves 9229/9/19 and 5736/4, no red: finished card with the whole analysis cost by model and a highlighted outcome, «Account AI...» before «Modello AI...», workflow step bar removed, 3D pin labels of one size that fit; see HANDOFF.md «STATO 14/11/2026 NOTTE»); before that, 14951 passed,

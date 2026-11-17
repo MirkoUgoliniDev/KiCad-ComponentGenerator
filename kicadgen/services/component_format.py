@@ -21,11 +21,22 @@ from ..cad3d.lead_sides import local_lead_sides
 FORMAT_SOURCE_COLOR = "#f9e2af"
 FORMAT_TARGET_COLOR = "#a6e3a1"
 
+#: Provenance of `height_mm`, in every spelling the pipeline writes
+#: (`component_state.height_is_estimated` reads the first two,
+#: `kicad_models.declared_height` the source ones). They travel WITH the
+#: value: pasting the source's estimated height on a target whose own height
+#: was measured, while the target kept its «measured» marks, turned an
+#: estimate into a measure (review R7-3). A mark the source lacks is removed
+#: from the target like any other format field, so the target ends with the
+#: source's value and the source's provenance, never a mix.
+HEIGHT_PROVENANCE_FIELDS = ("_height_source", "_height_estimated", "_height_basis",
+                            "height_source")
+
 #: Fields copied as they are. Lengths are in the component's own frame
 #: (length along its local X, width along its local Y, before the rotation),
 #: so a body pasted on a rotated target keeps the target's orientation.
 FORMAT_FIELDS = (
-    "length_mm", "width_mm", "height_mm",
+    "length_mm", "width_mm", "height_mm", *HEIGHT_PROVENANCE_FIELDS,
     "kind", "class", "_detected_kind", "package",
     "model_rotation_deg", "model_rotation_delta_deg", "model_z_offset_mm",
     "pin_count", "pin_count_confidence", "pin_count_source",

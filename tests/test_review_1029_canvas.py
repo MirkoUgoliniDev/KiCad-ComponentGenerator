@@ -92,16 +92,30 @@ def _mouse(view, kind, pos, button=LEFT, modifiers=NO_MOD, buttons=None):
      QEvent.Type.MouseButtonRelease: view.mouseReleaseEvent}[kind](event)
 
 
+#: Buttons each view holds between a `_press` and its `_release`, keyed by id(view).
+_HELD = {}
+
+
 def _press(view, pos, **kw):
+    _HELD[id(view)] = kw.get('button', LEFT)
     _mouse(view, QEvent.Type.MouseButtonPress, pos, **kw)
 
 
 def _move(view, pos, **kw):
+    """A move carrying the buttons held since the last `_press`, as Qt's moves do.
+
+    CONTRACT CHANGED (review 2026-11-16, R5-1): a move with NO button during
+    a drag now means its release was lost and cancels the drag
+    (`GestureController.lost_release`); this helper used to send every move
+    button-less, which no real drag does.
+    """
     kw.setdefault('button', Qt.MouseButton.NoButton)
+    kw.setdefault('buttons', _HELD.get(id(view), Qt.MouseButton.NoButton))
     _mouse(view, QEvent.Type.MouseMove, pos, **kw)
 
 
 def _release(view, pos, **kw):
+    _HELD.pop(id(view), None)
     _mouse(view, QEvent.Type.MouseButtonRelease, pos, **kw)
 
 

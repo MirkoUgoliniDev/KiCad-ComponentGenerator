@@ -42,7 +42,12 @@ param(
     # package has no PyTorch). OFF by default so that a checkout without the
     # weights still builds; the official setup is built with it (user,
     # 2026-10-28, after the license review of THIRD_PARTY_NOTICES.md).
-    [switch]$IncludeYoloModel
+    [switch]$IncludeYoloModel,
+    # Upper bound of the --check-runtime smoke test, seconds. Not a measure
+    # of the check (seconds on a normal machine): only the point where a
+    # hang becomes a failed build (review 2026-11-16, R12-3).
+    [ValidateRange(10, 3600)]
+    [int]$SmokeTestTimeoutSeconds = 300
 )
 
 $ErrorActionPreference = 'Stop'
@@ -56,6 +61,59 @@ function Assert-LastCommand([string]$description) {
     if ($LASTEXITCODE -ne 0) {
         throw "$description failed with exit code $LASTEXITCODE."
     }
+}
+
+function Invoke-Native([scriptblock]$Command) {
+    # Runs a native program with ErrorActionPreference 'Continue' in this
+    # function's scope only. Windows PowerShell 5.1 turns every stderr line
+    # of a native program into an error record when stderr is redirected
+    # (2>$null, 2>&1, or the whole script's output captured); under the
+    # script's 'Stop' a mere pip or Python warning then aborted the build
+    # (review 2026-11-16, R12-8). Failures are judged by the exit code:
+    # Assert-LastCommand after the call, as before.
+    $ErrorActionPreference = 'Continue'
+    & $Command
+}
+
+function ConvertTo-CommandLineArgument([string]$Argument) {
+    # Quotes one argument for a Windows command line (CommandLineToArgvW
+    # rules): Start-Process joins an argument array with bare spaces, so an
+    # argument holding a space or a quote would otherwise be split.
+    if ($Argument -and $Argument -notmatch '[\s"]') { return $Argument }
+    # Backslashes are doubled only where they precede a quote (inner or final).
+    $escaped = [regex]::Replace($Argument, '(\\*)"', '$1$1\"')
+    $escaped = [regex]::Replace($escaped, '(\\+)$', '$1$1')
+    return '"' + $escaped + '"'
+}
+
+function Show-CheckReport([string]$Path) {
+    # Prints the --check-runtime report file, or says that there is none.
+    if (Test-Path $Path) {
+        Write-Host "--check-runtime report ($Path):" -ForegroundColor Yellow
+        Get-Content $Path | ForEach-Object { Write-Host "  $_" }
+    } else {
+        Write-Host "--check-runtime wrote no report ($Path)." -ForegroundColor Yellow
+    }
+}
+
+function Invoke-WithTimeout([string]$FilePath, [string[]]$Arguments, [int]$TimeoutSeconds) {
+    # Starts a program, waits at most $TimeoutSeconds and returns its exit
+    # code. On timeout the whole process tree is killed and the function
+    # throws: a smoke test that hangs (a dialog opened by mistake, a
+    # deadlock at import) must fail the build, not hold it until the CI job
+    # limit (review 2026-11-16, R12-3; Start-Process -Wait had no bound).
+    $commandLine = (@($Arguments) | ForEach-Object { ConvertTo-CommandLineArgument $_ }) -join ' '
+    $process = Start-Process -FilePath $FilePath -ArgumentList $commandLine -PassThru -NoNewWindow
+    # Reading Handle keeps the process handle open, so ExitCode is still
+    # readable after the exit (a known Start-Process -PassThru quirk).
+    $null = $process.Handle
+    if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+        $ErrorActionPreference = 'Continue'
+        & taskkill.exe /PID $process.Id /T /F 2>&1 | Out-Null
+        throw "$FilePath did not finish within $TimeoutSeconds s: process tree killed."
+    }
+    $process.WaitForExit()
+    return $process.ExitCode
 }
 
 function Get-AppVersion {
@@ -81,7 +139,8 @@ function Find-BasePython {
     $candidates += @(Get-Command python.exe -All -ErrorAction SilentlyContinue | ForEach-Object Source)
     foreach ($candidate in $candidates) {
         if (-not $candidate -or -not (Test-Path $candidate)) { continue }
-        $answer = & $candidate -c "import sys; print(sys.version_info[:2] == (3, 13))" 2>$null
+        # Invoke-Native: under 5.1 a warning on stderr must not abort the search.
+        $answer = Invoke-Native { & $candidate -c "import sys; print(sys.version_info[:2] == (3, 13))" 2>$null }
         if ($answer -eq 'True') { return $candidate }
     }
     throw 'Python 3.13 not found. Install it or set KICADGEN_BUILD_PYTHON to its python.exe.'
@@ -91,7 +150,7 @@ function Test-BuildPython {
     # An existing .venv-build made with another Python (e.g. before an
     # upgrade) would build a different runtime than the one documented.
     if (-not (Test-Path $python)) { return $false }
-    $answer = & $python -c "import sys; print(sys.version_info[:2] == (3, 13))" 2>$null
+    $answer = Invoke-Native { & $python -c "import sys; print(sys.version_info[:2] == (3, 13))" 2>$null }
     return ($answer -eq 'True')
 }
 
@@ -102,25 +161,25 @@ if ((Test-Path $venv) -and -not (Test-BuildPython)) {
 if (-not (Test-Path $python)) {
     $base = Find-BasePython
     Write-Host "Creating the build environment .venv-build with $base..."
-    & $base -m venv $venv
+    Invoke-Native { & $base -m venv $venv }
     Assert-LastCommand 'Creating .venv-build'
 }
 Write-Host 'Installing build requirements...'
-& $python -m pip install --disable-pip-version-check -q -r (Join-Path $Root 'requirements/build.txt') `
-    -c (Join-Path $Root 'requirements/release-constraints.txt')
+Invoke-Native { & $python -m pip install --disable-pip-version-check -q -r (Join-Path $Root 'requirements/build.txt') `
+    -c (Join-Path $Root 'requirements/release-constraints.txt') }
 Assert-LastCommand 'Installing requirements/build.txt'
 
 # -- 2. Initial profile database generated from the code -------------------------
 $seed = Join-Path $Root 'build\seed\data\analysis_profiles.sqlite3'
-& $python (Join-Path $Root 'tools\make_seed_db.py') $seed
+Invoke-Native { & $python (Join-Path $Root 'tools\make_seed_db.py') $seed }
 Assert-LastCommand 'Generating the seed profile database (tools\make_seed_db.py)'
 
 # -- 3. License files --------------------------------------------------------------
-& $python (Join-Path $Root 'tools\collect_licenses.py') (Join-Path $Root 'build\licenses')
+Invoke-Native { & $python (Join-Path $Root 'tools\collect_licenses.py') (Join-Path $Root 'build\licenses') }
 Assert-LastCommand 'Collecting the license files (tools\collect_licenses.py)'
 
 # -- 4. Icon ---------------------------------------------------------------------
-& $python (Join-Path $Root 'tools\make_app_icon.py') (Join-Path $Root 'packaging\KiCadGen.ico')
+Invoke-Native { & $python (Join-Path $Root 'tools\make_app_icon.py') (Join-Path $Root 'packaging\KiCadGen.ico') }
 Assert-LastCommand 'Rendering the application icon'
 
 # -- 5. PyInstaller ---------------------------------------------------------------
@@ -131,15 +190,15 @@ if ($IncludeYoloModel) {
     # nothing else (review 2026-10-29, K1: a glob shipped whatever .onnx was
     # on disk). Download them with tools\fetch_model_weights.py.
     Write-Host 'Verifying the model weights against packaging\model-weights.json...' -ForegroundColor Yellow
-    & $python (Join-Path $Root 'tools\fetch_model_weights.py') --check
+    Invoke-Native { & $python (Join-Path $Root 'tools\fetch_model_weights.py') --check }
     Assert-LastCommand 'Verifying the model weights (download them with tools\fetch_model_weights.py, or drop -IncludeYoloModel)'
     $env:KICADGEN_BUNDLE_YOLO_MODEL = '1'
 } else {
     $env:KICADGEN_BUNDLE_YOLO_MODEL = '0'
 }
-& $python -m PyInstaller --noconfirm --clean --log-level WARN `
+Invoke-Native { & $python -m PyInstaller --noconfirm --clean --log-level WARN `
     --distpath (Join-Path $Root 'dist') --workpath (Join-Path $Root 'build\pyinstaller') `
-    (Join-Path $Root 'packaging\KiCadGen.spec')
+    (Join-Path $Root 'packaging\KiCadGen.spec') }
 Assert-LastCommand 'PyInstaller build'
 $exe = Join-Path $Root 'dist\KiCadGen\KiCadGen.exe'
 if (-not (Test-Path $exe)) { throw "Executable not produced: $exe" }
@@ -152,19 +211,20 @@ Write-Host 'Checking the executable (--check-runtime)...'
 $checkReport = Join-Path $Root 'build\check-runtime.txt'
 if (Test-Path $checkReport) { Remove-Item -Force $checkReport }
 $env:KICADGEN_CHECK_RUNTIME_REPORT = $checkReport
+# Bounded (Invoke-WithTimeout): the check normally takes seconds; the
+# limit only turns a hang into a failure. Either way the report written so
+# far is printed: on a timeout it says how far the check got.
 try {
-    $check = Start-Process -FilePath $exe -ArgumentList '--check-runtime' -Wait -PassThru -NoNewWindow
+    $checkExit = Invoke-WithTimeout $exe @('--check-runtime') $SmokeTestTimeoutSeconds
+} catch {
+    Show-CheckReport $checkReport
+    throw
 } finally {
     Remove-Item Env:\KICADGEN_CHECK_RUNTIME_REPORT -ErrorAction SilentlyContinue
 }
-if ($check.ExitCode -ne 0) {
-    if (Test-Path $checkReport) {
-        Write-Host "--check-runtime report ($checkReport):" -ForegroundColor Yellow
-        Get-Content $checkReport | ForEach-Object { Write-Host "  $_" }
-    } else {
-        Write-Host "--check-runtime wrote no report ($checkReport)." -ForegroundColor Yellow
-    }
-    throw "KiCadGen.exe --check-runtime failed (exit $($check.ExitCode))."
+if ($checkExit -ne 0) {
+    Show-CheckReport $checkReport
+    throw "KiCadGen.exe --check-runtime failed (exit $checkExit)."
 }
 Write-Host "Executable ready: $exe" -ForegroundColor Green
 

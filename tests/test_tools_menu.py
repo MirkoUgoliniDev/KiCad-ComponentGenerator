@@ -33,7 +33,10 @@ def test_the_menu_bar_order_and_the_tools_entries(window):  # noqa: F811
                      "Rileggi solo le posizioni dei pad",
                      # The registry number of the analysis log back to the
                      # prompt text (2026-11-12).
-                     "Prompt inviati..."]
+                     "Prompt inviati...",
+                     # CONTRACT CHANGED 2026-11-16 (user decision, R10-1): the
+                     # stored «not measurable» model verdicts forgotten on request.
+                     "Riprova i modelli KiCad non misurabili"]
 
 
 def test_kicad_entries_are_off_with_the_reason_until_the_footprint_exists(window):  # noqa: F811

@@ -281,7 +281,10 @@ def test_language_switch_preserves_selection_and_localizes_all_controls(
     assert window.combo_photo_detector.currentText() == yolo
     assert credit in window.combo_photo_detector.toolTip()
     assert "KiCad" in window.combo_photo_detector.toolTip()
-    assert window._photo_detector_options() == ("yolo", Path("session.onnx"))
+    # Since review 2026-11-16 (R1-3) a relative weight file is taken in the
+    # program's models folder, never against the current directory.
+    assert window._photo_detector_options() == (
+        "yolo", gui.resource_path(*gui.YOLO_MODELS_DIR) / "session.onnx")
     for key, translations in gui._PHOTO_DETECTOR_TRANSLATIONS.items():
         assert set(translations) == {"it", "en", "fr", "de"}
         assert all(translations.values())
@@ -307,7 +310,8 @@ def test_preflight_happens_before_worker_and_busy_controls_restore(window, monke
 
     window._extract_with_ai()
 
-    path = Path(path_text) if path_text else None
+    # A relative name resolves in the models folder (review 2026-11-16, R1-3).
+    path = gui.resource_path(*gui.YOLO_MODELS_DIR) / path_text if path_text else None
     worker = window._extract_worker
     assert events == [("validate", path), ("start", worker)]
     assert worker.photo_detector == "yolo"
@@ -375,7 +379,9 @@ def test_preflight_error_preserves_results_and_never_starts_api(window, monkeypa
 
     window._extract_with_ai()
 
-    assert validations == ([] if failure == "import" else [Path("broken.onnx")])
+    # A relative name resolves in the models folder (review 2026-11-16, R1-3).
+    assert validations == ([] if failure == "import" else
+                           [gui.resource_path(*gui.YOLO_MODELS_DIR) / "broken.onnx"])
     assert len(warnings) == 1
     assert warnings[0][1] == window._photo_detector_text("error_title")
     assert "Nessuna richiesta AI" in warnings[0][2]
@@ -740,9 +746,13 @@ def test_the_environment_override_applies_to_the_smd_route_too(window, monkeypat
 def test_a_project_without_the_smd_field_does_not_inherit_the_previous_one(window, tmp_path):
     """@brief Review B3 (2026-10-02): an older project means the default network.
 
-    @note Negative: a project that declares its own file keeps it.
+    @note Negative: a project that declares its own file keeps it -- since
+        review 2026-11-16 (R1-3) only a file inside the program's models
+        folder, as an absolute path; a file elsewhere is never restored from
+        a project file (tests/test_review_1116_c10.py).
     """
-    chosen = str(tmp_path / "mine.pt")
+    folder = gui.resource_path(*gui.SMD_MODELS_DIR)
+    chosen = str((folder / "mine.pt").resolve(strict=False))
     window.field_smd_model.setText(chosen)
     state = window._project_state()
     window.field_smd_model.setText(str(tmp_path / "other.pt"))

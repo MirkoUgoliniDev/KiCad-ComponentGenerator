@@ -20,7 +20,8 @@ files `verified_weights` returns).
 Exit status: 0 when every file is present and verified; 2 when the failure
 is permanent (malformed manifest, wrong size or digest, missing file under
 `--check`), so retrying is pointless; 1 for any other failure, such as a
-network error, which a caller may retry.
+network error or a transfer cut before the end (`TruncatedDownloadError`),
+which a caller may retry.
 
 @note Standard library only: the release runner has no project virtualenv
     when this runs, and the PyInstaller spec loads this module by path. A
@@ -49,6 +50,53 @@ _CHUNK = 1 << 20
 DOWNLOAD_TIMEOUT = 60
 #: Exit status of a permanent failure (see the module docstring).
 EXIT_PERMANENT = 2
+
+
+class TruncatedDownloadError(OSError):
+    """@brief The connection ended before the file did: a transient failure, worth a retry.
+
+    @note An OSError, so `main` maps it to exit 1 (retryable) like any other
+        network error, never to EXIT_PERMANENT (review 2026-11-16, R12-6).
+    """
+
+
+def declared_length(response):
+    """@brief The byte count the server announced for the body, or None.
+
+    @param response An urlopen response, or a fake one without headers.
+    @return The integer Content-Length, or None when the response has no
+        headers, no such header, or one that is not a non-negative integer.
+    """
+    headers = getattr(response, "headers", None)
+    value = headers.get("Content-Length") if headers is not None else None
+    try:
+        length = int(str(value).strip()) if value is not None else None
+    except ValueError:
+        return None
+    return length if length is not None and length >= 0 else None
+
+
+def short_download_error(name: str, received: int, expected: int, announced):
+    """@brief The error for a download shorter than the manifest's size: transient or permanent.
+
+    @param name The file name, for the message.
+    @param received Bytes actually received.
+    @param expected Bytes the manifest records.
+    @param announced The server's Content-Length (`declared_length`), or None.
+    @return A ValueError (permanent) when the server announced exactly the
+        bytes it sent, i.e. it served a whole file that is shorter than the
+        recorded one; a TruncatedDownloadError (transient) when the server
+        announced more than it sent, or announced nothing, i.e. the transfer
+        was cut. http.client does not raise for a body cut short of its
+        Content-Length: ``read(n)`` just returns b"" (its own comment says
+        so), so the cut reaches this check.
+    """
+    if announced is not None and announced == received:
+        return ValueError(f"{name}: the server sent a complete file of {received} bytes, the manifest "
+                          f"records {expected}; the asset is not the recorded file")
+    detail = f"of the {announced} announced" if announced is not None else "with no announced size"
+    return TruncatedDownloadError(f"{name}: the download is truncated, {received} bytes received "
+                                  f"{detail}, the manifest records {expected}; retry")
 
 
 def sha256_of(path: Path) -> str:
@@ -123,8 +171,10 @@ def fetch(entry: dict, target: Path, opener=None, log=print) -> str:
     @return "kept" when the file was already there with the right digest,
         "downloaded" otherwise.
     @throws ValueError When the download is longer than the manifest's size
-        (refused as soon as it exceeds it), shorter than it, or does not
-        match the digest.
+        (refused as soon as it exceeds it), is a complete file shorter than
+        it (`short_download_error`), or does not match the digest: permanent.
+    @throws TruncatedDownloadError When the transfer was cut before the
+        manifest's size: transient, `main` exits 1 so the caller may retry.
     @note Whatever ends the download early — an error, a wrong file,
         Ctrl-C, a destination that cannot be replaced — the partial file is
         removed: nothing but a verified file under its final name is ever
@@ -147,6 +197,7 @@ def fetch(entry: dict, target: Path, opener=None, log=print) -> str:
             partial = Path(handle.name)
             received = 0
             with opener(entry["url"]) as response:
+                announced = declared_length(response)
                 for chunk in iter(lambda: response.read(_CHUNK), b""):
                     received += len(chunk)
                     if received > expected:
@@ -154,8 +205,7 @@ def fetch(entry: dict, target: Path, opener=None, log=print) -> str:
                                          f"{expected} bytes; the asset is not the recorded file")
                     handle.write(chunk)
         if received != expected:
-            raise ValueError(f"{entry['file']}: {received} bytes downloaded, the manifest records "
-                             f"{expected}; the download is truncated")
+            raise short_download_error(entry["file"], received, expected, announced)
         digest = sha256_of(partial)
         if digest != entry["sha256"]:
             raise ValueError(f"{entry['file']}: SHA-256 {digest} differs from the manifest's "

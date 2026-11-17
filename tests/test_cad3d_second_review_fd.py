@@ -144,6 +144,11 @@ class _FakeMeasurer:
 def _watch(monkeypatch, tmp_path, lifetime, timeout):
     monkeypatch.setattr(km, "kill_process_tree", lambda process: process.kill())
     (tmp_path / "out.json").write_text("{}", encoding="utf-8")
+    # A measure in progress: the real child opens progress.jsonl before its
+    # first Part.read. CONTRACT CHANGED 2026-11-16 (review R10-1): a child
+    # silent WITHOUT that file never started measuring and is "unstarted",
+    # which blames no model (tests/test_review_1116_c3.py).
+    (tmp_path / "progress.jsonl").write_text("", encoding="utf-8")
     started = time.monotonic()
     outcome, _, _ = km._watch_measuring_child(_FakeMeasurer(lifetime), tmp_path, ["fc"],
                                               timeout, None)

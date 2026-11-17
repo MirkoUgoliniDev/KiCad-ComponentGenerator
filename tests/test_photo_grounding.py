@@ -449,7 +449,9 @@ def test_cache_write_failure_keeps_successful_response(monkeypatch, tmp_path, ca
     messages = []
     def unwritable(*args, **kwargs):
         raise PermissionError("cache is read-only")
-    monkeypatch.setattr(Path, "write_text", unwritable)
+    # The cache is written atomically through fsutil (review 2026-11-16, R8-6).
+    from kicadgen import fsutil
+    monkeypatch.setattr(fsutil, "atomic_write_bytes", unwritable)
     result = grounding.cached_call(lambda **kwargs: {"components": []}, cache_kwargs,
                                     tmp_path, "stage", messages.append)
     assert result == {"components": []}
@@ -461,6 +463,8 @@ def test_cache_disabled_never_reads_or_writes_paths(monkeypatch, cache_kwargs):
         pytest.fail("disabled cache touched disk")
     monkeypatch.setattr(Path, "read_text", forbidden)
     monkeypatch.setattr(Path, "write_text", forbidden)
+    from kicadgen import fsutil
+    monkeypatch.setattr(fsutil, "atomic_write_bytes", forbidden)
     call = Mock(return_value={"components": []})
     for _ in range(2):
         grounding.cached_call(call, cache_kwargs, None, "stage", lambda message: None)

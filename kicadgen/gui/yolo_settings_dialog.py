@@ -15,12 +15,29 @@ from PyQt6.QtWidgets import (
 
 from ..services.photo_yolo import YOLO_SETTING_DEFAULTS, yolo_settings
 
+#: Decimals of the three fields: one more than the 0.05 steps, so a value
+#: chosen elsewhere (a profile, a pretest) between two steps is shown.
+_DECIMALS = 3
+#: Smallest change the fields can show (one unit of the last decimal).
+_RESOLUTION = 10.0 ** -_DECIMALS
+#: Ranges of the fields: exactly what `photo_yolo.yolo_settings` accepts. The
+#: confidence interval is OPEN on both ends (`operating_confidence`: above the
+#: audit floor 0.05 and below 1), so its field stops one unit inside it.
+_CONFIDENCE_RANGE = (0.05 + _RESOLUTION, 1.0 - _RESOLUTION)
+_NMS_RANGE = (0.10, 0.95)
+_TILE_OVERLAP_RANGE = (0.10, 0.50)
+
 
 class YoloSettingsDialog(QDialog):
     """@brief Modal editor of the YOLO detector settings.
 
     The dialog never applies anything by itself: the caller reads `values()`
     after an accepted exec().
+    @note OK without touching a field returns that field's value exactly as
+        it came in (super review 2026-11-16, R4-3): the fields once had a
+        narrower range and fewer decimals than the service accepts, so a
+        valid 0.97 or 0.333 came back clamped or rounded and changed the
+        detector behind the user's back.
     """
 
     def __init__(self, values: dict | None = None, parent: QWidget | None = None):
@@ -45,12 +62,12 @@ class YoloSettingsDialog(QDialog):
         layout.addWidget(intro)
         form = QFormLayout()
 
-        self.spin_confidence = self._spin(0.06, 0.95, 0.05)
+        self.spin_confidence = self._spin(*_CONFIDENCE_RANGE, 0.05)
         self._add(form, tr("Soglia di confidenza:"), self.spin_confidence, tr(
             "Sotto questo valore un riquadro non conta come corpo. Alzala se compaiono "
             "riquadri su scritte, fori o piazzole; abbassala se mancano componenti. "
             "Su Roboflow è «Confidence Threshold»."))
-        self.spin_nms = self._spin(0.10, 0.95, 0.05)
+        self.spin_nms = self._spin(*_NMS_RANGE, 0.05)
         self._add(form, tr("Sovrapposizione per i doppioni:"), self.spin_nms, tr(
             "Due riquadri che si sovrappongono almeno così sono lo stesso corpo: resta il più "
             "sicuro. Più basso toglie più doppioni, ma può fondere due componenti vicini. "
@@ -66,7 +83,7 @@ class YoloSettingsDialog(QDialog):
             "Oltre alla foto intera, il modello guarda riquadri ingranditi per trovare i "
             "passivi piccoli. Senza nessuna delle due fa una sola passata sulla foto intera, "
             "come Roboflow: meno falsi positivi, ma può perdere i componenti piccoli."))
-        self.spin_overlap = self._spin(0.10, 0.50, 0.05)
+        self.spin_overlap = self._spin(*_TILE_OVERLAP_RANGE, 0.05)
         self._add(form, tr("Sovrapposizione fra tessere:"), self.spin_overlap, tr(
             "Quanto una tessera ripete la precedente: un corpo sul bordo di una tessera deve "
             "stare intero nella successiva. Più alta costa più tempo."))
@@ -94,8 +111,9 @@ class YoloSettingsDialog(QDialog):
 
     @staticmethod
     def _spin(low, high, step):
+        """One decimal field over [low, high] with `_DECIMALS` decimals."""
         spin = QDoubleSpinBox()
-        spin.setDecimals(2)
+        spin.setDecimals(_DECIMALS)
         spin.setRange(low, high)
         spin.setSingleStep(step)
         return spin
@@ -110,14 +128,24 @@ class YoloSettingsDialog(QDialog):
         form.addRow(label, widget)
         form.addRow("", hint)
 
+    def _spins(self):
+        """The decimal fields with the settings key each one edits."""
+        return (("confidence", self.spin_confidence), ("nms_iou", self.spin_nms),
+                ("tile_overlap", self.spin_overlap))
+
     def _show(self, values):
-        """Put a complete settings dict into the controls."""
-        self.spin_confidence.setValue(values["confidence"])
-        self.spin_nms.setValue(values["nms_iou"])
+        """Put a complete settings dict into the controls and remember what was shown.
+
+        `values()` gives back the exact incoming value of every field still
+        showing what was put here: the field may round it for display.
+        """
+        for key, spin in self._spins():
+            spin.setValue(values[key])
         self.check_640.setChecked(640 in values["tile_sizes"])
         self.check_1280.setChecked(1280 in values["tile_sizes"])
-        self.spin_overlap.setValue(values["tile_overlap"])
         self._refresh_overlap()
+        #: {key: (exact value given, value the field shows for it)}.
+        self._shown = {key: (float(values[key]), spin.value()) for key, spin in self._spins()}
 
     def _refresh_overlap(self, *_):
         """The overlap between tiles means nothing without tiles."""
@@ -130,7 +158,9 @@ class YoloSettingsDialog(QDialog):
         """
         sizes = [size for size, check in ((640, self.check_640), (1280, self.check_1280))
                  if check.isChecked()]
-        return yolo_settings({"confidence": round(self.spin_confidence.value(), 2),
-                              "nms_iou": round(self.spin_nms.value(), 2),
-                              "tile_sizes": sizes,
-                              "tile_overlap": round(self.spin_overlap.value(), 2)})
+        chosen = {"tile_sizes": sizes}
+        for key, spin in self._spins():
+            exact, shown = self._shown[key]
+            # Untouched field: the incoming value, not its rounded display.
+            chosen[key] = exact if spin.value() == shown else round(spin.value(), _DECIMALS)
+        return yolo_settings(chosen)

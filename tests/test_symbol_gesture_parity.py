@@ -826,9 +826,9 @@ def test_hiding_the_tab_cancels_the_drag_before_the_view_goes_away(tab7, qapp, m
 
     Pinned order (plan §4 item 12): the drag is cancelled BEFORE the hide's
     `key_repeat_ended` flushes a deferred checkpoint, so the flush never
-    writes a half-dragged draft. Today the focus loss that precedes the
-    hide emits `key_repeat_ended` once more while the drag still runs: it
-    writes nothing because `_checkpoint_draft` returns during a drag.
+    writes a half-dragged draft. Since review 2026-11-16 (R5-1) the focus
+    loss that precedes the hide already cancels the drag, before its own
+    `key_repeat_ended`, so no flush ever runs with the drag on.
     """
     before = tab7.draft_rows()
     order = []
@@ -844,7 +844,14 @@ def test_hiding_the_tab_cancels_the_drag_before_the_view_goes_away(tab7, qapp, m
     counter = _Counter(tab7, monkeypatch)
     tab7.hide()
     qapp.processEvents()
-    assert order == ['repeat_ended', ('finished', False), 'repeat_ended']
+    # CONTRACT CHANGED (review 2026-11-16, R5-1): the focus loss that precedes
+    # the hide now cancels the drag itself (`CancelOnEscapeAndHide` treats
+    # FocusOut as a lost release), before the key filter's `repeat_ended`
+    # of that same focus loss; the Hide then finds no drag and only ends the
+    # repeat. Was ['repeat_ended', ('finished', False), 'repeat_ended']: the
+    # first flush ran with the drag still on. The pinned rule holds, stronger:
+    # no flush ever runs while the drag is on.
+    assert order == [('finished', False), 'repeat_ended', 'repeat_ended']
     # CONTRACT CHANGED 2026-10-29: why — review C5: the cancel restores the
     # drag's initial rows through `_restore_gesture_source` (one layout and
     # redraw) instead of `_populate`, which rebuilt the whole pin table.

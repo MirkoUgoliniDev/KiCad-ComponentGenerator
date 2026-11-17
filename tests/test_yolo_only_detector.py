@@ -108,7 +108,11 @@ def test_detector_row_comes_first_and_the_pretest_hides_both_ai_models(window): 
     assert window._row_ai_model == 1
     combo.setCurrentIndex(combo.findData("yolo_only"))
     window.field_yolo_model.setText("new.pt")
-    assert window._photo_detector_options() == ("yolo_only", Path("new.pt"))
+    # Contract changed by review 2026-11-16 (R1-3): a relative weight file is
+    # taken in the program's models folder, never against the current
+    # directory, which depends on how the program was started.
+    assert window._photo_detector_options() == (
+        "yolo_only", gui.resource_path(*gui.YOLO_MODELS_DIR) / "new.pt")
     assert window.field_yolo_model.isEnabled()
     assert form.isRowVisible(window._row_yolo_model)
     assert not form.isRowVisible(window._row_ai_model)

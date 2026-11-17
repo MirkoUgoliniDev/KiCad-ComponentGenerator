@@ -640,11 +640,14 @@ class AiAccountLine(QLabel):
             parts.append(tx("Saldo DeepSeek: {amount} {currency}",
                             amount=format_usd(status.amount), currency=status.currency))
             details.append(tx("Saldo DeepSeek letto alle {time}.", time=self._balance_time))
-            if not status.available:
+            # `available` is None when the answer was unreadable (review
+            # R7-8, 2026-11-16): only an explicit False is «not usable».
+            if status.available is False:
                 details.append(tx("DeepSeek dichiara il conto non utilizzabile."))
         elif self._balance_state == "ok" and status is not None:
-            parts.append(tx("Saldo DeepSeek: {state}", state=tx("disponibile") if status.available
-                            else tx("esaurito")))
+            state = (tx("non verificabile") if status.available is None
+                     else tx("disponibile") if status.available else tx("esaurito"))
+            parts.append(tx("Saldo DeepSeek: {state}", state=state))
         elif self._balance_state == "loading":
             parts.append(tx("Saldo DeepSeek: lettura…"))
         elif self._balance_state == "error":

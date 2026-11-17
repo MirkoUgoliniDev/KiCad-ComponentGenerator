@@ -640,8 +640,13 @@ def cached_call(call, kwargs, cache_dir, stage, log, expected_ids=None):
         if empty(data):
             record["empty_response"] = True
         try:
+            from ..fsutil import atomic_write_bytes
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+            # Temporary file + replace (review 2026-11-16, R8-6): an
+            # interrupted write leaves the previous entry or none, never a
+            # truncated JSON that makes the next run pay the call again.
+            atomic_write_bytes(path, json.dumps(record, ensure_ascii=False,
+                                                indent=2).encode("utf-8"))
             if empty(data):
                 log(tx("{stage}: risposta vuota (nessun corpo nella zona) memorizzata come tale "
                        "nella cache locale.", stage=stage))

@@ -228,11 +228,19 @@ def test_s4_a_child_that_keeps_talking_is_not_capped_by_overall_duration(monkeyp
 
 
 def test_s4_the_subprocess_run_branch_is_gone():
-    """@brief Structural: `_run_freecad` no longer launches freecadcmd with subprocess.run."""
+    """@brief Structural: `_run_freecad` no longer launches freecadcmd with subprocess.run.
+
+    @note CONTRACT CHANGED 2026-11-16 (review R10-4): the launch moved into
+        `_launch_freecad`, which `_run_freecad` calls once per attempt (an
+        import crash is retried with the culprit blocked); the rule applies
+        to both functions together.
+    """
     import inspect
-    source = inspect.getsource(step_generator._run_freecad)
+    source = (inspect.getsource(step_generator._run_freecad)
+              + inspect.getsource(step_generator._launch_freecad))
     assert "subprocess.run(" not in source
-    assert "run_logged(" in source
+    assert "_launch_freecad(" in inspect.getsource(step_generator._run_freecad)
+    assert "run_logged(" in inspect.getsource(step_generator._launch_freecad)
 
 
 # ── S5: the evaluation tool reads the crop through the shared reader ────────

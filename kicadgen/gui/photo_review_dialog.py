@@ -83,7 +83,6 @@ from PyQt6.QtCore import (
     QPointF, QRectF, QSignalBlocker, QStringListModel, Qt, QTimer, QThread,
     pyqtSignal,
 )
-from PyQt6 import sip
 from PyQt6.QtGui import (QBrush, QColor, QKeySequence, QPainter, QPainterPath, QPen,
                          QPixmap, QPolygonF, QShortcut, QTextDocument)
 from PyQt6.QtWidgets import (
@@ -91,7 +90,7 @@ from PyQt6.QtWidgets import (
     QDoubleSpinBox, QFormLayout, QPushButton,
     QGraphicsItem, QGraphicsPolygonItem, QGraphicsRectItem, QGraphicsScene,
     QGraphicsSimpleTextItem,
-    QGraphicsView, QHBoxLayout, QLabel, QLineEdit, QListWidget,
+    QGraphicsView, QHBoxLayout, QLabel, QLineEdit, QListWidget, QMessageBox,
     QPlainTextEdit,
     QVBoxLayout, QWidget, QApplication,
 )
@@ -104,6 +103,8 @@ from ..services.messages import tx
 from ..services.photo_yolo import (DETECTOR_REVIEW_ONLY_FIELD, MOVE_HANDLE,
                                    awaiting_user_keep, box_geometry_mm, detector_review_only,
                                    manual_proposal, mark_manual_box, set_review_only)
+from . import quit_wait
+from .canvas_selection import is_click
 from .component_state import (height_is_estimated, mark_height_measured,
                               mark_height_placeholder)
 from .review_tools import (ZOOM_STEP, AnchoredPopup, InfoPopup, asset_icon,
@@ -121,7 +122,9 @@ from .review_tools import (ZOOM_STEP, AnchoredPopup, InfoPopup, asset_icon,
 #: checks is in-memory library filtering. Five seconds covers that stretch with
 #: a wide margin and stays short enough that a quit is never perceived as a
 #: hang (before, the wait was unbounded and lasted as long as the
-#: measurements: minutes).
+#: measurements: minutes). It is the budget of the WHOLE exit when this hook is
+#: the first to run; otherwise the wait gets what is left of the exit deadline
+#: already set (`quit_wait.begin_exit`).
 MATCH_QUIT_WAIT_MS = 5000
 
 
@@ -173,12 +176,10 @@ class _MatchWorker(QThread):
         application while running, it would abort the process (Qt's
         «Destroyed while thread is still running»). The process exit ends it
         (same rule as `component_check_dialog._CheckWorker._stop_for_quit`).
+        The wait is what is left of the ONE exit deadline shared by every
+        exit hook (`quit_wait`), which also marks the exit as begun.
         """
-        self.stop()
-        if self.wait(MATCH_QUIT_WAIT_MS):
-            return
-        self.setParent(None)
-        sip.transferto(self, None)
+        quit_wait.stop_and_wait(self, self.stop, quit_wait.begin_exit(MATCH_QUIT_WAIT_MS))
 
     def _release(self):
         """Drop the exit-time hook once the thread has finished."""
@@ -1450,6 +1451,27 @@ class _BoardBackdrop(QGraphicsRectItem):
         self.hide()
 
 
+def _left_the_click(event, started: bool) -> bool:
+    """Whether a press-and-drag on an outline has become a drag (F4-1).
+
+    A press whose pointer stays within the click tolerance
+    (`canvas_selection.is_click`, the platform's start-drag distance, the
+    same notion as both canvases) is a click: it moves and resizes nothing,
+    so a 1 px slip while clicking a body is no edit (super review 2026-11-03,
+    F4-1: it wiped bbox_basis, package_evidence and the confirmed model, and
+    in the detector stage turned a left-out proposal into a kept one sent to
+    the paid call). Once the pointer left the tolerance the gesture stays a
+    drag, even if it comes back near the press point.
+
+    @param event Graphics-scene mouse move event of the left button.
+    @param started True when this gesture already became a drag.
+    """
+    if started:
+        return True
+    return not is_click(event.buttonDownScreenPos(Qt.MouseButton.LeftButton),
+                        event.screenPos())
+
+
 class _ResizeHandle(QGraphicsRectItem):
     """@brief Screen-sized grip on one edge or corner of a selected component.
 
@@ -1523,14 +1545,19 @@ class _ResizeHandle(QGraphicsRectItem):
         @param event Qt graphics-scene mouse press event; its scene position (px) seeds the stroke.
         """
         self.item.begin_resize(self.edge, event.scenePos())
+        #: True once the pointer left the click tolerance (`_left_the_click`).
+        self._dragging = False
         event.accept()
 
     def mouseMoveEvent(self, event):
-        """@brief Follow the pointer, editing the component live.
+        """@brief Follow the pointer, editing the component live, once it is a drag.
 
         @param event Qt graphics-scene mouse move event; its scene position (px) is the new edge.
+        @note Within the click tolerance nothing is resized (F4-1).
         """
-        self.item.resize_to(event.scenePos())
+        self._dragging = _left_the_click(event, getattr(self, "_dragging", True))
+        if self._dragging:
+            self.item.resize_to(event.scenePos())
         event.accept()
 
     def mouseReleaseEvent(self, event):
@@ -1745,7 +1772,24 @@ class _ComponentItem(QGraphicsPolygonItem):
         """
         if not self.isSelected():
             self.editor._select_row(self.editor._items.index(self), center=False)
+        #: True once the pointer left the click tolerance (`_left_the_click`).
+        self._dragging = False
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        """@brief Move the outline only once the press became a drag.
+
+        @param event Qt graphics-scene mouse move event.
+        @note Within the click tolerance the move is swallowed, so the outline
+              does not move and no geometry change is recorded (F4-1). Qt
+              moves an item by the pointer's offset from the press point, so
+              the first move beyond the tolerance catches up the whole way.
+        """
+        self._dragging = _left_the_click(event, getattr(self, "_dragging", True))
+        if not self._dragging:
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
         """@brief Keep the clicked outline selected after a Ctrl-click.
@@ -2300,7 +2344,8 @@ class PhotoReviewDialog(QDialog):
         # how a focused button and a rejection are supposed to be driven.
         self.buttons.button(QDialogButtonBox.StandardButton.Apply).setDefault(True)
         self.buttons.button(QDialogButtonBox.StandardButton.Cancel).setAutoDefault(False)
-        self.buttons.rejected.connect(self.reject)
+        # «Annulla» (Cancel) asks before discarding real corrections (F4-2).
+        self.buttons.rejected.connect(self.reject_by_user)
         layout.addWidget(self.buttons)
         if stage == STAGE_DETECTOR:
             # Before the AI: OK hands the kept proposals to the paid call,
@@ -2346,6 +2391,9 @@ class PhotoReviewDialog(QDialog):
         self._refresh_categories()
         self._select_row(0 if self._items else -1)
         self._selection_changed()
+        #: The rows as they were when the review opened: `has_corrections`
+        #: compares the working copy with it (F4-2).
+        self._opened_with = deepcopy(self._components)
 
     def get_components(self) -> list[dict]:
         """@brief Return an independent snapshot of the current working inventory.
@@ -2671,7 +2719,14 @@ class PhotoReviewDialog(QDialog):
         """@brief Close the parameter modal even when the editor was never shown.
 
         @param event Qt close event, forwarded to the base class.
+        @note The window's X (a spontaneous close) asks first when real
+              corrections would be lost (F4-2); «Continua la revisione»
+              ignores the close. A close made by the program never asks.
         """
+        if (event.spontaneous() and not self._closing
+                and not self._user_confirms_discard()):
+            event.ignore()
+            return
         self.view.cancel_draw()
         self._close_parameters()
         super().closeEvent(event)
@@ -3942,6 +3997,56 @@ class PhotoReviewDialog(QDialog):
         self.model_status.setText(tx("Candidati pronti. Premi Applica correzioni per salvare le scelte."))
         self._refresh_item(item)
 
+    def has_corrections(self) -> bool:
+        """@brief Whether the reviewer made real corrections that Cancel would discard.
+
+        @return True when the working copy differs from the rows the review
+            opened with: a body moved, resized, edited, added, deleted, kept
+            or left out, a model chosen. Text still being typed counts.
+        @note A click that does not leave the click tolerance changes nothing
+              (`_left_the_click`, F4-1), so it is no correction; an edit
+              brought back to the original value is none either.
+        """
+        self._commit_pending_text()
+        return self._components != getattr(self, "_opened_with", self._components)
+
+    def _ask_discard(self) -> bool:
+        """Ask «Scartare le correzioni fatte?» (discard the corrections?); True for «Scarta».
+
+        «Continua la revisione» (keep reviewing) is the default and the
+        Escape answer: a second Escape never throws the work away.
+        """
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle(self.windowTitle())
+        box.setText(tx("Scartare le correzioni fatte?"))
+        discard = box.addButton(tx("Scarta"), QMessageBox.ButtonRole.DestructiveRole)
+        keep = box.addButton(tx("Continua la revisione"), QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(keep)
+        box.setEscapeButton(keep)
+        try:
+            box.exec()
+            return box.clickedButton() is discard
+        finally:
+            box.deleteLater()
+
+    def _user_confirms_discard(self) -> bool:
+        """True when nothing would be lost, or the reviewer chose to discard it (F4-2)."""
+        return not self.has_corrections() or self._ask_discard()
+
+    def reject_by_user(self):
+        """@brief Escape, «Annulla» or the window's X: reject, asking first when corrections would be lost.
+
+        @note User decision 2026-11-16 (F4-2): ONLY when the review holds real
+              corrections the reviewer is asked «Scartare le correzioni
+              fatte?» with «Scarta» / «Continua la revisione»; without
+              corrections it closes as before. What a rejection means does not
+              change: in the detector stage it still stops the run. A
+              rejection made by the program (`reject()`) never asks.
+        """
+        if self._closing or self._user_confirms_discard():
+            self.reject()
+
     def reject(self):
         """@brief Discard the editing transaction without applying pending worker results."""
         self._closing = True
@@ -4069,7 +4174,8 @@ class PhotoReviewDialog(QDialog):
         @note An armed mode is the innermost thing Escape can cancel: leaving
               the dialog while the user only wanted to give up on the rectangle
               would throw away the whole review. Escape with nothing armed
-              still rejects, as in any dialog.
+              still rejects, as in any dialog, but asks first when real
+              corrections would be lost (`reject_by_user`, F4-2).
         @note Return/Enter confirms. This button box has no AcceptRole button
               (Apply carries ApplyRole), so Qt routed Return to Cancel and the
               most ordinary keystroke in a dialog discarded every correction.
@@ -4095,6 +4201,13 @@ class PhotoReviewDialog(QDialog):
         if event.key() == Qt.Key.Key_Escape and self.format_button.isChecked():
             # The brush is the innermost thing Escape can put down.
             self.format_button.setChecked(False)
+            event.accept()
+            return
+        if (event.key() == Qt.Key.Key_Escape
+                and event.modifiers() == Qt.KeyboardModifier.NoModifier):
+            # Nothing armed: Escape rejects, asking first when real
+            # corrections would be lost (F4-2).
+            self.reject_by_user()
             event.accept()
             return
         modifiers = event.modifiers() & ~Qt.KeyboardModifier.KeypadModifier

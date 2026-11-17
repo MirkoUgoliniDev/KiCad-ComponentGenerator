@@ -1941,8 +1941,12 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
             + _DETAIL_SEPARATOR + tx("proposte irrisolte conservate."))
     elif path:
         try:
+            from ..fsutil import atomic_write_bytes
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(dict(key=key, response=data), allow_nan=False), encoding='utf-8')
+            # Temporary file + replace (review 2026-11-16, R8-6): an
+            # interrupted write never leaves a truncated entry behind.
+            atomic_write_bytes(path, json.dumps(dict(key=key, response=data),
+                                                allow_nan=False).encode('utf-8'))
         except (OSError, ValueError) as exc:
             # ValueError: a non-finite number in a field no check reads (the
             # provider decoder maps NaN to null, a direct caller may not). The

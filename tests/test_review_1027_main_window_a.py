@@ -308,7 +308,15 @@ def test_modal_dialogs_do_not_accumulate_as_window_children(window, monkeypatch)
 
 def test_answer_is_still_readable_right_after_exec(window, monkeypatch):
     """@brief Negative: the release is deferred, so the answer of the dialog is read first."""
-    monkeypatch.setattr(QDialog, "exec", lambda self: QDialog.DialogCode.Accepted)
+    from PyQt6.QtWidgets import QDoubleSpinBox
+
+    def typed_and_accepted(self):
+        # Since review 2026-11-16 (R1-4) an untouched board-size dialog stores
+        # nothing: the sizes are typed before «OK», as a user does.
+        for spin in self.findChildren(QDoubleSpinBox):
+            spin.setValue(20.0)
+        return QDialog.DialogCode.Accepted
+    monkeypatch.setattr(QDialog, "exec", typed_and_accepted)
     monkeypatch.setattr(QMessageBox, "exec", lambda self: 0)
     _flush_deferred_deletes()
     result = window._ask_board_size()

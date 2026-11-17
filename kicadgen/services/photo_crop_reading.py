@@ -1474,9 +1474,12 @@ def _store(directory, key, response, log):
     if directory is None:
         return
     try:
+        from ..fsutil import atomic_write_bytes
         directory.mkdir(parents=True, exist_ok=True)
-        (directory/f'{key}.json').write_text(json.dumps(dict(key=key, response=response)),
-                                             encoding='utf-8')
+        # Temporary file + replace (review 2026-11-16, R8-6): an interrupted
+        # write never leaves a truncated entry under the final name.
+        atomic_write_bytes(directory/f'{key}.json',
+                           json.dumps(dict(key=key, response=response)).encode('utf-8'))
     except (OSError, TypeError, ValueError) as exc:
         log(tx("Lettura dei singoli componenti: cache non scrivibile ({exc}).", exc=exc))
 

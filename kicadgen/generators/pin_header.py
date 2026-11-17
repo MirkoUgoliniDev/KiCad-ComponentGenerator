@@ -25,6 +25,7 @@ from ..core.footprint import (COURTYARD_WIDTH_MM, FAB_WIDTH_MM, SILK_OUTSIDE_FAB
                               courtyard_corners, fab_reference_text, require_kicad_reach,
                               validate_pad_number)
 from ..core.output_names import validate_output_name
+from ..core.pad_limits import is_integer_count, validate_grid_counts
 from ..core.silk import (PIN_ONE_UNMARKED_NOTE, SILK_PAD_CLEARANCE_MM, keepout_box, marker_ink_box,
                          pin_one, pin_one_marker, silk_rectangle)
 from ..services.messages import tx
@@ -180,11 +181,15 @@ class PinHeaderParams:
         """@brief Validate finite geometry and a complete optional body.
 
         @throws ValueError If dimensions, offsets or pin mapping are invalid,
-            or two `pad_overrides`/`pin_map` keys name the same pin.
-        @note Normalises in place, once: `pad_overrides` keys become their
-            `pin_key` text (the lookups use it, so an int key was validated
-            and then silently ignored) and `pin_map` positions become tuples
-            (a JSON list position was unhashable).
+            two `pad_overrides`/`pin_map` keys name the same pin, rows or
+            columns are not whole numbers or exceed
+            `core.pad_limits.MAX_PAD_POSITIONS` positions together, or a
+            pin-map row or column is not a whole number.
+        @note Normalises in place, once: `rows` and `cols` become ints,
+            `pad_overrides` keys become their `pin_key` text (the lookups use
+            it, so an int key was validated and then silently ignored) and
+            `pin_map` positions become tuples of ints (a JSON list position
+            was unhashable).
         """
         for name in ("pitch", "row_spacing", "pad_diameter", "drill", "margin",
                      "body_length", "body_width", "body_offset_x", "body_offset_y"):
@@ -206,8 +211,12 @@ class PinHeaderParams:
         # "..\evil" here too, so a script caller is protected exactly like
         # the window (2026-10-27 review, H4).
         validate_output_name(self.name)
-        if self.rows < 1 or self.cols < 1:
-            raise ValueError(tx("Righe e colonne devono essere >= 1."))
+        # Whole numbers, at least one each, and at most MAX_PAD_POSITIONS
+        # positions, checked before any position is enumerated (review
+        # 2026-11-16, R11-3: a 10000 x 10000 grid validated for minutes and a
+        # float count escaped as a TypeError). Normalised to int in place,
+        # like the pin map below.
+        self.rows, self.cols = validate_grid_counts(self.rows, self.cols)
         if self.pitch <= 0:
             raise ValueError(tx("Il passo (pitch) deve essere > 0."))
         if self.effective_row_spacing() <= 0:
@@ -240,7 +249,13 @@ class PinHeaderParams:
                 if isinstance(position, (str, bytes)) or not hasattr(position, "__len__") \
                         or len(position) != 2:
                     raise ValueError(tx("Pin {pin}: posizione non valida nella mappa dei pin.", pin=pin))
-                normalised[pin] = tuple(position)
+                # A grid position is a row and a column index: 1.5 would
+                # place the pin between two grid lines, an invention of the
+                # map, never a position of the grid (review 2026-11-16, R11-9).
+                if not all(is_integer_count(value) for value in position):
+                    raise ValueError(tx("Pin {pin}: riga e colonna nella mappa dei pin devono essere numeri "
+                                        "interi (ricevuto {position!r}).", pin=pin, position=tuple(position)))
+                normalised[pin] = tuple(int(value) for value in position)
             self.pin_map = normalised
             for pin, position in self.pin_map.items():
                 row, col = position

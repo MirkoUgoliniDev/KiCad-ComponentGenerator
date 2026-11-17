@@ -119,28 +119,37 @@ def _model(tmp_path, name="M.step", text="ISO-10303-21;"):
     return path
 
 
+#: FreeCAD identity of the stall records below. CONTRACT CHANGED 2026-11-16
+#: (review R10-1): a stall is bound to the FreeCAD build that gave it, like
+#: the crashes and unreadable answers, and a record without one is never
+#: written nor honoured.
+_READER = "C:/FreeCAD/bin/freecadcmd.exe:1:2"
+
+
 def test_h2_a_stall_is_remembered_with_its_timeout(user_cache, tmp_path):
     """@brief Positive: the same file with a budget no larger is skipped."""
     model = _model(tmp_path)
-    km.record_stalls({str(model): 300})
+    km.record_stalls({str(model): 300}, _READER)
     stalls = km.load_stalls()
-    assert km.stall_remembered(stalls, model, 300)
-    assert km.stall_remembered(stalls, model, 120), "a smaller budget would stall sooner"
+    assert km.stall_remembered(stalls, model, 300, _READER)
+    assert km.stall_remembered(stalls, model, 120, _READER), "a smaller budget would stall sooner"
     assert (user_cache / km.STALL_FILENAME).is_file()
     assert not (user_cache / km.INDEX_FILENAME).exists(), "a stall is not a measurement"
 
 
 def test_h2_a_larger_timeout_or_a_rewritten_file_measures_again(user_cache, tmp_path):
-    """@brief Negative: more patience, or a different file under the same name, is a new question."""
+    """@brief Negative: more patience, another FreeCAD, or a different file under the same name, is a new question."""
     model = _model(tmp_path)
-    km.record_stalls({str(model): 300})
+    km.record_stalls({str(model): 300}, _READER)
     stalls = km.load_stalls()
-    assert not km.stall_remembered(stalls, model, 301)
+    assert not km.stall_remembered(stalls, model, 301, _READER)
+    assert not km.stall_remembered(stalls, model, 300, "another freecadcmd:3:4")
+    assert not km.stall_remembered(stalls, model, 300), "no reader, no verdict"
     time.sleep(0.02)
     model.write_text("ISO-10303-21; rewritten", encoding="utf-8")
     os.utime(model, None)
-    assert not km.stall_remembered(stalls, model, 300)
-    assert not km.stall_remembered(stalls, tmp_path / "missing.step", 300)
+    assert not km.stall_remembered(stalls, model, 300, _READER)
+    assert not km.stall_remembered(stalls, tmp_path / "missing.step", 300, _READER)
 
 
 def test_h2_model_sizes_skips_a_remembered_stall_until_the_file_changes(user_cache, tmp_path, monkeypatch):
@@ -156,6 +165,7 @@ def test_h2_model_sizes_skips_a_remembered_stall_until_the_file_changes(user_cac
                                 stalled={str(p): km.MEASURE_SILENCE_TIMEOUT_S for p in paths})
 
     monkeypatch.setattr(km, "measure_models", stalling)
+    monkeypatch.setattr(km, "_reader_identity", lambda: _READER)
     assert km.model_sizes([model], library) == {str(model): None}
     assert km.model_sizes([model], library) == {str(model): None}
     assert calls == [[str(model)]], "the second generation did not pay the silence again"
@@ -194,7 +204,7 @@ def test_h2_a_plain_failure_is_not_remembered_as_a_stall(user_cache, tmp_path, m
     km.model_sizes([model], tmp_path / "lib")
     assert len(calls) == 3, "the same FreeCAD does not re-read an unreadable file"
     stalls = km.load_stalls()
-    assert not km.stall_remembered(stalls, model, km.MEASURE_SILENCE_TIMEOUT_S)
+    assert not km.stall_remembered(stalls, model, km.MEASURE_SILENCE_TIMEOUT_S, _READER)
     assert stalls[km.index_key(model)]["status"] == "unreadable"
 
 

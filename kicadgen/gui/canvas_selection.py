@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from typing import Iterable, Optional
 
-from PyQt6.QtCore import QPoint, QRect, QRectF
+from PyQt6.QtCore import QPoint, QRect, QRectF, Qt
 from PyQt6.QtWidgets import QApplication, QGraphicsView, QRubberBand
 
 
@@ -203,6 +203,22 @@ class RubberBand:
             return False
         self._band.setGeometry(QRect(self._start, pos).normalized())
         return True
+
+    def lost_release(self, buttons) -> bool:
+        """@brief A pointer move reports the buttons held: drop a band whose left button is no longer down.
+
+        @param buttons `QMouseEvent.buttons()` of the move.
+        @return True when a band was active without the left button (both
+            views start it on a Shift+left press) and was cancelled, selecting
+            nothing; False when idle or while the left button is held.
+        @note The release went elsewhere (a dialog, Alt+Tab): before, the
+            band kept stretching after a pointer with no button held and the
+            viewport kept its mouse grab (review 2026-11-16, R5-1, the drag's
+            rule in `canvas_gestures.GestureController.lost_release`).
+        """
+        if self._start is None or (buttons & Qt.MouseButton.LeftButton):
+            return False
+        return self.cancel()
 
     def finish(self, pos: QPoint) -> Optional[QRectF]:
         """@brief End the band at a viewport position.

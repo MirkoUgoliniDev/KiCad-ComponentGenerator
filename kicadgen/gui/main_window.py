@@ -1186,11 +1186,6 @@ def _reference_pad(name: str) -> float:
     return float(getattr(CastellatedModuleParams, name))
 
 
-def _declared_size(value, reference):
-    """The field value as a declared size, or None when it is still the reference value."""
-    return None if abs(float(value) - reference) < 1e-9 else float(value)
-
-
 def _positive_frame(length, width):
     """(length, width) in mm when both are finite and positive, else None."""
     try:
@@ -2415,6 +2410,13 @@ class MainWindow(QMainWindow):
         #: provenance, saved with the project (second review 2026-11-03, G2:
         #: «height != 5 mm» built an invented block after a thickness edit).
         self._cast_height_declared: bool = False
+        #: Module-wide castellated sizes (CAST_MODULE_SIZE_REFERENCES keys)
+        #: that are DECLARED measures -- typed by the user in the recovery
+        #: dialog or restored as such -- rather than the generator's
+        #: reference estimates. A recorded provenance, saved with the project
+        #: (review 2026-11-16, R2-8: it used to be decided by comparing the
+        #: value with the reference, so a measured 1.7 mm hole read as an estimate).
+        self._cast_declared_sizes: set = set()
         #: Pin names the USER applied (symbol editor «Applica», pinout
         #: dialog), {pin number: name}; names that came from an analysis are
         #: not in it. A new analysis that would replace or drop one of them
@@ -2570,6 +2572,10 @@ class MainWindow(QMainWindow):
         #: on those: on the ESP32 the scale came out 32% wrong (26/09).
         self._board_size_known = False
         self._config = load_config()
+        #: What this window last read from or wrote to config.json: the keys
+        #: that differ from it are the ones this window changed
+        #: (`_save_config_changes`, several windows, 2026-11-16).
+        self._config_baseline = deepcopy(self._config)
         #: Problems found reading config.json, (template, values) pairs:
         #: logged once the translator and the log exist (end of __init__).
         from .app_config import take_load_problems
@@ -2661,6 +2667,46 @@ class MainWindow(QMainWindow):
         # it is not about any project).
         for template, values in self._config_load_notes:
             self._append_log(tx(template, **values), persist=False)
+        # The .env files the launcher skipped (review 2026-11-16, R12-1): one
+        # line each in the session log, and in the start-up warning when it shows.
+        self._env_file_problems = self._unreadable_env_files()
+        for line in self._env_file_problem_lines():
+            self._append_log(line, persist=False)
+
+    @staticmethod
+    def _unreadable_env_files() -> list:
+        """@brief The .env files the launcher could not read, as (path, kind, detail).
+
+        @return `app_paths.unreadable_env_files()`; [] when that function is
+            missing or fails: a start-up notice must never stop the start.
+        """
+        from .. import app_paths
+        check = getattr(app_paths, "unreadable_env_files", None)
+        if not callable(check):
+            return []
+        try:
+            return list(check())
+        except Exception:  # noqa: BLE001 - only a notice; the start goes on
+            return []
+
+    def _env_file_problem_lines(self) -> list[str]:
+        """@brief One translated sentence per unreadable .env file (`_env_file_problems`).
+
+        @return Sentences in the current language; a kind other than
+            "encoding" reads as an I/O failure, with its detail.
+        @note Composed when needed, never stored translated, so a later
+            warning follows the language in use.
+        """
+        lines = []
+        for path, kind, detail in getattr(self, "_env_file_problems", None) or ():
+            if kind == "encoding":
+                lines.append(tx("Il file {path} non è stato letto: non è un testo UTF-8 o UTF-16. "
+                                "Le variabili che contiene sono state ignorate: salvalo di nuovo "
+                                "con codifica UTF-8.", path=path))
+            else:
+                lines.append(tx("Il file {path} non si può leggere ({error}): le variabili che "
+                                "contiene sono state ignorate.", path=path, error=detail))
+        return lines
 
     def _prepare_native_preview_3d_slot(self) -> None:
         """@brief Create the native windows of the 3D pane's ancestor chain before the window shows.
@@ -2783,6 +2829,12 @@ class MainWindow(QMainWindow):
         # to its exact text (user request, 2026-11-12).
         self.action_sent_prompts = tools_menu.addAction(
             self.i18n.text("Prompt inviati..."), self._show_sent_prompts)
+        # User decision 2026-11-16 (R10-1/R10-2): the stored «not measurable»
+        # verdicts of KiCad library models are forgotten on request only.
+        self.action_retry_unmeasurable = tools_menu.addAction(
+            self.i18n.text("Riprova i modelli KiCad non misurabili"),
+            self._retry_unmeasurable_models)
+        tools_menu.aboutToShow.connect(self._refresh_retry_unmeasurable_action)
 
         help_menu = self.menu_help = self.menuBar().addMenu(self.i18n.tr("app.help"))
         # «Apri cartella progetto tool» (open tool project folder) removed by the
@@ -3270,11 +3322,28 @@ class MainWindow(QMainWindow):
             the 3D viewer is closed explicitly (VTK render window finalized);
             a refused close touches neither.
         """
-        # The terminals worker reports the wait in the 3D status bar, without
-        # a modal dialog: behaviour the existing tests rely on.
+        # The terminals worker reports the wait in the 3D status bar AND with
+        # a box (review 2026-11-16, R1-6: the status bar alone is invisible
+        # outside the 3D tab, so the close was refused silently there). The
+        # box offers «Interrompi la lettura» only when the running pass can
+        # really stop (`TerminalDetailWorker.can_cancel`: the terminal pass
+        # takes a cancel, the lead refinement does not); otherwise it is the
+        # plain box every worker shows.
         if self._terminal_worker is not None and self._terminal_worker.isRunning():
             self._set_3d_status(self.i18n.text(
                 "Attendi la fine dell'analisi terminali prima di chiudere."), STATUS_WARNING)
+            can_cancel = getattr(self._terminal_worker, "can_cancel", None)
+            if not (callable(can_cancel) and can_cancel()):
+                QMessageBox.information(
+                    self, self.i18n.text('Operazione in corso'),
+                    self.i18n.text("Attendi la fine dell'analisi terminali prima di chiudere."))
+            elif self._ask_stop_terminal_pass():
+                stop = getattr(self._terminal_worker, "stop", None)
+                if callable(stop):
+                    stop()
+                self._set_3d_status(self.i18n.text(
+                    "Interruzione della lettura dei terminali richiesta: chiudi di nuovo la "
+                    "finestra quando è terminata."), STATUS_WARNING)
             event.ignore()
             return
         if self._background_work_running():
@@ -3289,6 +3358,8 @@ class MainWindow(QMainWindow):
                 return
             self._flush_footprint_checkpoint()
             self._window_closed = True
+            # The project is free for other KiCadGen windows again.
+            self._release_project_lock()
             # A check still running: kicad-cli is killed now, not left for up
             # to 60 s after the window is gone (review 2026-11-15, M3).
             check_panel = getattr(self, "kicad_check_panel", None)
@@ -3321,7 +3392,59 @@ class MainWindow(QMainWindow):
                     pass  # C++ object already destroyed
             super().closeEvent(event)
 
+    def _ask_stop_terminal_pass(self) -> bool:
+        """@brief The close box shown while the terminal pass runs; True when the user stops it.
+
+        @return True for «Interrompi la lettura», False for «Attendi» (or Esc).
+        @note Review 2026-11-16, R1-6: the box every worker shows at a refused
+            close («Operazione in corso»), plus the stop the analysis offers
+            with «Interrompi»: the pass closes its request in flight
+            (`TerminalDetailWorker.stop`). The window stays open either way;
+            it closes at the next attempt once the pass has ended.
+        """
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setWindowTitle(self.i18n.text('Operazione in corso'))
+        box.setText(self.i18n.text("Attendi la fine dell'analisi terminali prima di chiudere."))
+        stop_button = box.addButton(self.i18n.text("Interrompi la lettura"),
+                                    QMessageBox.ButtonRole.ActionRole)
+        wait_button = box.addButton(self.i18n.text("Attendi"), QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(wait_button)
+        box.setEscapeButton(wait_button)
+        self._run_modal(box)
+        return box.clickedButton() is stop_button
+
+    def _profiles_edit_block_reason(self) -> str:
+        """@brief Why the profile manager must not open now, '' when it may.
+
+        @return Translated sentence while an analysis, a re-read, a
+            generation or the apply of a result runs; '' otherwise.
+        @note Review 2026-11-16, R1-1: the manager can switch the component
+            type (a type deleted or disabled there resets the combo), and a
+            type changed in the middle of a run sent a castellated result into
+            the pin-matrix fields. `_extraction_busy` and `_applying_extraction`
+            cover the parts of a run with no thread alive (the automatic
+            generation's hand-over, the modal questions of an apply).
+        """
+        if (self._background_work_running() or self._automatic_generation_active
+                or getattr(self, "_extraction_busy", False)
+                or getattr(self, "_applying_extraction", False)):
+            return self.i18n.text(
+                "Tipologie e profili AI non modificabili mentre un'analisi o una generazione è in "
+                "corso: attendi la fine e riapri la gestione.")
+        return ""
+
     def _edit_profiles(self):
+        """@brief Open «Gestione tipologie e profili AI», unless a run is in progress.
+
+        @note Every entry point (menu, prompt notice button) comes here, so
+            the refusal (`_profiles_edit_block_reason`) holds for all of them.
+        """
+        reason = self._profiles_edit_block_reason()
+        if reason:
+            QMessageBox.information(self, self.i18n.text("Gestione tipologie e profili AI..."),
+                                    reason)
+            return
         dialog = None
         try:
             previous = self.profile_store.get_type(self._profile_key())
@@ -3971,7 +4094,19 @@ class MainWindow(QMainWindow):
     def _smd_model_option(self) -> Path | None:
         """@brief The SMD network file chosen for this session, or None for the default."""
         path = self.field_smd_model.text().strip()
-        return Path(path) if path else None
+        return self._model_file_path(path, "field_smd_model") if path else None
+
+    def _model_file_path(self, text: str, name: str) -> Path:
+        """@brief The weight file a field names, a relative path taken in the program's models folder.
+
+        @param text Non-empty text of the field.
+        @param name The field (key of MODEL_FILE_FOLDERS).
+        @return An absolute path: a relative text never resolves against the
+            current directory, which depends on how the program was started
+            (review 2026-11-16, R1-3).
+        """
+        path = Path(text)
+        return path if path.is_absolute() else resource_path(*self.MODEL_FILE_FOLDERS[name]) / path
 
     def _photo_detector_options(self) -> tuple[str, Path | None]:
         """Snapshot the selected backend; AI ignores any remembered ONNX path."""
@@ -3979,7 +4114,8 @@ class MainWindow(QMainWindow):
         path = self.field_yolo_model.text().strip()
         if detector == "yolo_smd" and not path:
             return detector, self._default_yolo_weights(detector)
-        return detector, Path(path) if detector in ("yolo", "yolo_only", "yolo_smd") and path else None
+        return detector, (self._model_file_path(path, "field_yolo_model")
+                          if detector in ("yolo", "yolo_only", "yolo_smd") and path else None)
 
     def _balance_provider(self) -> str:
         """@brief Provider of the model the next analysis will use (for the balance line)."""
@@ -4220,6 +4356,54 @@ class MainWindow(QMainWindow):
             return
         webbrowser.open(folder.as_uri())
 
+    def _offer_crash_notice(self) -> bool:
+        """@brief Tell once, after a restart, that the previous session ended with an error.
+
+        @return True when the notice was shown.
+        @note User decision 2026-11-16 (from fixer C1's crash_report): the
+            newest crash report not shown yet (`unseen_crash_report`) opens a
+            NON-modal box with «Segnala un problema…» (the Help entry,
+            `_report_problem`, which names the latest report) and a close
+            button; the report is then marked seen
+            (`mark_crash_report_seen`), so it appears once. A session ended
+            by a kill (`sessions_ended_without_exit() > 0`: Task Manager, a
+            forced shutdown) is not an error and gets no notice. Every call
+            is guarded: a failure here never stops the start-up.
+        """
+        try:
+            from .. import crash_report
+            ended = getattr(crash_report, "sessions_ended_without_exit", None)
+            if callable(ended) and ended() > 0:
+                return False
+            unseen = getattr(crash_report, "unseen_crash_report", None)
+            report = unseen() if callable(unseen) else None
+            if report is None:
+                return False
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Icon.Warning)
+            box.setWindowTitle(self.i18n.text("Sessione precedente chiusa per un errore"))
+            box.setText(self.i18n.text(
+                "La sessione precedente si è chiusa per un errore. Il rapporto è stato salvato: "
+                "{path}. Se vuoi, segnala il problema allegando il rapporto dopo averlo "
+                "controllato.").format(path=report))
+            report_button = box.addButton(self.i18n.text("Segnala un problema..."),
+                                          QMessageBox.ButtonRole.ActionRole)
+            close_button = box.addButton(self.i18n.text("Chiudi"), QMessageBox.ButtonRole.RejectRole)
+            box.setEscapeButton(close_button)
+            box.setModal(False)
+            box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+            box.buttonClicked.connect(
+                lambda button: QTimer.singleShot(0, self._report_problem)
+                if button is report_button else None)
+            self._crash_notice = box
+            box.show()
+            mark = getattr(crash_report, "mark_crash_report_seen", None)
+            if callable(mark):
+                mark(report)
+            return True
+        except Exception:  # noqa: BLE001 - a notice must never stop the start-up
+            return False
+
     def _report_problem(self) -> None:
         """@brief «Segnala un problema…»: prefilled GitHub issue plus the log folder.
 
@@ -4422,6 +4606,9 @@ class MainWindow(QMainWindow):
                         else "dependencies.key_missing")
             lines.append(self.i18n.tr(line_key, provider=label))
             names.append(self.i18n.tr("dependencies.key_name", provider=label))
+        # An unreadable .env is often WHY a key is missing (review
+        # 2026-11-16, R12-1): said here too, not only in the session log.
+        lines.extend(self._env_file_problem_lines())
         statuses = "\n".join(lines)
         message = QMessageBox(self)
         message.setIcon(QMessageBox.Icon.Warning)
@@ -4947,7 +5134,9 @@ class MainWindow(QMainWindow):
         self.docs_list = QListWidget(docs_group)
         self.docs_list.hide()
         self.guided_docs = GuidedDocuments(self._docs_dir, docs_group, i18n=self.i18n,
-                                           config=self._config, body_size=self._body_size)
+                                           config=self._config, body_size=self._body_size,
+                                           # Per-key writes (several windows, 2026-11-16).
+                                           save_config=lambda _config: self._save_config_changes())
         self.guided_docs.changed.connect(self._refresh_docs_list)
         docs_layout.addWidget(self.guided_docs)
         outer.addWidget(docs_group)
@@ -6345,7 +6534,9 @@ class MainWindow(QMainWindow):
             return
         if previous is not None and previous != folder and not previous.exists():
             recent_projects.remove(self._config, previous)
-        recent_projects.remember(self._config, folder, save=save_config)
+        # Per-key write (several windows, 2026-11-16): never the whole dict.
+        recent_projects.remember(self._config, folder,
+                                 save=lambda _config: self._save_config_changes())
 
     def _refresh_start_page(self) -> None:
         """@brief Show the start page without an open project, the tabs with one."""
@@ -6394,7 +6585,8 @@ class MainWindow(QMainWindow):
 
         @param path Absolute project folder.
         """
-        recent_projects.forget(self._config, path, save=save_config)
+        recent_projects.forget(self._config, path,
+                               save=lambda _config: self._save_config_changes())
         self._refresh_start_page()
 
     def _fill_recent_menu(self) -> None:
@@ -6440,6 +6632,10 @@ class MainWindow(QMainWindow):
             self._refresh_start_page()
             return
         if not self._can_leave_project():
+            return
+        # The lock question too (review F, 3): asked before anything moves,
+        # so «Annulla» leaves the working folder and the open project as they were.
+        if not self._confirm_open_locked(folder):
             return
         # The kind question comes BEFORE the working folder moves and the
         # open project closes (review 2026-10-27, A9): a cancelled question
@@ -6562,19 +6758,24 @@ class MainWindow(QMainWindow):
             return None
         return (length, width) if length > 0 and width > 0 else None
 
-    def _ask_board_size(self):
+    def _ask_board_size(self, note: str | None = None):
         """@brief Ask the board size when it is not known yet (pretest without analysis).
 
+        @param note Translated explanation shown above the fields; None uses
+            the pretest's (the photo needs the size to be cropped).
         @return (length, width) in mm, or None when the user cancels.
         @note The values go into the body fields of the current type and the
             size becomes known for this project: the same fields the analysis
             fills, so a later analysis simply replaces them.
+        @note Review 2026-11-16, R1-4: «OK» stays disabled until BOTH values
+            are above the fields' minimum. The fields start at that minimum,
+            so an untouched «OK» used to store 0.05 x 0.05 mm as the known size.
         """
         from PyQt6.QtWidgets import QDialogButtonBox, QDoubleSpinBox
         dialog = QDialog(self)
         dialog.setWindowTitle(self.i18n.text("Quote della scheda"))
         form = QFormLayout(dialog)
-        note = QLabel(self.i18n.text(
+        note = QLabel(note if note is not None else self.i18n.text(
             "Il pretest non legge i documenti: servono le quote della scheda per ritagliare "
             "e calibrare la foto. La lunghezza è lungo l'asse X della foto."))
         note.setWordWrap(True)
@@ -6590,6 +6791,14 @@ class MainWindow(QMainWindow):
             fields.append(field)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
                                    | QDialogButtonBox.StandardButton.Cancel)
+        ok_button = buttons.button(QDialogButtonBox.StandardButton.Ok)
+
+        def refresh_ok(_value=None):
+            # The minimum is the untouched value, never a measure typed on purpose.
+            ok_button.setEnabled(all(field.value() > MIN_LENGTH_MM for field in fields))
+        for field in fields:
+            field.valueChanged.connect(refresh_ok)
+        refresh_ok()
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
         form.addRow(buttons)
@@ -6597,6 +6806,10 @@ class MainWindow(QMainWindow):
         if self._run_modal(dialog) != QDialog.DialogCode.Accepted:
             return None
         length, width = (field.value() for field in fields)
+        if not (length > MIN_LENGTH_MM and width > MIN_LENGTH_MM):
+            # An accept that bypassed the disabled «OK» (Enter on a default
+            # button, a scripted accept) still never stores the untouched minimum.
+            return None
         if self._is_castellated():
             self.field_cast_body_length.setValue(length)
             self.field_cast_body_width.setValue(width)
@@ -6815,6 +7028,9 @@ class MainWindow(QMainWindow):
         self._analysis_work_seconds = 0.0
         self._analysis_time_partial = False
         self._begin_ai_run("Analisi AI")
+        # A new full analysis: a contact conflict it repeats is asked again
+        # (`_sync_pin_map_conflict_record`).
+        self._analysis_serial = getattr(self, "_analysis_serial", 0) + 1
         # From here on the "analysis running" state is already exposed to the user:
         # any exception before worker.start() must restore it, not leave the
         # tabs off and the modal stuck.
@@ -6827,7 +7043,9 @@ class MainWindow(QMainWindow):
                                        chosen_detector=chosen_detector)
         except Exception as exc:  # noqa: BLE001 - any failure brings the UI back to rest
             worker = getattr(self, "_extract_worker", None)
-            if worker is None or not worker.isRunning():
+            # A worker that did start is abandoned, never left running under
+            # a window at rest (R1-7).
+            if not self._abandon_if_running(worker):
                 self._restore_photo_state(photo_state)
             self._on_extract_finished()
             self._on_extract_error(str(exc))
@@ -7046,7 +7264,7 @@ class MainWindow(QMainWindow):
         @param on True to warn again at start-up about a missing AI key.
         """
         self._config[STARTUP_KEY_NOTICE_DISMISSED_KEY] = not on
-        if save_config(self._config) is False:
+        if self._save_config_changes() is False:
             self._append_log(self.i18n.text("Impostazione non salvata in config.json."), persist=False)
 
     def _open_ai_account(self) -> None:
@@ -7244,6 +7462,7 @@ class MainWindow(QMainWindow):
         # Cached answers and evidence in the project folder (user,
         # 2026-09-24). Here the name is always there: without a name nothing is extracted.
         self._extract_worker.photo_cache_dir = self._photo_cache_dir()
+        self._attach_usage_scope(self._extract_worker)
         self._extract_worker.done.connect(self._on_extracted)
         self._extract_worker.error.connect(self._on_extract_error)
         self._extract_worker.progress.connect(self._on_ai_progress)
@@ -7381,6 +7600,8 @@ class MainWindow(QMainWindow):
             worker.start()
             self._track_background_work(worker)
         except Exception as exc:  # noqa: BLE001 - any failure brings the UI back to rest
+            # A worker that did start is abandoned (R1-7).
+            self._abandon_if_running(getattr(self, "_extract_worker", None))
             self._on_yolo_pretest_finished()
             self._on_yolo_pretest_error(str(exc))
 
@@ -7400,6 +7621,8 @@ class MainWindow(QMainWindow):
         if report is None:
             self._on_ai_progress(tx("Pretest YOLO annullato nella revisione: nulla salvato."))
             return
+        # A failed review delivered an unreviewed set (R1-2): never «reviewed by the user».
+        self._unmark_user_reviewed_presence(self.sender(), getattr(report, "components", None))
         found = len(report.components)
         self._on_ai_progress(tx("Pretest YOLO concluso: {found} riquadri tenuti; nessuna chiamata AI.",
                                 found=found))
@@ -7541,6 +7764,43 @@ class MainWindow(QMainWindow):
         button.setProperty("i18n_source", text)
         button.setProperty("i18n_rendered", rendered)
 
+    def _attach_usage_scope(self, worker) -> None:
+        """@brief Give a paid worker the usage scope of the run being started (R6-8).
+
+        @param worker ExtractWorker, ReconcileWorker or the re-read worker.
+        @note Set as the attribute `usage_scope` before `start()`: the worker
+            runs its job inside ``with usage_scope.active():`` so its calls,
+            and only them, reach `_show_ai_cost`. None when the service has
+            no UsageScope.
+        """
+        worker.usage_scope = getattr(self, "_usage_scope", None)
+
+    @staticmethod
+    def _new_usage_scope():
+        """@brief A fresh `openrouter.UsageScope` for a paid pass that is not the analysis, or None.
+
+        @return The scope, or None when the service has no UsageScope.
+        @note A side pass (the terminal detail) runs in its own scope so the
+            per-call cost deltas of its log and of a concurrent analysis do
+            not mix; its total is not shown on the analysis card.
+        """
+        from ..services import openrouter
+        scope_class = getattr(openrouter, "UsageScope", None)
+        return scope_class() if scope_class is not None else None
+
+    def _run_usage_totals(self):
+        """@brief The cost tally of the current run: its scope's, or the process-wide one.
+
+        @return `UsageTotals` of `_usage_scope` when a run created one
+            (`_begin_ai_run`), else `openrouter.usage_totals()` (no run yet,
+            or an older service without UsageScope).
+        """
+        scope = getattr(self, "_usage_scope", None)
+        if scope is not None:
+            return scope.totals()
+        from ..services.openrouter import usage_totals
+        return usage_totals()
+
     def _begin_ai_run(self, title: str) -> None:
         """@brief Prepare log, cost summary and buttons for an AI analysis about to start.
 
@@ -7575,8 +7835,16 @@ class MainWindow(QMainWindow):
         # itself, but a partial re-read and the inventory relaunch did not, so
         # their summary added the previous analysis and named its models
         # (review 2026-11-14, finding 1).
-        from ..services.openrouter import reset_usage
-        reset_usage()
+        # Review 2026-11-16, R6-8: the tally is this run's own scope
+        # (`openrouter.UsageScope`), handed to the worker
+        # (`_attach_usage_scope`), not the process-wide tally: resetting that
+        # one zeroed the costs of another paid run still going (the terminal
+        # pass). Without UsageScope (an older service) the old reset applies.
+        from ..services import openrouter
+        scope_class = getattr(openrouter, "UsageScope", None)
+        self._usage_scope = scope_class() if scope_class is not None else None
+        if self._usage_scope is None:
+            openrouter.reset_usage()
         # Every call of this run is charged to the current project, even
         # if another one is opened in the meantime (check of 25/09, D7). It is
         # released when the worker really finishes (_on_extract_finished).
@@ -8299,7 +8567,8 @@ class MainWindow(QMainWindow):
             self._start_reconcile_worker(bundle, photo_png, params, model, profile, synthesized)
         except Exception as exc:  # noqa: BLE001 - any failure brings the UI back to rest
             worker = getattr(self, "_reconcile_worker", None)
-            if worker is None or not worker.isRunning():
+            # A worker that did start is abandoned (R1-7).
+            if not self._abandon_if_running(worker):
                 self._restore_photo_state(photo_state)
             self._on_extract_finished()
             self._on_extract_error(str(exc))
@@ -8380,6 +8649,7 @@ class MainWindow(QMainWindow):
         self._reconcile_worker.finished.connect(self._on_extract_finished)
         # See _start_extract_worker: run stamp for late results.
         self._reconcile_worker._analysis_revision = self._analysis_revision
+        self._attach_usage_scope(self._reconcile_worker)
         # A new run has applied nothing yet (see `_on_extract_finished`).
         self._extraction_applied_revision = None
         self._analysis_tabs_enabled = self.tabs.isEnabled()
@@ -8916,6 +9186,31 @@ class MainWindow(QMainWindow):
         return getattr(worker, "_analysis_revision",
                        self._analysis_revision) == self._analysis_revision
 
+    def _abandon_if_running(self, worker) -> bool:
+        """@brief Make a worker whose start failed AFTER `start()` an abandoned run.
+
+        @param worker The AI worker of the failed start, or None.
+        @return True when it was running and is now abandoned; False when it
+            never started (nothing ran, the caller may restore what the
+            start reset).
+        @note Review 2026-11-16, R1-7: a failure after `worker.start()`
+            (e.g. while tracking it) brought the window back to rest while
+            the worker still ran, and its late `done`/`finished` then applied
+            a result and reset the window a second time. It is now treated as
+            «Interrompi» treats a run: its revision is stale, its pending paid
+            calls are cancelled, and it stays counted as running work
+            (`_abandoned_workers`) until its `finished` lets it go.
+        """
+        if worker is None or not worker.isRunning():
+            return False
+        self._analysis_revision += 1
+        if not any(worker is other for other in self._abandoned_workers):
+            self._abandoned_workers.append(worker)
+        cancel_event = getattr(worker, "cancel_event", None)
+        if cancel_event is not None:
+            cancel_event.set()
+        return True
+
     def _forget_abandoned_worker(self, worker) -> None:
         """@brief Let go of an abandoned worker that has finally finished.
 
@@ -9020,9 +9315,8 @@ class MainWindow(QMainWindow):
             follows the interface language. The running PROJECT total and the
             balance are the «Credito AI» line (`ai_account`), refreshed here.
         """
-        from ..services.openrouter import usage_totals
-
-        totals = usage_totals()
+        # This run's own tally (R6-8), not one another run shares.
+        totals = self._run_usage_totals()
         text, models, cached = self._usage_cost_parts(totals)
         # The raw snapshot, not the composed lines (review 2026-11-15, costs):
         # the finished card's fallback composes it when shown, so a language
@@ -9312,6 +9606,8 @@ class MainWindow(QMainWindow):
             return
         pretest = isinstance(worker, YoloPretestWorker)
         kept = list(proposals)
+        # True once the user really answered the view (OK or Cancel).
+        reviewed = False
         try:
             from . import photo_review_dialog as review_module
             self.analysis_overlay.hide()
@@ -9329,6 +9625,7 @@ class MainWindow(QMainWindow):
             # Released after the answer (review 2026-10-29, A3).
             accepted = self._run_modal(dialog) == QDialog.DialogCode.Accepted
             kept = dialog.kept_components() if accepted else None
+            reviewed = True
             self._append_log(
                 tx("Revisione dei corpi rilevati: {n_kept} tenute su {n_proposals}.",
                    n_kept=len(kept),
@@ -9336,6 +9633,19 @@ class MainWindow(QMainWindow):
                 if kept is not None else tx("Revisione dei corpi rilevati annullata."))
         except Exception as exc:  # noqa: BLE001 - an error here must not hang the worker
             self._append_log(tx("ATTENZIONE revisione dei corpi non disponibile: {exc}", exc=exc))
+            # Review 2026-11-16, R1-2: nobody looked at the proposals, so they
+            # go on as an UNREVIEWED set -- the weak ones, which only a user
+            # may keep (`_yolo_review_only`), are left out, as the service
+            # does for an unreviewed bundle (`yolo_only_components`).
+            # A failure after the answer (the log line) keeps the answer.
+            if not reviewed:
+                kept = [dict(p) for p in proposals
+                        if not (isinstance(p, dict) and p.get("_yolo_review_only"))]
+                if worker is not None:
+                    # The service counts any delivered set as reviewed; the
+                    # result of this run is corrected when it arrives
+                    # (`_unmark_user_reviewed_presence`).
+                    worker._review_unreviewed = True
         finally:
             # The view runs a nested event loop: if in the meantime the run
             # has been declared expired, nothing is saved and the modal is not
@@ -9350,9 +9660,14 @@ class MainWindow(QMainWindow):
                 # is written before the review, so copying it afterwards
                 # would bring back the deleted false positives and lose the
                 # corrected boxes. It is written here, and _on_extracted does not touch it.
+                # An unanswered view writes the unreviewed set, all proposals
+                # included, so a later «Revisione componenti…» still shows the
+                # weak ones (R1-2).
                 self._store_reviewed_proposals(
-                    kept, photo_png, length_mm, width_mm,
-                    detector=getattr(worker, 'photo_detector', 'yolo'), pretest=pretest)
+                    kept if reviewed else [dict(p) for p in proposals],
+                    photo_png, length_mm, width_mm,
+                    detector=getattr(worker, 'photo_detector', 'yolo'), pretest=pretest,
+                    reviewed=reviewed)
                 self.analysis_overlay.show()
                 self.analysis_overlay.raise_()
 
@@ -9374,7 +9689,7 @@ class MainWindow(QMainWindow):
                        self._analysis_revision) != self._analysis_revision
 
     def _store_reviewed_proposals(self, kept, photo_png, length_mm, width_mm, *,
-                                  detector='yolo', pretest=False) -> None:
+                                  detector='yolo', pretest=False, reviewed=True) -> None:
         """@brief Write the proposals kept by the in-extraction review to the component folder.
 
         @param kept Proposal rows kept by the review dialog (may be empty).
@@ -9385,17 +9700,26 @@ class MainWindow(QMainWindow):
         @param pretest True for the «Solo YOLO locale» pretest: the rows go to
             the pretest bundle (`_pretest_root`) and the extraction state is
             left alone.
-        @note Marks the extraction as reviewed in every case, including an
+        @param reviewed False when the review view failed and nobody looked
+            at the proposals (review 2026-11-16, R1-2): the bundle is written
+            as unreviewed and the extraction is NOT marked reviewed.
+        @note Marks the extraction as reviewed whenever the user answered, including an
             empty selection or a failed write: the cache rows are the
             pre-review set and must never replace what the user decided. A
             pretest is not an extraction and does not set the mark.
         """
-        if not pretest:
+        # An unanswered view (review 2026-11-16, R1-2) writes an unreviewed
+        # bundle and leaves the extraction unmarked.
+        if not pretest and reviewed:
             self._reviewed_this_extraction = True
         path = self._write_review_bundle([dict(p) for p in kept], photo_png, length_mm, width_mm,
                                          detector=detector,
-                                         root=self._pretest_root() if pretest else None)
-        if path is not None:
+                                         root=self._pretest_root() if pretest else None,
+                                         reviewed=reviewed)
+        if path is not None and not reviewed:
+            self._append_log(tx("Proposte del rilevatore salvate senza revisione in {path}: "
+                                "riapri «Revisione componenti…» per rivederle.", path=path))
+        elif path is not None:
             self._append_log(tx("Proposte tenute dalla revisione salvate in {path} ({n_kept} corpi): "
                                 "la revisione si può riaprire senza chiamate AI.",
                                 path=path,
@@ -9885,6 +10209,13 @@ class MainWindow(QMainWindow):
             "board_size_known": bool(getattr(self, "_board_size_known", False)),
             "body_size_declared": bool(getattr(self, "_body_size_declared", False)),
             "cast_height_declared": bool(getattr(self, "_cast_height_declared", False)),
+            # Which module-wide castellated sizes are measures (R2-8).
+            "cast_declared_sizes": sorted(getattr(self, "_cast_declared_sizes", ())),
+            # The analysis's contact conflict and whether the user confirmed
+            # it (generality audit S1): the question survives a reopen.
+            "pin_map_conflict": self._saved_pin_map_conflict(),
+            # Pastes of «Copia formato» not yet in a regenerated STEP model.
+            "step_regen_pending": bool(getattr(self, "_step_regen_pending_saved", False)),
             "yolo_settings": self._chosen_yolo_settings(),
             "pcb_thickness": {
                 "source": getattr(self, "_pcb_thickness_source", "standard"),
@@ -9986,6 +10317,70 @@ class MainWindow(QMainWindow):
                 for r in self._step_source_pads]
         return state
 
+    #: The program's own folder of each weight-file field (`MODEL_FILE_WIDGETS`).
+    MODEL_FILE_FOLDERS = {"field_yolo_model": YOLO_MODELS_DIR, "field_smd_model": SMD_MODELS_DIR}
+
+    @staticmethod
+    def _trusted_model_file(text: str, folder: Path) -> str | None:
+        """@brief The absolute weight file `text` names when it lies inside `folder`, else None.
+
+        @param text Path read from a project file; a relative one is taken
+            relative to `folder`, never to the current directory.
+        @param folder The program's models folder of that field.
+        @return The resolved absolute path as text, or None when it falls
+            outside `folder` (symbolic links and «..» resolved first).
+        """
+        try:
+            path = Path(text.strip())
+            if not path.is_absolute():
+                path = folder / path
+            resolved = path.resolve(strict=False)
+            resolved.relative_to(folder.resolve(strict=False))
+        except (OSError, ValueError, RuntimeError):
+            return None
+        return str(resolved)
+
+    def _restore_model_file_widget(self, name: str, widget, value) -> bool:
+        """@brief Restore a weight-file field from a project file only inside the program's models folder.
+
+        @param name Field name (one of MODEL_FILE_WIDGETS).
+        @param widget The field.
+        @param value The saved value (any type; absent = None).
+        @return True when the caller may restore `value` as usual (empty or
+            not a string: the ordinary rules apply); False when this method
+            already settled the field.
+        @note Review 2026-11-16, R1-3: a project file received from someone
+            else chose which weight file the detectors load, and a PyTorch
+            `.pt` file is a pickle: loading it runs code. User decision
+            (2026-11-16): an `.onnx` file -- a graph, no code -- is restored
+            wherever it is; any OTHER file (`.pt`, or an extension the
+            PyTorch loader would read) is kept only when it resolves inside
+            the program's own models folder (`MODEL_FILE_FOLDERS`), else it
+            is dropped with a log line and the field goes back to the
+            default. Such a file elsewhere is used only when the user picks
+            it in this session («Scegli il modello YOLO» / «Scegli la rete
+            SMD»). Relative paths resolve against the models folder, never
+            against the current directory.
+        """
+        if not isinstance(value, str) or not value.strip():
+            return True
+        folder = resource_path(*self.MODEL_FILE_FOLDERS[name])
+        if Path(value.strip()).suffix.lower() == ".onnx":
+            path = Path(value.strip())
+            widget.setText(str(path if path.is_absolute() else folder / path))
+            return False
+        trusted = self._trusted_model_file(value, folder)
+        if trusted is None:
+            widget.clear()
+            self._append_log(tx(
+                "File dei pesi del progetto ignorato: «{path}» non è nella cartella dei modelli del "
+                "programma ({folder}), e un file di pesi può eseguire codice. Si usa il modello "
+                "predefinito; per usare quel file sceglilo tu con «Scegli…».",
+                path=value.strip(), folder=folder))
+            return False
+        widget.setText(trusted)
+        return False
+
     def _apply_project_state(self, state: dict) -> None:
         """@brief Put back into the window the saved settings of a project.
 
@@ -9998,6 +10393,20 @@ class MainWindow(QMainWindow):
             `self._config`: config.json stays the default of new projects
             until the user changes them from «Opzioni di generazione...». An
             option the state does not declare goes back to the general value.
+        @note The whole restore is ONE sides batch (review I, 2026-11-16): the
+            refresh the sides changes ask for runs once at the end, after the
+            mounting, the pad overrides and the declared sizes of THIS
+            project are back -- never with the previous project's (a host pad
+            override on pin 30 of project A was reported «non applicata» in
+            project B, which has 8 pins).
+        """
+        with self._sides_batch():
+            self._apply_project_state_body(state)
+
+    def _apply_project_state_body(self, state: dict) -> None:
+        """@brief Body of `_apply_project_state`, run inside one sides batch.
+
+        @param state See `_apply_project_state`.
         """
         from .project_state import set_widget_value, saved_package_geometry
         from ..cad3d.annotations import EdgeFilletAnnotation, FaceTextAnnotation
@@ -10029,6 +10438,9 @@ class MainWindow(QMainWindow):
         for name in PROJECT_WIDGETS:
             widget = getattr(self, name, None)
             values = state.get("widgets") if isinstance(state.get("widgets"), dict) else {}
+            if (widget is not None and name in MODEL_FILE_WIDGETS
+                    and not self._restore_model_file_widget(name, widget, values.get(name))):
+                continue
             if widget is not None and name in values and not set_widget_value(widget, values[name]):
                 skipped.append(name)
             elif widget is not None and name not in values and name in CLEARED_WHEN_UNDECLARED:
@@ -10061,22 +10473,24 @@ class MainWindow(QMainWindow):
         # A «models» block of an older project (per-session models) is
         # ignored: every analysis uses the saved models (user, 2026-11-13).
         self._refresh_ai_models_line()
-        self._sides.clear()
-        for index, side in enumerate(_project_list(state, "sides", skipped)):
-            if isinstance(side, dict):
-                # A side whose count, pitch, offset or first pin is damaged
-                # (null, a word, NaN dropped to null by `read_project_config`)
-                # is skipped with a note, like a damaged component: opening a
-                # project must never raise, and inventing its contacts would
-                # be a guess (review 2026-10-29, A1).
-                try:
-                    normalised_side(side)
-                except (TypeError, ValueError, OverflowError) as exc:
-                    skipped.append(f"sides[{index}] ({exc})")
-                    continue
-                # A project saved before the key was generated with the style of
-                # that time: it is kept, it is not a deduction.
-                self._add_side_row(side, missing_style=default_contact_style())
+        # Cleared and rebuilt as one change: one refresh at the end (`_sides_batch`).
+        with self._sides_batch():
+            self._sides.clear()
+            for index, side in enumerate(_project_list(state, "sides", skipped)):
+                if isinstance(side, dict):
+                    # A side whose count, pitch, offset or first pin is damaged
+                    # (null, a word, NaN dropped to null by `read_project_config`)
+                    # is skipped with a note, like a damaged component: opening a
+                    # project must never raise, and inventing its contacts would
+                    # be a guess (review 2026-10-29, A1).
+                    try:
+                        normalised_side(side)
+                    except (TypeError, ValueError, OverflowError) as exc:
+                        skipped.append(f"sides[{index}] ({exc})")
+                        continue
+                    # A project saved before the key was generated with the style of
+                    # that time: it is kept, it is not a deduction.
+                    self._add_side_row(side, missing_style=default_contact_style())
         # Even without saved sides: the contact-type bar must not stay
         # the one of the previous project.
         self._sync_contact_style_bar()
@@ -10150,12 +10564,20 @@ class MainWindow(QMainWindow):
             state.get("contact_function_witness"))
         self._kicad_installs = self._valid_kicad_installs(state.get("kicad_installs"))
         saved_deferral = state.get("step_deferral")
-        self._step_deferral = (
-            {"code": saved_deferral.get("code"),
-             "conflict": saved_deferral.get("conflict"),
-             "fields": [f for f in saved_deferral.get("fields") or () if isinstance(f, str)]}
-            if isinstance(saved_deferral, dict)
-            and saved_deferral.get("code") in self.STEP_DEFERRAL_CODES else None)
+        # Every key checked for its type (review 2026-11-16, R1-5): a hand-
+        # edited or damaged file with «fields»: 5 raised TypeError here, at
+        # every open of that project. A wrong key is dropped alone.
+        if isinstance(saved_deferral, dict) and saved_deferral.get("code") in self.STEP_DEFERRAL_CODES:
+            saved_fields = saved_deferral.get("fields")
+            saved_conflict = saved_deferral.get("conflict")
+            known_fields = {key for key, _label in self.BODY_QUOTE_LABELS}
+            self._step_deferral = {
+                "code": saved_deferral["code"],
+                "conflict": saved_conflict if isinstance(saved_conflict, str) else None,
+                "fields": [f for f in (saved_fields if isinstance(saved_fields, (list, tuple)) else ())
+                           if isinstance(f, str) and f in known_fields]}
+        else:
+            self._step_deferral = None
         # Unread pad positions of the last extraction (PADNULL H1): the
         # footprint stays refused after a reopen until a reading confirms them.
         self._unread_pads = self._valid_unread_pads(state.get("unread_pads"))
@@ -10230,6 +10652,10 @@ class MainWindow(QMainWindow):
         self._cast_height_declared = (
             height_declared if isinstance(height_declared, bool) else
             self.field_body_height.value() not in (PLACEHOLDER_BODY_MM[2], self.field_cast_pcb.value()))
+        # After the widgets: the legacy reading compares the restored values.
+        self._restore_cast_declared_sizes(state.get("cast_declared_sizes"))
+        self._restore_pin_map_conflict_record(state.get("pin_map_conflict"))
+        self._step_regen_pending_saved = state.get("step_regen_pending") is True
         known = state.get("board_size_known")
         # Projects saved before 26/09: the dimensions are known if the project
         # already has a footprint, that is if an analysis wrote them.
@@ -10369,6 +10795,11 @@ class MainWindow(QMainWindow):
             except RuntimeError:
                 pass  # already deleted by Qt (WA_DeleteOnClose)
         self._preview_render_serial = getattr(self, "_preview_render_serial", 0) + 1
+        # Its kicad-cli is killed rather than left to run on the closing
+        # project's preview folder (coordinator item from fixer C9).
+        self._stop_preview_render()
+        # The closing project is free for other windows again.
+        self._release_project_lock()
         self._restoring_project = True
         try:
             self._reset_project_runtime_state()
@@ -10378,6 +10809,8 @@ class MainWindow(QMainWindow):
             self._restore_saved_photo()
         finally:
             self._restoring_project = False
+        self._announce_pending_step_regen()
+        self._take_project_lock()
         # The component type selection and the prompt are restored by separate
         # widgets; the combo signals may be blocked during the
         # restore. Re-synchronising the generated block avoids, for example,
@@ -10545,6 +10978,179 @@ class MainWindow(QMainWindow):
         self._last_params = None
         self._invalidate_generated_mesh()
         self._set_review_buttons_enabled(False)
+        self._end_format_painter_silently()
+        # Both come back from the open project's file (`_apply_project_state`).
+        self._pin_map_conflict_record = None
+        self._step_regen_pending_saved = False
+        # The closing project's host pad overrides never reach a refresh of
+        # the next one (review I); `_restore_mounting_state` puts back the
+        # open project's, and the stale-override report starts afresh.
+        self.header_pad_overrides = {}
+        self._stale_pad_overrides_reported = ()
+
+    def _take_project_lock(self) -> None:
+        """@brief Mark the project just opened as open in this window (`services.project_lock`).
+
+        @note No lock without a project name or folder; a folder that refuses
+            the file opens unlocked (said nowhere: the lock is advisory).
+        """
+        from ..services import project_lock
+        folder = self._project_dir_or_none()
+        if folder is None or not folder.is_dir():
+            self._project_lock = None
+            return
+        self._project_lock = project_lock.acquire(folder)
+        timer = getattr(self, "_project_lock_timer", None)
+        if timer is None:
+            # The heartbeat also for a window that saves nothing for hours
+            # (review F, 4): well inside FOREIGN_LOCK_MAX_AGE_S.
+            timer = self._project_lock_timer = QTimer(self)
+            timer.setInterval(self.PROJECT_LOCK_HEARTBEAT_MS)
+            timer.timeout.connect(self._refresh_project_lock)
+        timer.start()
+
+    #: Interval of the project-lock heartbeat (10 minutes): far below the
+    #: 12-hour bound after which another host reads the lock as stale.
+    PROJECT_LOCK_HEARTBEAT_MS = 10 * 60 * 1000
+
+    def _refresh_project_lock(self) -> None:
+        """@brief Refresh this window's project lock (after a save, and on the heartbeat timer).
+
+        @note `ProjectLock.refresh` re-takes a lock file that disappeared
+            (another window opened the project with «Apri comunque» and
+            removed its own lock when it closed: review F, 10) and leaves
+            alone a lock another window holds now. Never raises.
+        """
+        lock = getattr(self, "_project_lock", None)
+        if lock is None:
+            return
+        try:
+            lock.refresh()
+        except Exception:  # noqa: BLE001 - an advisory lock never blocks the window
+            pass
+
+    def _rebind_project_lock(self, old_folder, new_folder) -> None:
+        """@brief After «Rinomina progetto»: the lock moved with the folder, so it is held under the new path.
+
+        @param old_folder The folder before the rename.
+        @param new_folder The folder after it.
+        @note Review F, 5: the lock object still named the old path, so it was
+            never released and other windows saw the renamed project «already
+            open» for good. The lock is re-taken in the new folder (rewriting
+            the file that moved there) and a copy left behind is released.
+        """
+        from ..services import project_lock
+        lock = getattr(self, "_project_lock", None)
+        if lock is not None and Path(lock.folder) != Path(new_folder):
+            try:
+                lock.release()
+            except Exception:  # noqa: BLE001 - the old folder may be gone
+                pass
+        try:
+            self._project_lock = (project_lock.acquire(new_folder)
+                                  if Path(new_folder).is_dir() else None)
+        except Exception:  # noqa: BLE001 - an advisory lock never blocks the window
+            self._project_lock = None
+
+    def _release_project_lock(self) -> None:
+        """@brief Free the lock of the project this window had open (switch, close, exit)."""
+        timer = getattr(self, "_project_lock_timer", None)
+        if timer is not None:
+            timer.stop()
+        lock = getattr(self, "_project_lock", None)
+        self._project_lock = None
+        if lock is not None:
+            try:
+                lock.release()
+            except Exception:  # noqa: BLE001 - freeing an advisory lock never blocks a close
+                pass
+
+    def _confirm_open_locked(self, folder) -> bool:
+        """@brief Before opening `folder`: when another KiCadGen window has it open, ask.
+
+        @param folder The project folder about to be opened.
+        @return True to go on (no live lock elsewhere, or «Apri comunque»);
+            False on «Annulla».
+        @note User decision 2026-11-16 (R12-4): several windows are allowed,
+            each project is locked by the window that opens it
+            (`project_lock`: pid, host and start time; a crashed window's
+            lock is stale and replaced without a question).
+        """
+        from ..services import project_lock
+        try:
+            info = project_lock.held_elsewhere(folder)
+        except Exception:  # noqa: BLE001 - an unreadable lock never blocks an open
+            info = None
+        if info is None:
+            return True
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle(self.i18n.text("Progetto già aperto in un'altra finestra di KiCadGen"))
+        # Host and pid come from a file anyone can write: never rich text (review F, 6).
+        box.setTextFormat(Qt.TextFormat.PlainText)
+        box.setText(self.i18n.text(
+            "Il progetto {name} risulta aperto in un'altra finestra di KiCadGen (computer {host}, "
+            "processo {pid}). Se lo apri anche qui, le due finestre possono sovrascrivere l'una le "
+            "modifiche dell'altra.").format(name=Path(folder).name, host=info.get("host") or "?",
+                                            pid=info.get("pid")))
+        open_button = box.addButton(self.i18n.text("Apri comunque"), QMessageBox.ButtonRole.AcceptRole)
+        cancel_button = box.addButton(self.i18n.text("Annulla"), QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(cancel_button)
+        box.setEscapeButton(cancel_button)
+        self._run_modal(box)
+        return box.clickedButton() is open_button
+
+    def _announce_pending_step_regen(self) -> None:
+        """@brief Say, on opening a project, that its STEP model predates pasted formats.
+
+        @note Final review follow-up (2026-11-16): a project left with
+            «Copia formato» on and pastes made kept its old STEP silently --
+            the switch ends the painter without regenerating
+            (`_end_format_painter_silently`). The pastes record
+            `step_regen_pending` in the project (`_save_format_paste`); the
+            flag is cleared by the next STEP model shown for the current
+            data (`_show_generated_mesh`). Said in the STEP tab's status
+            line and the log, as `_apply_photo_review` says it when there is
+            no solid to regenerate at once.
+        """
+        if not getattr(self, "_step_regen_pending_saved", False):
+            return
+        text = self.i18n.text(
+            "Componenti modificati con «Copia formato» dopo l'ultimo modello STEP: il modello "
+            "STEP su disco è vecchio; premi «Rigenera modello STEP» per aggiornarlo.")
+        self._set_3d_status(text, STATUS_WARNING)
+        self._append_log(text)
+
+    def _end_format_painter_silently(self) -> None:
+        """@brief Switch «Copia formato» (format painter) off without applying anything.
+
+        @note Review 2026-11-16, R3-1: the painter survived a project switch,
+            so the format copied in project A was pasted into project B, and
+            switching it off then regenerated B's STEP model with A's names in
+            the popup. The closing project's pastes are already in its saved
+            choices (`_save_format_paste`), so nothing is lost here: the mode
+            ends with its signals blocked (no regeneration, no toast) and the
+            copied source, the targets and the 3D outlines are forgotten.
+        """
+        button = getattr(self, "btn_format_painter_3d", None)
+        if button is not None and button.isChecked():
+            blocked = button.blockSignals(True)
+            try:
+                button.setChecked(False)
+            finally:
+                button.blockSignals(blocked)
+        preview = getattr(self, "preview_3d", None)
+        if preview is not None and hasattr(preview, "format_painter_active"):
+            preview.format_painter_active = False
+        clear_outlines = getattr(preview, "clear_format_outlines", None)
+        if callable(clear_outlines):
+            clear_outlines()
+        self._format_source, self._format_targets = None, []
+        self._format_source_row, self._format_target_rows = None, []
+        toast = getattr(self, "_format_toast", None)
+        if toast is not None:
+            # The popup names the closing project's bodies.
+            toast.hide()
 
     def _project_state_text(self) -> str | None:
         """Project state as comparable text, or None if it cannot be read.
@@ -10595,6 +11201,8 @@ class MainWindow(QMainWindow):
             self._append_log(tx("Impostazioni del progetto non salvate: {exc}", exc=exc))
             return False
         self._last_saved_project_state = text
+        # The heartbeat of this window's project lock (review F, 4).
+        self._refresh_project_lock()
         return True
 
     def _flush_project_config(self) -> None:
@@ -10916,6 +11524,9 @@ class MainWindow(QMainWindow):
             self._last_saved_project_state = text
         except (OSError, TypeError, ValueError) as exc:
             self._append_log(tx("Impostazioni del progetto non salvate: {exc}", exc=exc))
+            return
+        # The heartbeat of this window's project lock (`project_lock`).
+        self._refresh_project_lock()
 
     def _write_project_config_at(self, folder: Path) -> bool:
         """@brief Write the current settings into `folder`, the OPEN project's folder, now.
@@ -11113,6 +11724,11 @@ class MainWindow(QMainWindow):
         """
         if save_current and not self._can_leave_project():
             return
+        # Another KiCadGen window may have it open (user decision 2026-11-16).
+        # A caller that prepared the open asked already, before changing
+        # anything (`_open_recent_project`, review F, 3).
+        if prepared is None and not self._confirm_open_locked(folder):
+            return
         name = folder.name
         if prepared is None:
             prepared = self._prepare_project_open(folder)
@@ -11215,9 +11831,14 @@ class MainWindow(QMainWindow):
                 if docs_dir.is_dir() else 0
         except OSError:
             moved_documents = 0
+        old_folder = self._project_dir_or_none()
         applied = self._rename_project_folder(new_name)
         if applied != current:
             self.field_name.setText(applied)
+            # The lock moved with the folder: held under the new path (review F, 5).
+            new_folder = self._project_dir_or_none()
+            if new_folder is not None:
+                self._rebind_project_lock(old_folder, new_folder)
             # Only now the diary resolves under the new name: a line written
             # before this point would recreate the old folder (A2 above).
             self._remove_stale_previews(self._project_dir(), current)
@@ -11626,24 +12247,77 @@ class MainWindow(QMainWindow):
             self._append_log(tx("Risultato di un'analisi interrotta dall'utente: scartato, i campi "
                                 "restano come sono."))
             return
+        # A run whose detector review failed delivered an UNREVIEWED set (R1-2).
+        self._unmark_user_reviewed_presence(self.sender(), getattr(params, "components_3d", None))
         self._inventory_pause_pending = bool(getattr(params, "components_3d", None))
         # From here the fields may change (even if applying fails half way):
         # the run owns the output, see `_on_extract_finished`.
         self._extraction_applied_revision = self._analysis_revision
+        with self._extraction_apply_guard():
+            try:
+                # The questions asked while applying (contact style, geometry
+                # doubts, the user's pin names) run modal loops: the autosave must
+                # not write a half-applied project meanwhile (review pass 2, L5).
+                with self._autosave_suspended():
+                    self._apply_extracted_result(params)
+            except Exception as exc:
+                self._auto_generation_params = None
+                # Fields applied halfway: there is no consistent inventory to have
+                # reviewed, and stopping for a review on uncertain data would
+                # help nobody.
+                self._inventory_pause_pending = False
+                # A partial re-read being applied retries the re-read, never
+                # the full paid analysis (review 2026-11-16, R2-3).
+                self._on_extract_error(tx("Impossibile applicare i dati estratti: {exc}", exc=exc),
+                                       reread_field=getattr(self, "_reread_applying_field", None))
+
+    @staticmethod
+    def _unmark_user_reviewed_presence(worker, components) -> int:
+        """@brief Clear «reviewed by the user» on the bodies of a run whose detector review failed.
+
+        @param worker The worker that produced `components` (the signal
+            sender), or None for a direct call.
+        @param components Body dicts (mutated), or None.
+        @return How many bodies were corrected.
+        @note Review 2026-11-16, R1-2 (follow-up): when the review view
+            fails, the window delivers the unreviewed set
+            (`_on_review_requested` drops the weak proposals and marks the
+            worker `_review_unreviewed`), but `photo_inventory` counts any
+            delivered set as reviewed and stamps every body
+            `_presence_reviewed_by_user=True`, which the model matching
+            trusts (`kicad_models`). The stamp is corrected here, on the
+            result of that run only. A service-side channel (the review
+            callback returning «not reviewed») would make this unnecessary.
+        """
+        if worker is None or getattr(worker, "_review_unreviewed", False) is not True:
+            return 0
+        corrected = 0
+        for component in components or ():
+            if isinstance(component, dict) and component.get("_presence_reviewed_by_user") is True:
+                component["_presence_reviewed_by_user"] = False
+                corrected += 1
+        return corrected
+
+    @contextmanager
+    def _extraction_apply_guard(self):
+        """@brief Context in which an analysis result is being applied to the window.
+
+        @note The questions asked while applying run modal loops, and the
+            worker's queued `finished` can be delivered inside them: it is
+            postponed (`_extract_finish_pending`, read by `_on_extract_finished`)
+            and run once the apply is over, so the overlay, the tabs, the busy
+            state and the applied revision are not reset half way.
+        @note Re-entrant (review 2026-11-16, R2-4): a partial re-read holds
+            it for its whole apply -- also the height-only path, which never
+            reaches `_on_extracted` -- and `_on_extracted`, called inside it,
+            leaves the postponed `finished` to the outermost holder.
+        """
+        if self._applying_extraction:
+            yield
+            return
         self._applying_extraction = True
         try:
-            # The questions asked while applying (contact style, geometry
-            # doubts, the user's pin names) run modal loops: the autosave must
-            # not write a half-applied project meanwhile (review pass 2, L5).
-            with self._autosave_suspended():
-                self._apply_extracted_result(params)
-        except Exception as exc:
-            self._auto_generation_params = None
-            # Fields applied halfway: there is no consistent inventory to have
-            # reviewed, and stopping for a review on uncertain data would
-            # help nobody.
-            self._inventory_pause_pending = False
-            self._on_extract_error(tx("Impossibile applicare i dati estratti: {exc}", exc=exc))
+            yield
         finally:
             self._applying_extraction = False
             if self._extract_finish_pending:
@@ -12052,6 +12726,9 @@ class MainWindow(QMainWindow):
             return params, False
         from ..services import datasheet_extractor
         answers, held_back, open_questions = {}, False, []
+        # The project's answers before this pass: restored when the pass's
+        # answers cannot be applied (review 2026-11-16, R2-7).
+        answers_before_pass = dict(self._extraction_answers)
         # Keys whose question the user answered in this pass: asked once.
         asked_now: set = set()
         queue = list(questions)
@@ -12125,8 +12802,25 @@ class MainWindow(QMainWindow):
         kept_blocked = any(str(key).startswith("pad_layout:") and self._is_layout_block_answer(value)
                            for key, value in answers.items())
         if answers:
-            params = self._apply_extraction_answers(
-                params, answers, saved=self._saved_answers_for_deferred(params))
+            try:
+                params = self._apply_extraction_answers(
+                    params, answers, saved=self._saved_answers_for_deferred(params),
+                    raise_on_failure=True)
+            except Exception as exc:  # noqa: BLE001 - the pass is rolled back, never half-applied
+                # Review 2026-11-16, R2-7: the answers were already remembered
+                # while the extraction kept the rejected layout, so the
+                # generation that followed wrote what the user had just
+                # refused. Nothing of the pass is committed: the answers go
+                # back to what the project held, every question of the pass
+                # stays open and the generation is held back, as when
+                # `_resolve_one_footprint_question` cannot apply an answer.
+                self._append_log(tx("ATTENZIONE: risposte non applicate all'estrazione: {exc}",
+                                    exc=exc))
+                self._extraction_answers = answers_before_pass
+                # In the extraction's order, one entry per question.
+                self._extraction_questions = [q for q in questions
+                                              if q in open_questions or q["key"] in answers]
+                return params, True
             # Questions an answer of this pass opened (the terminal view,
             # deferred by the extractor until a pad layout is chosen: VE12H,
             # 2026-11-14): asked now, one left open holds the generation back;
@@ -12248,7 +12942,8 @@ class MainWindow(QMainWindow):
         known = getattr(datasheet_extractor, "CONTACT_WITNESSES", ())
         return value if isinstance(value, str) and value in known else None
 
-    def _apply_extraction_answers(self, params, answers: dict, saved: dict | None = None):
+    def _apply_extraction_answers(self, params, answers: dict, saved: dict | None = None,
+                                  raise_on_failure: bool = False):
         """@brief Apply `answers` to `params` locally, without a paid call.
 
         @param params The extraction.
@@ -12257,6 +12952,12 @@ class MainWindow(QMainWindow):
             (`_saved_answers_for_deferred`), passed to the extractor along with
             `answers` and nothing else: the window's own fallback and its
             «not applicable» log read `answers` only.
+        @param raise_on_failure True lets an exception of the extractor's
+            `apply_answers` reach the caller, which rolls its answers back
+            (`_review_extraction_questions`, review 2026-11-16, R2-7); False
+            logs it and returns `params` as read.
+        @throws Exception Whatever `apply_answers` raised, only with
+            `raise_on_failure`.
         @return The extraction with the answers applied: the extractor's
             `apply_answers` when the installed service has it; otherwise the
             one answer the window can apply alone, a body height (the value
@@ -12271,6 +12972,8 @@ class MainWindow(QMainWindow):
             try:
                 applied = apply(params, {**(saved or {}), **answers})
             except Exception as exc:  # noqa: BLE001 - the result is still usable as read
+                if raise_on_failure:
+                    raise
                 self._append_log(tx("ATTENZIONE: risposte non applicate all'estrazione: {exc}", exc=exc))
                 return params
             if applied is not None:
@@ -12741,6 +13444,18 @@ class MainWindow(QMainWindow):
                 reason = notes[-1] if notes else ""
             self._append_log(self._footprint_question_text(question, 3, reason=reason))
             return False
+        if (question.get("field") in self.SIDE_NUMBERING_FIELDS + ("contact_style",)
+                and self._sides_paired_with_answer(updated) is None):
+            # Review 2026-11-16, R2-1: the table's runs on an edge no longer
+            # match the analysis's, so no row can be told which answer side
+            # it stands for. Nothing is committed: the question stays open.
+            self._append_log(tx(
+                "Risposta non applicata: sul lato {edges} la tabella ha un numero di serie di "
+                "contatti diverso da quello dell'analisi, quindi non si sa a quale serie va la "
+                "risposta. La domanda resta aperta: ripeti l'analisi o riporta i lati della "
+                "tabella come li ha letti l'analisi.",
+                edges=", ".join(str(edge) for edge in self._unpaired_side_edges(updated))))
+            return False
         # The chosen layout must build a package BEFORE anything else is
         # asked (review 2026-11-14, L9): a side answered for a layout that
         # then fails would stay remembered for nothing.
@@ -13049,6 +13764,47 @@ class MainWindow(QMainWindow):
                                   "i documenti.")
         return ""
 
+    def _cad_generation_running(self) -> bool:
+        """@brief True while a footprint/STEP generation or a STEP regeneration runs."""
+        return bool(any(worker is not None and worker.isRunning()
+                        for worker in (getattr(self, "_worker", None),
+                                       getattr(self, "_cad3d_worker", None)))
+                    or getattr(self, "_automatic_generation_active", False))
+
+    def _refresh_retry_unmeasurable_action(self) -> None:
+        """@brief «Riprova i modelli KiCad non misurabili» is off while a generation runs (menu about to open)."""
+        action = getattr(self, "action_retry_unmeasurable", None)
+        if action is None:
+            return
+        busy = self._cad_generation_running()
+        action.setEnabled(not busy)
+        action.setToolTip(self.i18n.text("Operazione in corso: attendi la fine.") if busy else "")
+
+    def _retry_unmeasurable_models(self) -> None:
+        """@brief Forget the stored «not measurable» verdicts of KiCad models, so they are measured again.
+
+        @note Calls `kicad_models.retry_unmeasurable_models` (clears the
+            session flag of a measuring child that did not start and deletes
+            the stalled / crashed / unreadable verdicts; measured sizes stay).
+            Refused while a generation runs: its measuring would race the
+            files removed. A failure is a warning, never an exception out of
+            the menu slot.
+        """
+        if self._cad_generation_running():
+            self._append_log(self.i18n.text("Operazione in corso: attendi la fine."))
+            return
+        try:
+            from ..cad3d.kicad_models import retry_unmeasurable_models
+            removed = retry_unmeasurable_models()
+        except Exception as exc:  # noqa: BLE001 - a menu slot must not let it escape
+            QMessageBox.warning(self, self.i18n.text("Riprova i modelli KiCad non misurabili"),
+                                str(exc))
+            return
+        text = tx("Verdetti dimenticati ({count}): i modelli KiCad verranno rimisurati alla "
+                  "prossima generazione.", count=removed)
+        self._append_log(text)
+        self.statusBar().showMessage(text, 8000)
+
     def _refresh_reread_actions(self) -> None:
         """@brief Enable the re-read entries only when a re-read can start (menu about to open)."""
         actions = {"body_height_mm": getattr(self, "action_reread_height", None),
@@ -13129,8 +13885,11 @@ class MainWindow(QMainWindow):
                 # the pad and body re-reads use their step's model.
                 **accepted_kwargs(worker_class.__init__, step_models=self._step_models()))
             self._reread_worker = worker
+            # The retry of a failed re-read repeats this re-read (R2-3).
+            worker._reread_field = field
+            self._attach_usage_scope(worker)
             worker.done.connect(self._on_reread_done)
-            worker.error.connect(self._on_extract_error)
+            worker.error.connect(self._on_reread_error)
             worker.progress.connect(self._on_ai_progress)
             worker.phase.connect(self._on_phase)
             worker.finished.connect(self._on_extract_finished)
@@ -13143,10 +13902,11 @@ class MainWindow(QMainWindow):
             self._track_background_work(worker)
         except Exception as exc:  # noqa: BLE001 - any failure brings the UI back to rest
             worker = getattr(self, "_reread_worker", None)
-            if worker is None or not worker.isRunning():
+            # A worker that did start is abandoned (R1-7).
+            if not self._abandon_if_running(worker):
                 self._reread_worker = None
             self._on_extract_finished()
-            self._on_extract_error(str(exc))
+            self._on_extract_error(str(exc), reread_field=field)
 
     def _on_reread_done(self, params) -> None:
         """@brief A partial re-read returned: rejoin the path of a normal extraction.
@@ -13169,6 +13929,29 @@ class MainWindow(QMainWindow):
             self._append_log(tx("Risultato di una rilettura interrotta dall'utente: scartato, i "
                                 "campi restano come sono."))
             return
+        partial = getattr(params, "partial_reread", None)
+        field = (partial.get("field") if isinstance(partial, dict) else None) or getattr(
+            self.sender(), "_reread_field", None)
+        # Review 2026-11-16, R2-4 and R2-5: the whole apply is guarded like
+        # `_on_extracted` -- the queued `finished` waits for it, and an
+        # exception becomes the error path (whose «Riprova» repeats this
+        # re-read) instead of escaping the slot and closing the program.
+        with self._extraction_apply_guard():
+            try:
+                self._apply_reread_result(params)
+            except Exception as exc:  # noqa: BLE001 - a Qt slot must not let it escape
+                self._auto_generation_params = None
+                self._inventory_pause_pending = False
+                self._on_extract_error(tx("Impossibile applicare i dati estratti: {exc}", exc=exc),
+                                       reread_field=field)
+
+    def _apply_reread_result(self, params) -> None:
+        """@brief Body of `_on_reread_done`, run inside the extraction apply guard.
+
+        @param params The partial re-read result (see `_on_reread_done`).
+        @throws Exception Whatever the merge or the apply raised; the caller
+            routes it to the error path.
+        """
         if getattr(params, "raw_main", None) is None and hasattr(params, "raw_main"):
             params.raw_main = deepcopy(self._main_answer_for_reread())
         partial = getattr(params, "partial_reread", None)
@@ -13471,12 +14254,17 @@ class MainWindow(QMainWindow):
         """@brief The body quote keys no document declared, for the current component.
 
         @return Keys of BODY_QUOTE_LABELS; empty when every quote is there,
-            for a castellated module (its body is the module PCB) and while
-            the window is still being built.
+            for a castellated module whose board size is known (its body is
+            the module PCB) and while the window is still being built.
+        @note A castellated module whose board size is unknown misses its
+            length and width (review 2026-11-16, R2-2): its height comes from
+            the PCB thickness and the components, never from these quotes.
         """
         if not hasattr(self, "package_geometry") or not hasattr(self, "group_3d"):
             return []
         if self._is_castellated():
+            if self._castellated_board_size_block():
+                return ["body_length_mm", "body_width_mm"]
             return []
         package = self.package_geometry
         if package is not None:
@@ -13862,12 +14650,23 @@ class MainWindow(QMainWindow):
         self._invalidate_generated_mesh()
         self._photo_png = getattr(params, "photo_png", None)
         # The board dimensions come from the analysis: from here on they are known.
+        is_castellated = getattr(params, "is_castellated", None)
         if _positive_frame(getattr(params, "body_length_mm", None),
                            getattr(params, "body_width_mm", None)) is not None:
             self._board_size_known = True
+        elif (getattr(self, "_board_size_known", False) and callable(is_castellated)
+              and is_castellated()):
+            # User decision 2026-11-16 (R2-2): a module analysis that read no
+            # board size keeps the size an earlier analysis (or the user)
+            # gave this project; said once, so it is never taken for a
+            # reading of this analysis.
+            self._append_log(tx(
+                "Questa analisi non ha letto le quote della scheda: restano {length} x {width} mm, "
+                "date da un'analisi precedente o dall'utente, non lette ora.",
+                length=f"{self.field_cast_body_length.value():g}",
+                width=f"{self.field_cast_body_width.value():g}"))
         # Same criterion with which the extraction chooses the fields to fill (further
         # below): here the fields have not been applied yet.
-        is_castellated = getattr(params, "is_castellated", None)
         self._photo_body_fields = ("cast" if callable(is_castellated) and is_castellated()
                                    else "matrix")
         self._photo_overlay_png = params.photo_overlay_png
@@ -14476,6 +15275,18 @@ class MainWindow(QMainWindow):
         to the reference land pattern at every extraction and apply only to
         the sides without their own measure.
         """
+        # The switch to castellated is part of the same batch as the rebuild
+        # below (review I): `_on_castellated_toggled` asks its redraw through
+        # `_on_sides_changed`, so its placeholder sides never get a refresh of
+        # their own; the batch ends with one refresh on the final sides.
+        with self._sides_batch():
+            self._apply_extracted_castellated_body(params)
+
+    def _apply_extracted_castellated_body(self, params: ExtractedParams) -> None:
+        """@brief Body of `_apply_extracted_castellated`, run inside one sides batch.
+
+        @param params See `_apply_extracted_castellated`.
+        """
         self.group_castellated.setChecked(True)
         # Distance between the rows declared by the extraction: it is the dimension
         # from which the generator derives where the through holes are relative to
@@ -14489,46 +15300,53 @@ class MainWindow(QMainWindow):
             float(spacing) if isinstance(spacing, (int, float)) and not isinstance(spacing, bool)
             and math.isfinite(float(spacing)) and float(spacing) > 0 else None)
 
-        if params.body_length_mm:
-            self.field_cast_body_length.setValue(params.body_length_mm)
-        if params.body_width_mm:
-            self.field_cast_body_width.setValue(params.body_width_mm)
-        # Like the distance between the rows: a measurement of another board (or
-        # the one that a project saved before 28/09 had copied there from a
-        # single side) does not hold for this one. The reference reaches the
-        # generator as an estimate (see `_current_castellated_params`).
-        self.field_cast_pad_length.setValue(_reference_pad("pad_length"))
-        self.field_cast_pad_width.setValue(_reference_pad("pad_width"))
+        # The fields and the sides are rebuilt as ONE batch (2026-11-16, real
+        # run): one redraw at the end, so the pad overrides are judged on the
+        # final sides, never on a table half rebuilt (`_sides_batch`).
+        with self._sides_batch():
+            if params.body_length_mm:
+                self.field_cast_body_length.setValue(params.body_length_mm)
+            if params.body_width_mm:
+                self.field_cast_body_width.setValue(params.body_width_mm)
+            # Like the distance between the rows: a measurement of another board (or
+            # the one that a project saved before 28/09 had copied there from a
+            # single side) does not hold for this one. The reference reaches the
+            # generator as an estimate (see `_current_castellated_params`).
+            self.field_cast_pad_length.setValue(_reference_pad("pad_length"))
+            self.field_cast_pad_width.setValue(_reference_pad("pad_width"))
+            # The reference is an estimate: these two are no longer declared (R2-8).
+            self._cast_declared_sizes = set(getattr(self, "_cast_declared_sizes", ())) - {
+                "field_cast_pad_length", "field_cast_pad_width"}
 
-        self._sides.clear()
-        if not getattr(self, "_relaunch_base_synthesized", False):
-            # A base rebuilt from the fields carries no labels: it must not
-            # wipe the ones of the analysis it re-runs.
-            self._document_sides = self._canonical_document_sides(params.castellated_sides)
-        names = []
-        pinout = []
-        sources = getattr(params, "value_sources", None) or {}
-        for side in params.castellated_sides or ():
-            side = dict(side)
-            # Hole diameters (26/09) and side pads (28/09): declared
-            # only if read, derived or measured; estimated or without provenance
-            # they stay estimates. Without the provenance entry (sides coming back from
-            # `_serialised_sides`, which already carry it in the side, e.g. the
-            # re-run after a restart) the side's one applies; if that is missing
-            # too, the measurement stays an estimate. Before, the holes had no
-            # fallback: a declared hole went back to an estimate and was reduced
-            # (adversarial check of 2026-10-02, C-M3).
-            for field in ("half_hole_diameter_mm", "through_hole_drill_mm",
-                          "pad_length_mm", "pad_width_mm"):
-                key = f"castellated_sides.{side.get('edge')}.{field}"
-                flag = field.replace("_mm", "_declared")
-                side[flag] = (sources[key] in DECLARED_SOURCES if key in sources
-                              else side.get(flag) is True)
-            self._add_side_row(side)
-            label = edge_label(side["edge"])
-            if side.get("pin_names"):
-                names.append(f"{label}: {', '.join(side['pin_names'])}")
-                pinout.extend(_side_pinout(side))
+            self._sides.clear()
+            if not getattr(self, "_relaunch_base_synthesized", False):
+                # A base rebuilt from the fields carries no labels: it must not
+                # wipe the ones of the analysis it re-runs.
+                self._document_sides = self._canonical_document_sides(params.castellated_sides)
+            names = []
+            pinout = []
+            sources = getattr(params, "value_sources", None) or {}
+            for side in params.castellated_sides or ():
+                side = dict(side)
+                # Hole diameters (26/09) and side pads (28/09): declared
+                # only if read, derived or measured; estimated or without provenance
+                # they stay estimates. Without the provenance entry (sides coming back from
+                # `_serialised_sides`, which already carry it in the side, e.g. the
+                # re-run after a restart) the side's one applies; if that is missing
+                # too, the measurement stays an estimate. Before, the holes had no
+                # fallback: a declared hole went back to an estimate and was reduced
+                # (adversarial check of 2026-10-02, C-M3).
+                for field in ("half_hole_diameter_mm", "through_hole_drill_mm",
+                              "pad_length_mm", "pad_width_mm"):
+                    key = f"castellated_sides.{side.get('edge')}.{field}"
+                    flag = field.replace("_mm", "_declared")
+                    side[flag] = (sources[key] in DECLARED_SOURCES if key in sources
+                                  else side.get(flag) is True)
+                self._add_side_row(side)
+                label = edge_label(side["edge"])
+                if side.get("pin_names"):
+                    names.append(f"{label}: {', '.join(side['pin_names'])}")
+                    pinout.extend(_side_pinout(side))
 
         # Pinout table: if the model has not filled it separately, it is
         # derived from the silkscreen labels next to the contacts of every side.
@@ -14581,10 +15399,24 @@ class MainWindow(QMainWindow):
         for line in names:
             self._append_log(tx("Sigle serigrafate {line}", line=line))
 
-    def _on_extract_error(self, message: str) -> None:
+    def _on_reread_error(self, message: str) -> None:
+        """@brief Error slot of a partial re-read worker: the error path with the re-read's retry.
+
+        @param message Error text, as it arrives from the worker.
+        @note Review 2026-11-16, R2-3: the re-read shared `_on_extract_error`,
+            whose «Riprova» started the FULL paid analysis. The field is read
+            from the worker (`_reread_field`, stamped by `_start_reread`).
+        """
+        self._on_extract_error(message, reread_field=getattr(self.sender(), "_reread_field", None))
+
+    def _on_extract_error(self, message: str, reread_field: str | None = None) -> None:
         """@brief Bring the window back to rest and say why the analysis failed.
 
         @param message Error text, as it arrives from the worker.
+        @param reread_field The field of the partial re-read that failed
+            (REREAD_FIELDS), or None for an analysis: «Riprova» then repeats
+            that re-read only (`_start_reread`), one paid reading, instead
+            of the full analysis (review 2026-11-16, R2-3).
         @note The error of a run abandoned with «Interrompi» opens no window:
             the user has already decided to let it go, and a failure warning
             about what they interrupted themselves would be a reproach for
@@ -14604,7 +15436,11 @@ class MainWindow(QMainWindow):
         if self._ask_extraction_retry(message):
             # Re-entered from the event loop, once the window is at rest:
             # the same documents, settings and recorded answers.
-            QTimer.singleShot(0, self._extract_with_ai)
+            if reread_field in self.REREAD_FIELDS:
+                # `_start_reread` rechecks every condition of a re-read.
+                QTimer.singleShot(0, lambda: self._start_reread(reread_field))
+            else:
+                QTimer.singleShot(0, self._extract_with_ai)
 
     @_waits_for_user
     def _ask_extraction_retry(self, message: str) -> bool:
@@ -14675,7 +15511,8 @@ class MainWindow(QMainWindow):
         self.field_cast_pad_length = BoundedValue(3.6, 0.0, MAX_LENGTH_MM)
         self.field_cast_pad_width = BoundedValue(1.8, 0.0, MAX_LENGTH_MM)
         #: Overhang of the pad beyond the edge (inspectable meniscus).
-        self.field_cast_overhang = BoundedValue(1.4, 0.0, 5.0)
+        # The generator's reference (REFERENCE_PAD_OVERHANG_MM), one source (review I).
+        self.field_cast_overhang = BoundedValue(_reference_pad("pad_overhang"), 0.0, 5.0)
         #: Diameter of the plated half-hole: the half-holes are cut in the 3D.
         self.field_cast_hole = BoundedValue(1.7, 0.0, 10.0)
         #: Board thickness; without a dimension, the declared standard (see
@@ -14736,13 +15573,17 @@ class MainWindow(QMainWindow):
             # an extraction replaces them all (and asks for the style the photo
             # does not show). The style here is the one of the 3D tab selector.
             style = default_contact_style()
-            self._add_side_row({"edge": "left", "count": 3, "pitch_mm": 2.54, "first_pin": 1,
-                                "contact_style": style})
-            self._add_side_row({"edge": "right", "count": 3, "pitch_mm": 2.54, "first_pin": 4,
-                                "contact_style": style})
+            # One change, one refresh (`_sides_batch`).
+            with self._sides_batch():
+                self._add_side_row({"edge": "left", "count": 3, "pitch_mm": 2.54, "first_pin": 1,
+                                    "contact_style": style})
+                self._add_side_row({"edge": "right", "count": 3, "pitch_mm": 2.54, "first_pin": 4,
+                                    "contact_style": style})
         self._sync_3d_fields_for_castellated(checked)
-        self._sync_contact_style_bar()
-        self._draw_preview()
+        # Redraw and contact-style bar through `_on_sides_changed`, so a batch
+        # that switches castellated on (an analysis) defers them to its one
+        # refresh: the placeholder pins are never judged (final review, 3).
+        self._on_sides_changed()
 
     def _sync_3d_fields_for_castellated(self, castellated: bool) -> None:
         """In castellated modules the 3D body comes from the module, not from the 3D fields.
@@ -14833,8 +15674,44 @@ class MainWindow(QMainWindow):
                 combo.setItemText(index, self.i18n.text(source))
 
     def _on_sides_changed(self) -> None:
+        """@brief Redraw what follows the castellated sides; postponed while a batch rebuilds them.
+
+        @note Inside `_sides_batch` the call is only recorded, and made once
+            when the batch ends.
+        """
+        if getattr(self, "_sides_batch_depth", 0) > 0:
+            self._sides_batch_pending = True
+            return
         self._draw_preview()
         self._sync_contact_style_bar()
+
+    @contextmanager
+    def _sides_batch(self):
+        """@brief Rebuild the sides table (and its fields) as one change: one refresh at the end.
+
+        @note Real run of 2026-11-16: the sides were added one row at a
+            time, each row redrawing the preview, and a host pad override on
+            a pin of a side not added yet was reported «non applicata» (pin
+            gone) although it applied once every side was in. Inside the
+            batch `_on_sides_changed` is postponed; the batch ends with ONE
+            refresh, so the overrides are judged on the final sides only (and
+            `_applicable_pad_overrides` reports once per real change).
+            Re-entrant. When the rebuild raises, the deferred refresh is
+            skipped (final review, 6): a second error in that redraw would
+            replace the original traceback; the caller's error path decides.
+        """
+        self._sides_batch_depth = getattr(self, "_sides_batch_depth", 0) + 1
+        try:
+            yield
+        except BaseException:
+            self._sides_batch_depth -= 1
+            if self._sides_batch_depth == 0:
+                self._sides_batch_pending = False
+            raise
+        self._sides_batch_depth -= 1
+        if self._sides_batch_depth == 0 and getattr(self, "_sides_batch_pending", False):
+            self._sides_batch_pending = False
+            self._on_sides_changed()
 
     def _on_side_edited(self, *_args) -> None:
         """@brief A user edit of the sides table: refresh views and drop the old 3D.
@@ -15038,7 +15915,17 @@ class MainWindow(QMainWindow):
         @note The photo bodies are the costly part (one crop descriptor per
             body); the KiCad gate runs on every metadata keystroke and needs
             the footprint only (perf audit 2026-10-17).
+        @throws ValueError With `_castellated_board_size_block()` while the
+            board size is unknown (review 2026-11-16, R2-2): the contacts of a
+            module sit on its edges, so the outline fields -- the 42.8 x 15.2 mm
+            placeholder of a new window -- would place every pad. This is the
+            one place a module is built from the fields, so every footprint
+            write, the previews, the symbol pad list and the stale-file check
+            refuse with the same reason, as `_current_params` does for unread pads.
         """
+        block = self._castellated_board_size_block()
+        if block:
+            raise ValueError(block)
         return CastellatedModuleParams(
             name=self.field_name.text().strip(),
             description=self.field_description.text().strip(),
@@ -15047,19 +15934,20 @@ class MainWindow(QMainWindow):
             body_length=self.field_cast_body_length.value(),
             body_width=self.field_cast_body_width.value(),
             # Default of the sides without their own measurement: the reference land
-            # pattern arrives as an estimate (None -> AssumedSize), a different value
-            # (saved project, user) as a declared measurement.
-            pad_length=_declared_size(self.field_cast_pad_length.value(),
-                                      _reference_pad("pad_length")),
-            pad_width=_declared_size(self.field_cast_pad_width.value(),
-                                     _reference_pad("pad_width")),
-            pad_overhang=self.field_cast_overhang.value(),
-            # A reference value is not a measurement: passed as None the
-            # generator uses it as an estimate and, if it does not fit in a side's pitch,
-            # reduces it and writes it in the notes instead of rejecting it (26/09).
-            hole_diameter=_declared_size(self.field_cast_hole.value(), 1.7),
-            thru_hole_drill=_declared_size(self.field_cast_thru_drill.value(), 1.0),
-            thru_pad_diameter=_declared_size(self.field_cast_thru_pad.value(), 1.7),
+            # pattern arrives as an estimate (None -> AssumedSize), a DECLARED
+            # value (`_cast_declared_sizes`) as a measurement.
+            pad_length=self._declared_cast_size("field_cast_pad_length"),
+            pad_width=self._declared_cast_size("field_cast_pad_width"),
+            # The overhang too (C4, 2026-11-16): an untouched default is the
+            # generator's estimate, a declared value a measure.
+            pad_overhang=self._declared_cast_size("field_cast_overhang"),
+            # An undeclared value is not a measurement: passed as None the
+            # generator uses its reference as an estimate and, if it does not fit in
+            # a side's pitch, reduces it and writes it in the notes instead of
+            # rejecting it (26/09).
+            hole_diameter=self._declared_cast_size("field_cast_hole"),
+            thru_hole_drill=self._declared_cast_size("field_cast_thru_drill"),
+            thru_pad_diameter=self._declared_cast_size("field_cast_thru_pad"),
             thru_hole_offset=self.field_cast_thru_offset.value(),
             hole_inset=(self.field_cast_hole_inset.value() or None),
             pcb_thickness=self.field_cast_pcb.value(),
@@ -15072,6 +15960,222 @@ class MainWindow(QMainWindow):
             sides=self._sides_from_table(),
             **self._declared_row_spacing_kwargs(),
         )
+
+    #: Module-wide castellated size fields and the generator reference each
+    #: starts from (mm). The references only serve the legacy reading of a
+    #: project saved before `cast_declared_sizes` (`_restore_cast_declared_sizes`).
+    CAST_MODULE_SIZE_REFERENCES = {
+        "field_cast_pad_length": _reference_pad("pad_length"),
+        "field_cast_pad_width": _reference_pad("pad_width"),
+        "field_cast_overhang": _reference_pad("pad_overhang"),
+        "field_cast_hole": 1.7,
+        "field_cast_thru_drill": 1.0,
+        "field_cast_thru_pad": 1.7,
+    }
+
+    def _declared_cast_size(self, name: str) -> float | None:
+        """@brief The value of a module-wide castellated size field when it is declared, else None.
+
+        @param name A key of CAST_MODULE_SIZE_REFERENCES.
+        @return The field value in mm when the field is in
+            `_cast_declared_sizes`; None (the generator's estimate) otherwise,
+            whatever number the field holds (review 2026-11-16, R2-8).
+        """
+        if name not in getattr(self, "_cast_declared_sizes", ()):
+            return None
+        return float(getattr(self, name).value())
+
+    def _restore_cast_declared_sizes(self, saved) -> None:
+        """@brief Restore which module-wide castellated sizes are declared, from a project state.
+
+        @param saved The state's `cast_declared_sizes`: a list of field names,
+            or absent in a project saved before the flag.
+        @note Projects saved before the flag: DECLARED HEURISTIC, the old
+            rule -- a value other than the generator reference counts as
+            declared. It misreads a measure equal to the reference (that is
+            the defect the flag removes); saving the project once writes the
+            flag and makes this branch unused.
+        """
+        if isinstance(saved, (list, tuple)):
+            self._cast_declared_sizes = {name for name in saved
+                                         if name in self.CAST_MODULE_SIZE_REFERENCES}
+            return
+        self._cast_declared_sizes = {
+            name for name, reference in self.CAST_MODULE_SIZE_REFERENCES.items()
+            if abs(float(getattr(self, name).value()) - reference) >= 1e-9}
+
+    #: Italian source of the log line when an unattended write is held back
+    #: by a contact conflict nobody verified (generality audit S1).
+    PIN_MAP_CONFLICT_HELD_TEXT = (
+        "Footprint non scritto: l'analisi ha lasciato un conflitto sui contatti non ancora "
+        "verificato; «Rigenera footprint» lo mostra e chiede di confermarlo prima di scrivere.")
+
+    def _unverified_pin_map_conflict(self) -> str:
+        """@brief The contact conflict of this session's analysis the user has not verified, '' when none.
+
+        @return `pin_map_conflict` of the last extraction, stripped, unless
+            the user already confirmed it for that very extraction
+            (`_confirm_pin_map_conflict`) or the unread-pad block covers it
+            (`_unread_pads_block`, which refuses with its own remedy).
+        @note Generality audit S1 (2026-11-16): the conflict was checked only
+            by the automatic pipeline (`_validate_automatic_input`); a manual
+            «Genera» / «Rigenera footprint» wrote the contradicted values --
+            e.g. the side counts a failed castellated recount left in the
+            fields -- with nothing saying they were unverified. The text is
+            read as an opaque sentence (it may join several causes), never parsed.
+        @note Read from `_pin_map_conflict_record` (follow-up of the final
+            review, 2026-11-16): the record is brought up to date from the
+            extraction of this session when there is one
+            (`_sync_pin_map_conflict_record`), and after a reopen it comes
+            back from the project file (`pin_map_conflict`), so the question
+            is not lost with the extraction object.
+        """
+        if self._unread_pads_block():
+            return ""
+        extracted = getattr(self, "_last_extracted", None)
+        if extracted is not None:
+            self._sync_pin_map_conflict_record(extracted)
+        record = getattr(self, "_pin_map_conflict_record", None)
+        if not isinstance(record, dict) or record.get("confirmed") is True:
+            return ""
+        return str(record.get("text") or "").strip()
+
+    def _saved_pin_map_conflict(self):
+        """@brief The contact-conflict record as the project file keeps it, or None.
+
+        @return {"text", "confirmed"} of the record in force (brought up to
+            date from this session's extraction first), None without one.
+        """
+        extracted = getattr(self, "_last_extracted", None)
+        if extracted is not None:
+            self._sync_pin_map_conflict_record(extracted)
+        record = getattr(self, "_pin_map_conflict_record", None)
+        if not isinstance(record, dict):
+            return None
+        return {"text": record.get("text"), "confirmed": record.get("confirmed") is True}
+
+    def _sync_pin_map_conflict_record(self, extracted) -> None:
+        """@brief Bring the contact-conflict record in line with an extraction of this session.
+
+        @param extracted The extraction in force (`_last_extracted`).
+        @note The record is {"text", "confirmed", "analysis"}. The user's
+            confirmation is kept only for the SAME text of the SAME analysis
+            (`_analysis_serial`, raised by every «Estrai parametri con AI»):
+            an answer that lifts one cause changes the text and asks again,
+            a new analysis that repeats the text asks again too. No conflict
+            clears the record. Compared by text and analysis, never by the
+            extraction object, which an answer replaces
+            (`_resolve_one_footprint_question`).
+        """
+        conflict = str(getattr(extracted, "pin_map_conflict", None) or "").strip()
+        serial = getattr(self, "_analysis_serial", 0)
+        if not conflict:
+            self._pin_map_conflict_record = None
+            return
+        record = getattr(self, "_pin_map_conflict_record", None)
+        if (isinstance(record, dict) and record.get("text") == conflict
+                and record.get("analysis") == serial):
+            return
+        self._pin_map_conflict_record = {"text": conflict, "confirmed": False, "analysis": serial}
+
+    def _restore_pin_map_conflict_record(self, saved) -> None:
+        """@brief Put back the contact-conflict record of a reopened project.
+
+        @param saved The state's `pin_map_conflict`: {"text": str,
+            "confirmed": bool}, or anything else (none, damaged) for no record.
+        @note Restored as belonging to the current analysis serial: the next
+            «Estrai parametri con AI» raises the serial and replaces it.
+        """
+        if (isinstance(saved, dict) and isinstance(saved.get("text"), str)
+                and saved["text"].strip()):
+            self._pin_map_conflict_record = {
+                "text": saved["text"].strip(), "confirmed": saved.get("confirmed") is True,
+                "analysis": getattr(self, "_analysis_serial", 0)}
+        else:
+            self._pin_map_conflict_record = None
+
+    def _confirm_pin_map_conflict(self) -> bool:
+        """@brief Before a footprint write the user started: show the analysis's contact conflict and ask.
+
+        @return True when there is no unverified conflict, or the user says
+            the contacts are checked and corrected; False on «No» (nothing
+            is written, the log says so).
+        @note The precedent followed is `_confirm_pads_verified` («Le posizioni
+            di tutti i pad sono ora verificate sul disegno?»): a block whose
+            remedy is a correction in the fields is lifted by the user's
+            confirmation, not by the program. A plain refusal, as for unread
+            pads, would remove the documented remedy of a grid numbering or a
+            side count in conflict -- correct the fields, then regenerate.
+            The answer holds for that conflict text of that analysis only
+            (`_sync_pin_map_conflict_record`), is saved with the project and
+            is logged with the conflict it accepts.
+        """
+        conflict = self._unverified_pin_map_conflict()
+        if not conflict:
+            return True
+        answer = QMessageBox.question(
+            self, self.i18n.text("Contatti non verificati"),
+            self.i18n.text(
+                "L'analisi ha lasciato un conflitto sui contatti:\n\n{conflict}\n\nHai controllato "
+                "e corretto i contatti nei campi (lati, conteggi, numerazione)? «Sì» scrive il "
+                "footprint con i valori attuali; «No» non scrive nulla.").format(conflict=conflict),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if answer != QMessageBox.StandardButton.Yes:
+            self._append_log(self.i18n.text(self.PIN_MAP_CONFLICT_HELD_TEXT))
+            return False
+        record = getattr(self, "_pin_map_conflict_record", None)
+        if isinstance(record, dict):
+            record["confirmed"] = True
+        self._append_log(tx("Contatti verificati dall'utente nonostante il conflitto dell'analisi: "
+                            "{conflict}", conflict=conflict))
+        # Saved now: a reopen must not ask again what the user confirmed.
+        self._save_project_config()
+        return True
+
+    def _castellated_board_size_block(self) -> str:
+        """@brief Why a castellated module cannot be built now, with the remedy; '' when it can.
+
+        @return Translated sentence when the component is a castellated
+            module whose board length and width no analysis gave and the
+            user did not type (`_board_size_known` False); '' otherwise.
+        @note A pin matrix without documented body still has its pads (only
+            the outline is left out) and a package without body sizes still
+            has its pads; a module's contacts are placed FROM its outline,
+            so here the whole footprint waits for the size. The remedy is
+            the size question (`_settle_castellated_board_size`, asked by
+            «Rigenera footprint») or a dimensioned drawing and a new analysis.
+        """
+        if getattr(self, "_board_size_known", False) or not self._is_castellated():
+            return ""
+        return self.i18n.text(
+            "Footprint non scritto: le quote della scheda (lunghezza e larghezza) non sono note, "
+            "e i contatti di un modulo stanno sui suoi bordi. Il programma non usa misure "
+            "inventate: premi «Rigenera footprint» per inserire le quote misurate, oppure "
+            "aggiungi un disegno quotato della scheda e ripeti l'analisi.")
+
+    def _settle_castellated_board_size(self) -> bool:
+        """@brief Ask the board size of a castellated module before a command the user started.
+
+        @return True when the size is known (already, or typed now) or the
+            component is not a castellated module; False on «Annulla», with
+            the block in the log.
+        @note Review 2026-11-16, R2-2: the remedy `_castellated_board_size_block`
+            names. Only commands the user started ask (`_generate` with
+            automatic False): the automatic pipeline writes nothing and logs
+            the block, as for an open pad-layout question.
+        """
+        block = self._castellated_board_size_block()
+        if not block:
+            return True
+        if self._ask_board_size(note=self.i18n.text(
+                "L'analisi non ha dato le quote della scheda: i contatti di un modulo stanno sui "
+                "suoi bordi, quindi senza lunghezza e larghezza il footprint non si può scrivere. "
+                "Inserisci le quote misurate sulla scheda; la lunghezza è lungo l'asse X del "
+                "footprint.")) is not None:
+            return True
+        self._append_log(block)
+        return False
 
     def _declared_row_spacing_kwargs(self) -> dict:
         """@brief The declared row spacing, if there is one and the generator accepts it.
@@ -15355,6 +16459,14 @@ class MainWindow(QMainWindow):
         self.label_install_report.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.label_install_report.hide()
         install_layout.addWidget(self.label_install_report)
+        # One «Libreria controllata: elimina la copia» per backup folder an
+        # earlier, unfinished installation left (user decision 2026-11-16);
+        # rebuilt by `_refresh_install_report`.
+        self.install_rollback_box = QWidget()
+        self.install_rollback_layout = QVBoxLayout(self.install_rollback_box)
+        self.install_rollback_layout.setContentsMargins(0, 0, 0, 0)
+        self.install_rollback_box.hide()
+        install_layout.addWidget(self.install_rollback_box)
         self.install_report_toggle = QToolButton()
         self.install_report_toggle.setText(self._file_paths_toggle_text(False))
         self.install_report_toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
@@ -17005,9 +18117,17 @@ class MainWindow(QMainWindow):
             return hit[1]
         footprint = self._build_footprint(params)
         if drawings:
-            from ..core.footprint import drawing_graphics
-            for item in drawing_graphics(drawings):
+            from ..core.footprint import drawing_graphics, skipped_drawings_note
+            # Collapsed drawings are left out exactly as GenerateWorker leaves
+            # them out (review R11-8), and said once per new set of drawings:
+            # this runs on a cache miss only, not at every keystroke.
+            skipped = []
+            for item in drawing_graphics(drawings, skipped=skipped):
                 footprint.add_graphic(item)
+            note = skipped_drawings_note(len(skipped))
+            if note and note != getattr(self, "_skipped_drawings_logged", None):
+                self._append_log(note)
+            self._skipped_drawings_logged = note or None
         # A fresh build: moved in place, never a footprint the preview shows.
         footprint.shift_origin(*anchor)
         rendered = footprint_text_signature(footprint.render())
@@ -18984,6 +20104,10 @@ class MainWindow(QMainWindow):
             # is a panel now, not a modal window counted as work (review
             # 2026-11-15, L1). Its text names the reason and the remedy.
             raise RuntimeError(block[1])
+        busy_render = self._preview_render_busy_text()
+        if busy_render:
+            # The preview folder is being read by kicad-cli (R2-9).
+            raise RuntimeError(busy_render)
         artifacts = self._current_kicad_artifacts()
         if artifacts is None:
             raise RuntimeError(self.i18n.text("File KiCad incompleti"))
@@ -19273,7 +20397,11 @@ class MainWindow(QMainWindow):
                 "numbers_printed": getattr(self, "_pin_numbers_printed", None) is not False,
                 "user_names": set(getattr(self, "_user_pin_names", None) or {}),
                 "decision": decision if self._known_side_decision(decision) else None,
-                "open_question": open_question}
+                "open_question": open_question,
+                # Side counts no pinout check can use (too many contacts, or
+                # an infinite total): the check's blocking
+                # «document_count_unusable» row (review 2026-11-16).
+                "count_unusable": report.get("count_unusable")}
 
     def _settled_label_conflicts(self):
         """@brief `ExtractedParams.label_conflicts` of the analysis this session settled, or None.
@@ -19691,6 +20819,13 @@ class MainWindow(QMainWindow):
             return
         if self._refuse_kicad_command():
             return
+        busy_render = self._preview_render_busy_text()
+        if busy_render:
+            # Review 2026-11-16, R2-9: a second preview rewrote the
+            # `.kicad-preview` files the first render was still reading.
+            self._append_log(busy_render)
+            QMessageBox.information(self, self.i18n.text("Apri in KiCad"), busy_render)
+            return
         artifacts = self._current_kicad_artifacts()
         if artifacts is None:
             return
@@ -19786,6 +20921,57 @@ class MainWindow(QMainWindow):
         """
         return (str(self._project_dir_or_none() or ""), self._component_name())
 
+    def _preview_render_busy_text(self) -> str:
+        """@brief Why a new isolated preview must wait for the render in progress, '' when it need not.
+
+        @return Translated sentence while the 3D image of the SAME project's
+            preview is still being made (`PreviewRenderWorker` running);
+            '' otherwise.
+        @note Review 2026-11-16, R2-9: `create_preview_project` rewrites the
+            `.kicad-preview` folder that kicad-cli is reading for the image,
+            so a second preview could hand kicad-cli a half-written board. A
+            render of ANOTHER project (left behind by a project switch, made
+            stale by its serial) reads another folder and does not block.
+        """
+        worker = getattr(self, "_preview_render_worker", None)
+        try:
+            running = worker is not None and worker.isRunning()
+        except RuntimeError:
+            # A finished render deletes itself (`PreviewRenderWorker._release`).
+            running = False
+        if not running:
+            return ""
+        token = getattr(worker, "token", None)
+        if isinstance(token, tuple) and len(token) == 3 and token[1] != self._preview_render_key():
+            return ""
+        return self.i18n.text("Immagine 3D dell'anteprima ancora in creazione: attendi qualche "
+                              "secondo e ripeti il comando.")
+
+    def _stop_preview_render(self) -> None:
+        """@brief Stop the preview render in flight, if any, and forget it.
+
+        @note Called when its image can no longer be shown (a project switch)
+            and before a new render (coordinator item from fixer C9,
+            2026-11-16): `PreviewRenderWorker.stop` kills the kicad-cli
+            process tree at once, instead of letting it run up to its timeout
+            on a folder nobody looks at. The thread belongs to QApplication
+            and deletes itself when finished, so dropping the reference is
+            safe; a worker without `stop` (an older build, a test stand-in)
+            is only forgotten. Its late result is stale anyway (serial).
+        """
+        worker = getattr(self, "_preview_render_worker", None)
+        self._preview_render_worker = None
+        if worker is None:
+            return
+        stop = getattr(worker, "stop", None)
+        if not callable(stop):
+            return
+        try:
+            if worker.isRunning():
+                stop()
+        except RuntimeError:
+            pass  # already finished and deleted by Qt
+
     def _start_preview_render(self, preview, kicad_cli, artifacts) -> None:
         """@brief Render the preview board to a 3D image off the GUI thread (`PreviewRenderWorker`).
 
@@ -19798,6 +20984,8 @@ class MainWindow(QMainWindow):
             the reason is logged at once, no thread started.
         """
         self._preview_render_serial = getattr(self, "_preview_render_serial", 0) + 1
+        # The previous render's image is stale from here on: its kicad-cli is killed.
+        self._stop_preview_render()
         if not artifacts.has_step:
             self._append_log(self.i18n.text(self.PREVIEW_RENDER_FAILURE_TEXTS["no_step"]))
             return
@@ -20323,7 +21511,7 @@ class MainWindow(QMainWindow):
             if symbol_library is not None:
                 message += "\n" + self.i18n.text(
                     "Simbolo nella libreria dei simboli {library}").format(library=symbol_library)
-            for line in self._install_bom_lines(result):
+            for line in self._install_bom_lines(result) + self._install_earlier_rollback_lines(result):
                 message += "\n\n" + line
             return message
         message = self.i18n.tr(
@@ -20364,9 +21552,29 @@ class MainWindow(QMainWindow):
         rollback_left = getattr(result, "rollback_left", None)
         if rollback_left:
             message += "\n\n" + self.i18n.tr("kicad.result_rollback_left", path=str(rollback_left))
-        for line in self._install_bom_lines(result):
+        for line in self._install_bom_lines(result) + self._install_earlier_rollback_lines(result):
             message += "\n\n" + line
         return message
+
+    def _install_earlier_rollback_lines(self, result) -> list:
+        """@brief One translated line per backup folder an EARLIER installation left behind.
+
+        @param result `LibraryInstallResult` (`earlier_rollbacks`; absent on
+            an older service or a stand-in: no line).
+        @return The lines, in the current language; empty when none.
+        @note Review 2026-11-16, R9-7 (fixer C2): an install interrupted by a
+            crash leaves its backup copies and a journal; the next install
+            finds them and the user is told where they are, in the report of
+            the message box and of step 3, never only in the log.
+        """
+        # A folder the user already marked «controllata» is no longer asked
+        # about (review F, 9; `_acknowledge_rollback`).
+        done = getattr(self, "_acknowledged_rollbacks", set())
+        return [tx("Un’installazione precedente non è terminata: le copie dei file com’erano prima "
+                   "sono in {path} (elenco in kicadgen-rollback-journal.txt). Controlla la "
+                   "libreria e, se è a posto, elimina la cartella.", path=folder)
+                for folder in tuple(getattr(result, "earlier_rollbacks", ()) or ())
+                if str(folder) not in done]
 
     #: Italian sources of the install report's short lines (review 2026-11-15, P3).
     INSTALL_IDENTICAL_TEXT = "Già installato e identico: niente da scrivere."
@@ -20427,6 +21635,8 @@ class MainWindow(QMainWindow):
             lines.append(self.i18n.text(
                 "Installato senza modello STEP: in KiCad il componente non ha la vista 3D."))
         lines.extend(self._install_bom_lines(result))
+        # A backup folder of an interrupted earlier install needs attention (R9-7).
+        lines.extend(self._install_earlier_rollback_lines(result))
         return "\n".join(lines)
 
     def _refresh_install_report(self) -> None:
@@ -20451,11 +21661,79 @@ class MainWindow(QMainWindow):
             self.label_install_report_detail.setText("")
         expanded = visible and self.install_report_toggle.isChecked()
         label.setVisible(visible)
+        self._refresh_install_rollback_buttons(record[0] if visible else None)
         self.install_report_toggle.setVisible(visible)
         self.label_install_report_detail.setVisible(expanded)
         self.install_report_toggle.setArrowType(
             Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow)
         self.install_report_toggle.setText(self._file_paths_toggle_text(expanded))
+
+    def _refresh_install_rollback_buttons(self, result) -> None:
+        """@brief One «Libreria controllata: elimina la copia» button per earlier rollback folder still listed.
+
+        @param result The last `LibraryInstallResult`, or None (no buttons).
+        @note A folder the user already acknowledged in this session is not
+            offered again (`_acknowledged_rollbacks`).
+        """
+        layout = getattr(self, "install_rollback_layout", None)
+        if layout is None:
+            return
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        done = getattr(self, "_acknowledged_rollbacks", set())
+        folders = [folder for folder in tuple(getattr(result, "earlier_rollbacks", ()) or ())
+                   if str(folder) not in done] if result is not None else []
+        for folder in folders:
+            button = QPushButton(self.i18n.text("Libreria controllata: elimina la copia"))
+            button.setProperty("i18n_skip", True)
+            button.setToolTip(str(folder))
+            button.setProperty("rollback_folder", str(folder))
+            button.clicked.connect(lambda _checked=False, f=folder: self._acknowledge_rollback(f))
+            layout.addWidget(button, 0, Qt.AlignmentFlag.AlignLeft)
+        self.install_rollback_box.setVisible(bool(folders))
+
+    def _acknowledge_rollback(self, folder) -> bool:
+        """@brief «Libreria controllata: elimina la copia»: confirm, then mark the backup folder disposable.
+
+        @param folder One of the last installation's `earlier_rollbacks`.
+        @return True when the folder was marked.
+        @note `kicad_library.acknowledge_rollback_dir` writes the marker that
+            lets the next clean-up remove the folder once it is old enough
+            (the copies stay available until then); nothing is deleted here.
+            A refusal or failure is a warning, never an exception out of the slot.
+        """
+        answer = QMessageBox.question(
+            self, self.i18n.text("Libreria controllata: elimina la copia"),
+            self.i18n.text(
+                "Hai controllato la libreria e va bene? La copia dei file com'erano prima, in "
+                "{path}, verrà eliminata dalla prossima pulizia e non sarà più segnalata.").format(
+                    path=folder),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if answer != QMessageBox.StandardButton.Yes:
+            return False
+        try:
+            from ..services.kicad_library import acknowledge_rollback_dir
+            marked = bool(acknowledge_rollback_dir(folder))
+        except Exception:  # noqa: BLE001 - a slot must not let it escape
+            marked = False
+        if not marked:
+            text = self.i18n.text(
+                "Copia non segnata come controllata: {path} non è una cartella di copie di "
+                "KiCadGen o non è scrivibile. Puoi eliminarla a mano.").format(path=folder)
+            self._append_log(text)
+            QMessageBox.warning(self, self.i18n.text("Libreria controllata: elimina la copia"), text)
+            return False
+        self._acknowledged_rollbacks = set(getattr(self, "_acknowledged_rollbacks", set())) | {
+            str(folder)}
+        self._append_log(self.i18n.text(
+            "Copia {path} segnata come controllata: verrà eliminata dalla prossima pulizia.").format(
+                path=folder))
+        self._refresh_install_report()
+        return True
 
     def _install_plan_text(self, plan, project_library: bool,
                            table_version: str | None) -> str:
@@ -20678,6 +21956,120 @@ class MainWindow(QMainWindow):
             self._append_log(tx("Rinomina annullata: impossibile trasferire il log ({exc}).", exc=exc))
             return False
 
+    #: Marker of a key absent from a config dict (`_save_config_changes`).
+    _CONFIG_ABSENT = object()
+
+    def _save_config_changes(self):
+        """@brief Write to config.json only the keys this window changed, over what is on disk now.
+
+        @return What `save_config` returned (False = not written).
+        @note User decision 2026-11-16 (R12-4, several windows): each window
+            used to write its whole `_config`, so the last window to save
+            undid the preferences another window had changed meanwhile. Now
+            the keys whose value differs from what this window last read or
+            wrote (`_config_baseline`) are laid over a fresh read of the file
+            (`load_config`), and the result is written atomically
+            (`save_config`). After a successful write the other keys take the
+            file's values, so this window does not later write back a value
+            another window replaced. Limit, stated: the read and the write
+            are not one locked step, so two saves of the same moment
+            (milliseconds apart) can still lose one key.
+        @note Review F (2026-11-16): the merge is laid only over a file
+            really READ (`load_config(require_file=True)`); a missing,
+            locked or corrupt file returns None and this window's whole
+            `_config` is written as it is -- never the defaults plus this
+            window's keys, and the defaults are never adopted into memory.
+            `_config` is the window's live dict (shared with the documents
+            panel and the recent list), so it is updated in place.
+        """
+        absent = self._CONFIG_ABSENT
+        baseline = getattr(self, "_config_baseline", None)
+        if not isinstance(baseline, dict):
+            # No snapshot (a window built without one): the whole dict, as before.
+            return save_config(self._config)
+        changed = {key for key in set(self._config) | set(baseline)
+                   if self._config.get(key, absent) != baseline.get(key, absent)}
+        try:
+            on_disk = load_config(require_file=True)
+        except Exception:  # noqa: BLE001 - nothing read: this window's values are written as they are
+            on_disk = None
+        if not isinstance(on_disk, dict):
+            # Nothing read: the window's own dict, as it is; nothing adopted.
+            result = save_config(self._config)
+            if result is not False:
+                self._config_baseline = deepcopy(self._config)
+            return result
+        merged = dict(on_disk)
+        for key in changed:
+            if key in self._config:
+                merged[key] = self._config[key]
+            else:
+                merged.pop(key, None)
+        if recent_projects.CONFIG_KEY in changed:
+            # One key, many writers (review H, 1): this window's own additions
+            # and removals are applied to the list ON DISK, never its stale copy.
+            merged[recent_projects.CONFIG_KEY] = self._merge_recent_lists(
+                baseline, self._config, on_disk)
+        result = save_config(merged)
+        if result is not False:
+            for key, value in merged.items():
+                if key not in changed or key == recent_projects.CONFIG_KEY:
+                    self._config[key] = value
+            # A key the file no longer has and this window did not change
+            # would otherwise be written back by the next save (review F, 8).
+            # Only keys without a default: a real read always carries every
+            # default key, so a default key missing from `merged` means a
+            # partial substitute, never «removed by another window».
+            from .app_config import DEFAULTS
+            for key in [key for key in self._config
+                        if key not in merged and key not in changed and key not in DEFAULTS]:
+                del self._config[key]
+            self._config_baseline = deepcopy(merged)
+        return result
+
+    @staticmethod
+    def _merge_recent_lists(baseline: dict, mine: dict, on_disk: dict) -> list:
+        """@brief The recent-projects list after this window's changes, laid over the list on disk.
+
+        @param baseline What this window last read or wrote.
+        @param mine This window's live config.
+        @param on_disk The config file as read now.
+        @return Most recent first, without duplicates (same folder in another
+            spelling counts once), at most `recent_projects.MAX_RECENT`.
+        @note Review H, 1: the list is one config key, so per-key saving let
+            a window write back its stale list over the projects another
+            window had added. This window's changes are: the entries it put
+            at the top since `baseline` (new, or moved up) and the entries it
+            removed (forgot). An entry that left this window's list only
+            because the cap pushed it out is not a removal (the list was
+            full); the cap is applied again to the result.
+        """
+        def key(path):
+            return os.path.normcase(os.path.normpath(path))
+
+        base = recent_projects.stored(baseline)
+        own = recent_projects.stored(mine)
+        disk = recent_projects.stored(on_disk)
+        own_keys = {key(path) for path in own}
+        # `recent_projects.add` puts an entry at the top: this window's
+        # additions are the entries above the first entry of `baseline` it
+        # still lists (a removal elsewhere in the list moves nothing up).
+        anchor = next((key(path) for path in base if key(path) in own_keys), None)
+        touched = []
+        for path in own:
+            if key(path) == anchor:
+                break
+            touched.append(path)
+        removed = set() if len(own) >= recent_projects.MAX_RECENT else {
+            key(path) for path in base if key(path) not in own_keys}
+        result, seen = [], set()
+        for path in touched + [path for path in disk if key(path) not in removed]:
+            if key(path) in seen:
+                continue
+            seen.add(key(path))
+            result.append(path)
+        return result[:recent_projects.MAX_RECENT]
+
     def _save_config_safely(self) -> bool:
         """@brief Save config.json from a Qt slot without letting a failure escape.
 
@@ -20689,7 +22081,7 @@ class MainWindow(QMainWindow):
         """
         # Only an explicit False is a failure: substitutes that return None
         # (older callers and test doubles) keep meaning "saved".
-        if save_config(self._config) is not False:
+        if self._save_config_changes() is not False:
             return True
         if not hasattr(self, "_log_lines"):
             # Called before the log exists (early in __init__): nothing to show yet.
@@ -20923,6 +22315,59 @@ class MainWindow(QMainWindow):
             return None
         return detail.strip()
 
+    def _sides_paired_with_answer(self, updated) -> list[tuple[dict, dict]] | None:
+        """@brief Pair each table side with the side of an answered extraction it stands for.
+
+        @param updated The extraction with the answer applied (`apply_answers`).
+        @return [(table side, answer side)] for every table side whose edge
+            the answer also lists; None when an edge cannot be paired.
+        @note Review 2026-11-16, R2-1: a dict keyed by edge kept only the
+            LAST run when two castellated runs share an edge (the generator
+            allows it, `CastellatedSide.side_of`), so a «renumber» answer gave
+            both rows the second run's first pin -- pads numbered twice, others
+            gone, no log. Runs on one edge are now paired by their order on
+            that edge: the table rows are added in the extraction's order
+            (`_apply_extracted_castellated`), and `apply_answers` keeps that order.
+            When the two lists hold a DIFFERENT number of runs on an edge (the
+            user added or removed a row after the analysis) the pairing would
+            be a guess: None, and the caller keeps the question open.
+        """
+        answer_sides = [side for side in getattr(updated, "castellated_sides", None) or ()
+                        if isinstance(side, dict)]
+        by_edge: dict = {}
+        for side in answer_sides:
+            by_edge.setdefault(side.get("edge"), []).append(side)
+        table_by_edge: dict = {}
+        for side in self._sides:
+            table_by_edge.setdefault(side.get("edge"), []).append(side)
+        pairs = []
+        for edge, rows in table_by_edge.items():
+            targets = by_edge.get(edge)
+            if not targets:
+                # An edge the answer does not list: nothing to bring over.
+                continue
+            if len(targets) != len(rows):
+                return None
+            pairs.extend(zip(rows, targets))
+        return pairs
+
+    def _unpaired_side_edges(self, updated) -> list[str]:
+        """@brief The edges whose runs differ in number between the table and an answered extraction.
+
+        @param updated The extraction with the answer applied.
+        @return Translated edge labels, empty when every edge pairs
+            (`_sides_paired_with_answer`).
+        """
+        answer_counts: dict = {}
+        for side in getattr(updated, "castellated_sides", None) or ():
+            if isinstance(side, dict):
+                answer_counts[side.get("edge")] = answer_counts.get(side.get("edge"), 0) + 1
+        table_counts: dict = {}
+        for side in self._sides:
+            table_counts[side.get("edge")] = table_counts.get(side.get("edge"), 0) + 1
+        return [edge_label(edge) for edge, count in table_counts.items()
+                if answer_counts.get(edge) and answer_counts[edge] != count]
+
     def _apply_answered_side_numbering(self, updated) -> None:
         """@brief Bring a «side_numbering» answer into the window: sides by edge, then the pinout.
 
@@ -20934,13 +22379,13 @@ class MainWindow(QMainWindow):
             pinout is settled again (`_settle_extracted_pinout`), so the
             user's own names are asked about, never dropped silently.
         """
-        by_edge = {side.get("edge"): side for side in getattr(updated, "castellated_sides", None) or ()
-                   if isinstance(side, dict)}
+        pairs = self._sides_paired_with_answer(updated)
+        if pairs is None:
+            # Checked before the answer is committed (`_resolve_one_footprint_question`);
+            # a direct call with unpairable sides changes nothing.
+            return
         changed = False
-        for side in self._sides:
-            target = by_edge.get(side.get("edge"))
-            if target is None:
-                continue
+        for side, target in pairs:
             for key in ("first_pin", "reverse"):
                 if key in target and side.get(key) != target[key]:
                     side[key] = target[key]
@@ -21099,12 +22544,13 @@ class MainWindow(QMainWindow):
                 self._invalidate_generated_mesh()
             self._draw_preview()
             return
-        by_edge = {side.get("edge"): side for side in getattr(updated, "castellated_sides", None) or ()
-                   if isinstance(side, dict)}
+        pairs = self._sides_paired_with_answer(updated)
+        if pairs is None:
+            # Checked before the answer is committed (`_resolve_one_footprint_question`).
+            return
         changed = False
-        for side in self._sides:
-            target = by_edge.get(side.get("edge"))
-            style = target.get("contact_style") if target is not None else None
+        for side, target in pairs:
+            style = target.get("contact_style")
             if style in contact_styles() and side.get("contact_style") != style:
                 side["contact_style"] = style
                 changed = True
@@ -21439,6 +22885,12 @@ class MainWindow(QMainWindow):
             body.lead_diameter_mm = getattr(extracted, "lead_diameter_mm", None)
             return body
         if self._is_castellated():
+            if self._castellated_board_size_block():
+                # Review 2026-11-16, R2-2: like a package or a pin matrix
+                # without documented body, no solid from the placeholder
+                # outline (42.8 x 15.2 x 5.0 mm); `_missing_body_reason` names
+                # the missing length and width.
+                return None
             # The module PCB is centred on the origin like the footprint:
             # envelope and offset are derived from there, not from the hand-typed fields.
             # Only sizes, drill and thickness are read: never the photo bodies.
@@ -21904,6 +23356,9 @@ class MainWindow(QMainWindow):
             if dialog.exec() != QDialog.DialogCode.Accepted:
                 return False
             self.field_cast_thru_pad.setValue(pad.value())
+            # Typed by the user: a measure even when it equals the reference (R2-8).
+            self._cast_declared_sizes = set(getattr(self, "_cast_declared_sizes", ())) | {
+                "field_cast_thru_pad"}
             for index, field in drills:
                 self._sides[index]["through_hole_drill_mm"] = field.value()
                 self._sides[index]["through_hole_drill_declared"] = True
@@ -21949,6 +23404,13 @@ class MainWindow(QMainWindow):
             if pending:
                 self._append_log(pending)
                 return False
+            if self._fp_rewrite_flushing and self._unverified_pin_map_conflict():
+                # Generality audit S1: the unattended rewrite never writes
+                # contacts the analysis left in conflict; «Rigenera
+                # footprint» asks (the automatic pipeline refuses them in
+                # `_validate_automatic_input`).
+                self._append_log(self.i18n.text(self.PIN_MAP_CONFLICT_HELD_TEXT))
+                return False
         else:
             if (getattr(self, "_pads_kept_blocked", False) and self.has_pending_footprint_edits()
                     and not self._settle_footprint_draft_before_start()):
@@ -21956,6 +23418,14 @@ class MainWindow(QMainWindow):
                 # block (review 2026-11-14, L6): it is settled first.
                 return False
             if not self._resolve_stored_pad_layout_question():
+                return False
+            # Contacts the analysis left in conflict (generality audit S1):
+            # the user confirms having checked them, or nothing is written.
+            if not self._confirm_pin_map_conflict():
+                return False
+            # A castellated module whose board size is unknown (R2-2): the
+            # size is asked now; the unattended paths log the block below.
+            if not self._settle_castellated_board_size():
                 return False
         if (not automatic and not self._fp_rewrite_flushing
                 and not self._settle_footprint_draft_before_start()):
@@ -22030,8 +23500,14 @@ class MainWindow(QMainWindow):
             self._append_log(tx("ERRORE: {exc}", exc=exc))
             self._set_mounting_error(str(exc))
             if not footprint_only and self._correct_invalid_through_holes(locals().get("params")):
-                self._generate(automatic=automatic)
-                return False
+                # Review 2026-11-16, R2-6: the retry keeps the body the user
+                # decided (`body_override`; before, it was rebuilt from the
+                # fields) and its outcome is this call's outcome (before, a
+                # started worker was reported as «nothing ran»). Still inside
+                # the applied-footprint context of `_generate`, and every
+                # question `_generate` asks was settled before the first try.
+                return self._generate_applied(automatic=automatic, footprint_only=False,
+                                              body_override=body_override)
             if automatic:
                 self._automatic_generation_blocked(str(exc))
             elif not self._fp_rewrite_flushing and self._unread_pads_block():
@@ -22080,7 +23556,11 @@ class MainWindow(QMainWindow):
                    drill=params.drill)
             )
 
-        if body is None and (self.fillet_annotations or self.face_text_annotations):
+        # Only when this generation was to build the STEP (real run of
+        # 2026-11-16): a footprint-only rewrite («Applica ai file», a pad
+        # edit) never builds it, so the annotations are not «ignored» there.
+        if (body is None and not footprint_only
+                and (self.fillet_annotations or self.face_text_annotations)):
             self._append_log(
                 tx("ATTENZIONE: annotazioni 3D presenti ma il modello STEP non viene generato "
                    "(quote del corpo mancanti o 3D disattivato): verranno ignorate.")
@@ -22817,7 +24297,9 @@ class MainWindow(QMainWindow):
         # Only the tools KiCad gives a hotkey (the keepout zone has none in this table).
         tool_bindings = [(TOOL_SHORTCUTS[key], lambda k=key: self._arm_footprint_tool_shortcut(k))
                          for key in self.FOOTPRINT_PALETTE_TOOLS + ("dimension", "measure") if key in TOOL_SHORTCUTS]
-        tool_bindings.append((PROPERTIES_SHORTCUT, self._edit_footprint_target_properties))
+        # E ends a drag in progress first when it will edit something (R5-2).
+        tool_bindings.append((PROPERTIES_SHORTCUT, command(self._edit_footprint_target_properties,
+                                                           self._fp_properties_target_exists)))
         self._fp_shortcuts += bind_shortcuts(self.preview_view, tool_bindings, runner=None,
                                              context=Qt.ShortcutContext.WidgetWithChildrenShortcut)
         self.preview_view.drawing_context_requested.connect(self._footprint_drawing_context_menu)
@@ -23485,6 +24967,9 @@ class MainWindow(QMainWindow):
         self.fp_properties_panel = PropertiesPanel(mixed_placeholder=self.i18n.text(MIXED_PLACEHOLDER))
         self.fp_properties_panel.set_empty(self.i18n.text(EMPTY_TEXT))
         self.fp_properties_panel.committed.connect(self._fp_property_committed)
+        from .canvas_properties import bind_panel_escape
+        # Two-step Escape (user decision 2026-11-16, R5-7, as the symbol editor).
+        bind_panel_escape(self.fp_properties_panel, self.preview_view, self.preview_view.tool_armed)
         #: What the panel's fields edit: ("drawing", index), ("drawings",
         #: indices), ("pads", indices) or ("none",) (`_fp_properties_fields`).
         self._fp_properties_subject = ("none",)
@@ -23895,10 +25380,16 @@ class MainWindow(QMainWindow):
         @note The cache follows the photo OBJECT (a new analysis gives a new
             bytes object) and a file's path, size and modification time (a
             picture re-scanned in place is reloaded), never a byte count.
+        @note The cache entry is (key, pixmap, photo object): it keeps the
+            photo bytes it was made from alive, and a hit also needs that
+            very object (review 2026-11-16, R3-4). Keyed on `id()` alone, a
+            freed photo's id could be reused by the next photo and show the
+            old picture.
         """
         file_path = self._reference_file_path(record)
+        photo = self._photo_png if record["source"] == "photo" else None
         if record["source"] == "photo":
-            key = ("photo", id(self._photo_png) if self._photo_png is not None else None)
+            key = ("photo", id(photo) if photo is not None else None)
         else:
             try:
                 stat = file_path.stat()
@@ -23906,7 +25397,8 @@ class MainWindow(QMainWindow):
             except OSError:
                 key = ("file", str(file_path), None, None)
         cache = getattr(self, "_reference_pixmap_cache", None)
-        if cache is not None and cache[0] == key:
+        if (cache is not None and cache[0] == key
+                and (len(cache) < 3 or cache[2] is photo)):
             return cache[1]
         pixmap = QPixmap()
         if record["source"] == "photo":
@@ -23918,7 +25410,7 @@ class MainWindow(QMainWindow):
             pixmap = None
             self._append_log(self.i18n.text("Immagine di riferimento non leggibile: {path}").format(
                 path=str(file_path) if file_path is not None else self.i18n.text("foto calibrata assente")))
-        self._reference_pixmap_cache = (key, pixmap)
+        self._reference_pixmap_cache = (key, pixmap, photo)
         return pixmap
 
     def _reference_anchor_mm(self, record) -> tuple:
@@ -24210,7 +25702,7 @@ class MainWindow(QMainWindow):
             tooltip and the elements it concerns for `_on_footprint_check_clicked`.
         """
         from dataclasses import replace
-        from ..core.footprint import drawing_graphics
+        from ..core.footprint import drawing_graphics, skipped_drawings_note
         from ..services.footprint_checks import check_footprint_geometry
         lst = getattr(self, "fp_checks_list", None)
         if lst is None:
@@ -24236,17 +25728,25 @@ class MainWindow(QMainWindow):
         # segment): the graphic index -> drawing index map is built record
         # by record, never by subtraction.
         extra, owners = [], []
+        # Drawings that collapsed (a polygon edited down to two vertices): the
+        # writer leaves them out (`drawing_graphics`, review R11-8), and this
+        # list says so, naming them, instead of letting them vanish.
+        collapsed = []
         for record_index, record in enumerate(self.footprint_drawings):
+            skipped = []
             try:
-                graphics = drawing_graphics([record])
+                graphics = drawing_graphics([record], skipped=skipped)
             except (TypeError, ValueError):
                 continue
+            if skipped:
+                collapsed.append(record_index)
             extra.extend(graphics)
             owners.extend([record_index] * len(graphics))
         generated = len(built.graphics)
         findings = check_footprint_geometry(replace(built, graphics=list(built.graphics) + extra))
         self._fp_last_checks = findings
-        if not findings:
+        collapsed_note = skipped_drawings_note(len(collapsed))
+        if not findings and not collapsed_note:
             self._fp_checks_had_findings = False
             lst.addItem(self.i18n.text("Nessun problema trovato"))
             self._fit_footprint_checks_height()
@@ -24257,6 +25757,13 @@ class MainWindow(QMainWindow):
         if group is not None and not self._fp_checks_had_findings:
             group.setExpanded(True)
         self._fp_checks_had_findings = True
+        if collapsed_note:
+            # A click selects the collapsed drawings, the ones to fix or delete.
+            item = QListWidgetItem("⚠ " + collapsed_note)
+            item.setToolTip(collapsed_note)
+            item.setData(self._FP_CHECK_TARGETS_ROLE, ((), tuple(collapsed)))
+            item.setData(FINDING_DETAILS_ROLE, finding_details("warning", collapsed_note, ""))
+            lst.addItem(item)
         for finding in findings:
             prefix = "⛔ " if finding.severity == "error" else "⚠ "
             item = QListWidgetItem(prefix + finding.message)
@@ -24457,6 +25964,12 @@ class MainWindow(QMainWindow):
             `_hovered_graphic`), no longer the hovered drawing whose handles
             show, which stays through its bounding rectangle: with the
             pointer inside an empty outline E opens nothing.
+        @note Review 2026-11-16, R5-2: E pressed in the middle of a drag
+            opened an editor that refused every change with a false reason
+            (the drag still owned the element). The E shortcut is now bound
+            through `_footprint_edit_command` with
+            `_fp_properties_target_exists`: a drag in progress is ended first
+            (not committed) whenever E acts; with nothing to edit it is left alone.
         """
         if self._fp_selected_indices():
             return self._focus_fp_properties()
@@ -24470,6 +25983,17 @@ class MainWindow(QMainWindow):
             self._edit_drawing_properties(index)
             return True
         return False
+
+    def _fp_properties_target_exists(self) -> bool:
+        """@brief Whether E has something to edit: selected drawings or pads, or a drawing under the pointer.
+
+        @return The same order of targets as `_edit_footprint_target_properties`.
+        """
+        if self._fp_selected_indices() or self._fp_selected_pads():
+            return True
+        view = getattr(self, "preview_view", None)
+        index = view.drawing_under_pointer() if view is not None else -1
+        return 0 <= index < len(self.footprint_drawings)
 
     def _focus_fp_properties(self) -> bool:
         """@brief Give the focus to the first editable field of the «Proprietà» panel.
@@ -31113,17 +32637,43 @@ class MainWindow(QMainWindow):
         self.label_3d_status.setVisible(level in (STATUS_WARNING, STATUS_ERROR))
 
     def _on_pin_numbers_toggled(self, checked: bool) -> None:
+        """@brief Show or hide the pin numbers of the 3D view and redraw it.
+
+        @param checked True to show the numbers.
+        @note Review 2026-11-16, R3-3: the generated mesh used to be
+            re-rendered synchronously, so a toggle while the mesh was still
+            loading parsed it on the GUI thread. It now goes through the same
+            off-thread preparation as the tab entry (`_prepare_mesh_then`),
+            which also supersedes a preparation in flight; a viewer without
+            it (test stubs, older viewers) renders synchronously as before.
+        """
         self._config["show_pin_numbers_3d"] = checked
         self._save_config_safely()
         self.preview_3d.set_pin_numbers(checked)
         # Redraw the current view: generated mesh if there is one, otherwise
         # the approximation from the parameters.
         if self._last_mesh_path and Path(self._last_mesh_path).is_file():
-            try:
-                self.preview_3d.render_mesh(self._last_mesh_path)
-                return
-            except Exception as exc:  # noqa: BLE001 - it falls back on the parametric preview
-                self._append_log(tx("Anteprima mesh non disponibile: {exc}", exc=exc))
+            path = Path(self._last_mesh_path)
+            if not self._prepare_mesh_then(path, partial(self._render_mesh_for_toggle, path),
+                                           partial(self._prepared_3d_render_failed, path)):
+                self._render_mesh_for_toggle(path)
+            return
+        self._draw_preview_3d()
+
+    def _render_mesh_for_toggle(self, path: Path) -> None:
+        """@brief Render @p path again after a display toggle, the parametric preview on failure.
+
+        @param path The mesh the toggle asked for; nothing is drawn when it
+            is no longer the current mesh (replaced while it was prepared).
+        """
+        current = self._last_mesh_path
+        if current is None or Path(current) != path:
+            return
+        try:
+            self.preview_3d.render_mesh(current)
+            return
+        except Exception as exc:  # noqa: BLE001 - it falls back on the parametric preview
+            self._append_log(tx("Anteprima mesh non disponibile: {exc}", exc=exc))
         self._draw_preview_3d()
 
     def _open_3dshapes_dir(self) -> None:
@@ -31199,6 +32749,8 @@ class MainWindow(QMainWindow):
                                                         step_models=self._step_models()))
         worker._model_revision = self._model_revision
         worker._photo_snapshot = self._photo_png
+        # Its own tally, never the analysis's (final review follow-up, R6-8).
+        worker.usage_scope = self._new_usage_scope()
         self._terminal_worker = worker
         worker.progress.connect(self._on_ai_progress)
         worker.done.connect(self._on_terminal_detail_done)
@@ -31212,7 +32764,17 @@ class MainWindow(QMainWindow):
         self._track_background_work(worker)
 
     def _on_terminal_detail_finished(self) -> None:
-        """Release the run project of the terminal pass and re-enable its commands."""
+        """Release the run project of the terminal pass and re-enable its commands.
+
+        A pass ended by «Interrompi la lettura» (`TerminalDetailWorker.cancelled`,
+        review 2026-11-16, R1-6) is said in the log and the 3D status: the
+        components stay as they were.
+        """
+        worker = getattr(self, "_terminal_worker", None)
+        if worker is not None and getattr(worker, "cancelled", False) is True:
+            text = self.i18n.text("Lettura dei terminali interrotta: i componenti restano come erano.")
+            self._append_log(text)
+            self._set_3d_status(text, STATUS_INFO)
         self._retry_footprint_rewrite()
         if hasattr(self, "ai_account"):
             self.ai_account.release_run_project()
@@ -31232,6 +32794,13 @@ class MainWindow(QMainWindow):
             are replaced and the generated mesh invalidated.
         """
         worker = self._terminal_worker
+        cancel = getattr(worker, "cancel", None)
+        if cancel is not None and callable(getattr(cancel, "is_set", None)) and cancel.is_set():
+            # Stopped by «Interrompi la lettura»: a result that still arrives
+            # (a pass that could not stop in time) is never applied.
+            self._append_log(self.i18n.text(
+                "Lettura dei terminali interrotta: i componenti restano come erano."))
+            return
         if (worker._model_revision != self._model_revision
                 or worker._photo_snapshot != self._photo_png
                 or worker.components != self._photo_components_from_table()):
@@ -31336,6 +32905,16 @@ class MainWindow(QMainWindow):
             # stored question is asked now, with its candidates, instead of
             # the dead end «mancano le quote».
             if not self._resolve_stored_body_height_question():
+                return
+            # The question is modal: another run may have started meanwhile
+            # (an automatic generation, a re-read); two FreeCAD writers on the
+            # same outputs must never overlap (review 2026-11-16, R3-2).
+            # The answer stays saved; the next «Rigenera» uses it.
+            if self._background_work_running() or self._automatic_generation_active:
+                self._append_log(self.i18n.text(
+                    "Altezza registrata, ma un'altra elaborazione è partita nel frattempo: "
+                    "modello STEP non rigenerato ora; premi di nuovo «Rigenera modello STEP» "
+                    "quando è finita."))
                 return
         body = self._current_body_params()
         if body is None:
@@ -31557,7 +33136,13 @@ class MainWindow(QMainWindow):
         self._run_modal(dialog)
 
     def _show_generated_mesh(self, step_path: Path) -> None:
-        """Show in the preview the mesh of the solid just generated (fillets and text included)."""
+        """Show in the preview the mesh of the solid just generated (fillets and text included).
+
+        Reached only for a result of the current data: the pasted formats a
+        reopened project was waiting for are in this STEP now
+        (`_announce_pending_step_regen`).
+        """
+        self._step_regen_pending_saved = False
         report_path = step_path.parent.parent / 'kicad-model-candidates.json'
         if report_path.is_file():
             try:
@@ -31918,6 +33503,7 @@ class MainWindow(QMainWindow):
         if row not in self._format_target_rows and row != self._format_source_row:
             self._format_target_rows.append(row)
         self._show_format_outlines()
+        self._save_format_paste()
         self._append_log(tx("Copia formato: {source} -> {name}.",
                             source=self._format_source.get("source_name") or "?", name=name))
         self.statusBar().showMessage(tx(
@@ -31929,6 +33515,33 @@ class MainWindow(QMainWindow):
             tx("{n} componenti finora: {targets}", n=len(self._format_targets),
                targets=", ".join(self._format_targets)),
             self.i18n.text("Ripremi il pennello per applicare."))
+
+    def _save_format_paste(self) -> None:
+        """@brief Write the components with the paste just made into the saved choices.
+
+        @note Review 2026-11-16, R3-1: a paste changed only the table in
+            memory, which the autosave writes into the project file, while the
+            choices JSON (`save_choices`, read back by `restore_choices`) kept
+            the old format until the painter was switched off; a project switch
+            or a closed window in between left the two disagreeing. The STEP
+            model is still regenerated once, when the painter is switched off.
+            A failed write is stated in the log, not in a modal box at every
+            click: the switch-off goes through `_apply_photo_review`, which
+            writes again and warns.
+        """
+        if self._last_mesh_path is not None:
+            # The STEP on disk no longer matches the pasted bodies until the
+            # painter is switched off; a project switch before that leaves it
+            # stale, and the reopened project says so (`_announce_pending_step_regen`).
+            self._step_regen_pending_saved = True
+        if not self._photo_png:
+            return
+        from ..services.model_choices import save_choices
+        try:
+            save_choices(self._docs_dir().parent, self._photo_png,
+                         self._photo_components_from_table())
+        except (OSError, ValueError) as exc:
+            self._append_log(f"{tx('Scelte KiCad non salvate')}: {exc}")
 
     def _show_format_outlines(self) -> None:
         """@brief Draw the «copia formato» outlines for the current source and targets.
@@ -32486,7 +34099,9 @@ class MainWindow(QMainWindow):
         built = self._built_footprint(lambda: build_castellated_module(p))
 
         self._draw_grid(
-            mm_to_px, p.body_length, p.body_width, p.pad_overhang + p.pad_length,
+            # The overhang the footprint really uses: an assumed one may be
+            # reduced to fit a declared land (review I, 2026-11-16).
+            mm_to_px, p.body_length, p.body_width, p.effective_pad_overhang + p.pad_length,
             x0=-p.body_length / 2, y0=-p.body_width / 2,
             origin=castellated_preview_grid_origin(p),
         )
@@ -34576,6 +36191,25 @@ def _startup_error_language() -> str:
     return language if language in LANGUAGES else "it"
 
 
+def _watch_application_for_crash_log(app) -> bool:
+    """@brief Let the crash reporter mark its native log as survived at the application's orderly ends.
+
+    @param app The running QApplication.
+    @return What `crash_report.watch_application` returned; False when the
+        function is missing or fails.
+    @note Coordinator item from fixer C1 (2026-11-16): the launcher's
+        animated-splash path creates the application before this module, so
+        the watch is set here too; the call is idempotent. A missing or
+        failing function never blocks the start-up.
+    """
+    try:
+        from .. import crash_report
+        watch = getattr(crash_report, "watch_application", None)
+        return bool(watch(app)) if callable(watch) else False
+    except Exception:  # noqa: BLE001 - a crash-log helper must never stop the start
+        return False
+
+
 def main(splash=None) -> None:
     """@brief Start the Qt application, show the main window and run the event loop until exit.
 
@@ -34587,6 +36221,7 @@ def main(splash=None) -> None:
         first entry in the 3D tab does not pay for them.
     """
     app = QApplication.instance() or QApplication(sys.argv)
+    _watch_application_for_crash_log(app)
     # Program icon: window and taskbar (also when run from source).
     app.setWindowIcon(QIcon(str(resource_path("kicadgen", "gui", "assets", "app-icon.svg"))))
     app.setStyleSheet(APP_QSS)
@@ -34617,6 +36252,8 @@ def main(splash=None) -> None:
         if splash is not None:
             splash.finish(window)
         window._warn_missing_external_applications()
+        # Only the real start-up says so: test windows never call main().
+        window._offer_crash_notice()
     QTimer.singleShot(SPLASH_HANDOVER_MS if splash is not None else 0, hand_over)
     window.schedule_preview_3d_preload()
     # Only the real application reads the balance: the tests and the windows

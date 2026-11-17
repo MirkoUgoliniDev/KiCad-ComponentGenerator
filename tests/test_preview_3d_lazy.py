@@ -221,6 +221,10 @@ def test_main_centres_shows_then_preloads_and_hands_the_splash_over(qapp, monkey
         def show(self): calls.append("show")
         def schedule_preview_3d_preload(self): calls.append("preload")
         def _warn_missing_external_applications(self): calls.append("warn")
+        # CONTRACT CHANGED 2026-11-16 (user decision R12-5): the hand-over
+        # also offers the crash notice of the previous session, after the
+        # dependency warning.
+        def _offer_crash_notice(self): calls.append("crash_notice")
         def _sync_balance_provider(self): calls.append("sync")
 
     class FakeSplash:
@@ -242,3 +246,4 @@ def test_main_centres_shows_then_preloads_and_hands_the_splash_over(qapp, monkey
     scheduled[0][1]()
     assert ("finish", "FakeWindow") in calls and "warn" in calls
     assert calls.index(("finish", "FakeWindow")) < calls.index("warn"), 'the splash goes before the warning'
+    assert calls.index("warn") < calls.index("crash_notice"), 'the crash notice comes after the warning'

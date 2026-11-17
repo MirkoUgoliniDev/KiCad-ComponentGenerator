@@ -33,7 +33,7 @@ from .messages import tx
 from .openrouter import (TRANSIENT_HTTP_STATUSES, OpenRouterError, _ClosableRequest,
                          _cancelled_error, _closable_context, _diagnostic_context,
                          _json_from_response, _refuse_unsendable_headers, _retry_after,
-                         _safe_error_text)
+                         _safe_error_text, network_reason, run_abandonable)
 
 PROVIDER_OPENROUTER = "openrouter"
 PROVIDER_DEEPSEEK = "deepseek"
@@ -82,15 +82,20 @@ def provider_model_name(model: str) -> str:
 
 
 def _deepseek_dotenv_key() -> tuple[str, Optional[str]]:
-    """DEEPSEEK_API_KEY of the first `.env` file that sets it, and that file."""
+    """DEEPSEEK_API_KEY of the first `.env` file that sets it, and that file.
+
+    Each file is decoded as the launcher decodes it (`dotenv_keys.file_values`:
+    a UTF-16 file with its mark is read, an undecodable one is skipped).
+    """
     try:
-        from dotenv import dotenv_values
+        import dotenv  # noqa: F401 - only to tell whether python-dotenv is there
     except ImportError:
         return "", None
+    from .dotenv_keys import file_values
     for path in env_files():
         try:
             if path.is_file():
-                found = (dotenv_values(path).get(DEEPSEEK_KEY_ENV) or "").strip()
+                found = (file_values(path).get(DEEPSEEK_KEY_ENV) or "").strip()
                 if found:
                     return found, str(path)
         except (OSError, ValueError):
@@ -273,10 +278,12 @@ def deepseek_request(url: str, body: Optional[dict] = None, timeout: int = _HTTP
     request = urllib.request.Request(url, data=data, headers=headers,
                                      method="POST" if body is not None else "GET")
     if body is None:
-        return _send(request, timeout, key, None)
+        # A free GET (balance, models): the user's Cancel stops the wait for
+        # it instead of sitting through its timeout (review R7-5).
+        return run_abandonable(lambda: _send(request, timeout, key, None), "DeepSeek")
     # A POST is a paid chat call: its connection is registered so that the
     # user's Cancel can close it while the answer is awaited (2026-10-29, E6).
-    with _ClosableRequest() as inflight:
+    with _ClosableRequest("DeepSeek") as inflight:
         try:
             return _send(request, timeout, key, _closable_context())
         except ProviderError as exc:
@@ -348,13 +355,11 @@ def _network_reason(exc: BaseException) -> str:
 
     A proxy error can echo the proxy URL with its credentials, a socket error
     a host name: like OpenRouter's, the text is reduced to known categories
-    by `openrouter._safe_error_text` («timed out», ...); anything else becomes
-    «provider details omitted».
+    by `openrouter._safe_error_text` («timed out», ...) and the socket errors
+    to the categories of `openrouter.network_reason`, recognised by their type
+    (review R7-9: they all read «provider details omitted» before).
     """
-    reason = getattr(exc, "reason", exc)
-    if isinstance(reason, TimeoutError) or isinstance(exc, TimeoutError):
-        return _safe_error_text("timed out")
-    return _safe_error_text(reason if isinstance(reason, str) else None)
+    return network_reason(exc)
 
 
 def deepseek_models() -> list:
@@ -384,7 +389,11 @@ class ProviderBalance:
     """@brief Remaining credit of a provider other than OpenRouter."""
 
     provider: str
-    available: bool
+    #: True / False as the provider declared it; None when its answer did not
+    #: say (malformed): unknown, never «exhausted» (review R7-8). A caller must
+    #: test it against None: `ensure_providers_ready` lets the run proceed
+    #: with a warning, as for an unverifiable credit (user decision 2026-11-16).
+    available: Optional[bool]
     amount: Optional[float]
     currency: str
 
@@ -392,9 +401,13 @@ class ProviderBalance:
         """@brief Render the balance as one log line in the active language.
 
         @return The line: the amount with its currency when known, otherwise
-            whether credit is available or exhausted.
+            whether credit is available or exhausted, or that the answer did
+            not say (`available` None).
         """
         label = tx(PROVIDER_LABELS.get(self.provider, self.provider))
+        if self.available is None:
+            return tx("Credito {label}: risposta del fornitore non leggibile, disponibilità "
+                      "non verificata.", label=label)
         if self.amount is None:
             return tx("Credito {label}: {state}.", label=label,
                       state=tx("disponibile") if self.available else tx("esaurito"))
@@ -420,13 +433,17 @@ def deepseek_balance(key: Optional[str] = None) -> ProviderBalance:
         if math.isfinite(value):
             amount, currency = value, str(info.get("currency") or "")
             break
-    # Only a JSON true is availability: a string "false" or a number is a
-    # malformed answer, and a malformed answer never unlocks a paid run.
-    available = isinstance(payload, dict) and payload.get("is_available") is True
+    # Only a JSON true is availability and only a JSON false is exhaustion: a
+    # string "false", a number or a missing field is a malformed answer,
+    # which says nothing (None, review R7-8): an unverifiable balance, never
+    # read as «available» nor as «exhausted».
+    declared = payload.get("is_available") if isinstance(payload, dict) else None
+    available = declared if isinstance(declared, bool) else None
     return ProviderBalance(PROVIDER_DEEPSEEK, available, amount, currency)
 
 
-def ensure_providers_ready(models, progress=None, *, openrouter_check=None) -> None:
+def ensure_providers_ready(models, progress=None, *, openrouter_check=None,
+                           cancel=None) -> None:
     """@brief Before a paid run: every provider used has a key and some credit.
 
     @param models Model identifiers the run will call (duplicates allowed).
@@ -439,8 +456,22 @@ def ensure_providers_ready(models, progress=None, *, openrouter_check=None) -> N
         module-level references to those functions.
     @throws ProviderError (DeepSeek) or OpenRouterError (OpenRouter) when a key
         is missing or the credit is known to be exhausted. A credit that cannot
-        be read is logged and does not stop the run, as for OpenRouter.
+        be read -- no answer, or a DeepSeek balance answer that does not say
+        whether credit is available (user decision 2026-11-16) -- is logged
+        and does not stop the run, as for OpenRouter.
+    @param cancel Optional thread-safe checker that raises to cancel (the
+        `cancel` of `ai_diagnostics.make_logged_call`); None = none. The
+        credit and balance requests then run in `ai_diagnostics.cancel_scope`:
+        a Cancel pressed during them stops the wait at once instead of after
+        their timeouts (review R7-5), and its exception is raised.
     """
+    from .ai_diagnostics import cancel_scope
+    with cancel_scope(cancel):
+        _ensure_ready(models, progress, openrouter_check)
+
+
+def _ensure_ready(models, progress, openrouter_check) -> None:
+    """The checks of `ensure_providers_ready`, inside its cancellation scope."""
     log = progress or (lambda message: None)
     used = {provider_of(model) for model in models if model} or {PROVIDER_OPENROUTER}
     if PROVIDER_OPENROUTER in used:
@@ -459,6 +490,15 @@ def ensure_providers_ready(models, progress=None, *, openrouter_check=None) -> N
             raise
         except ProviderError as exc:
             log(tx("Credito DeepSeek non verificabile: {exc}. Si prosegue comunque.", exc=exc))
+            return
+        if balance.available is None:
+            # User decision 2026-11-16: an unreadable balance answer is an
+            # unverifiable credit, treated exactly like an unverifiable
+            # OpenRouter credit -- a warning, and the run proceeds; the API
+            # itself refuses the call when there really is no credit. Only a
+            # declared «is_available: false» stops the run.
+            log(tx("Credito DeepSeek non verificabile: {exc}. Si prosegue comunque.",
+                   exc=tx("risposta sul saldo non leggibile")))
             return
         log(balance.describe())
         if not balance.available:

@@ -258,6 +258,12 @@ def _installed(tmp_path, scope='project'):
     installed = attach_3d_model(name_footprint(source, 'Demo'), reference, (0.0, 0.0, 0.0))
     (pretty / 'Demo.kicad_mod').write_bytes(installed.replace('\n', '\r\n').encode('utf-8'))
     step.write_bytes(art.step_path.read_bytes())
+    if scope == 'project':
+        # CONTRACT CHANGED 2026-11-16 (R9-4): a project installation is up to
+        # date only with its fp-lib-table row too, as the install writes it.
+        (root / 'fp-lib-table').write_text(
+            '(fp_lib_table\n  (version 7)\n  (lib (name "KiCadGen")(type "KiCad")'
+            '(uri "${KIPRJMOD}/KiCadGen.pretty")(options "")(descr ""))\n)\n', encoding='utf-8')
     return art, source, [{'scope': scope, 'pretty_dir': str(pretty)}], pretty, step
 
 

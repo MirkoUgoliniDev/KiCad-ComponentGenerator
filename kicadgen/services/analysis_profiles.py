@@ -260,6 +260,8 @@ class ProfileStore:
         the file in both cases (review 2026-10-29, E4).
         """
         code = getattr(exc, 'sqlite_errorcode', None)
+        if not self.path.exists():
+            return self._missing_problem()
         if code in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED) or 'locked' in str(exc).lower():
             return tx("Database profili {path} bloccato da un altro programma ({error}): chiudi "
                       "le altre finestre di KiCadGen e riprova.", path=self.path, error=exc)
@@ -267,15 +269,45 @@ class ProfileStore:
                   "oppure rinominalo per ripartire dai profili di fabbrica.",
                   path=self.path, error=exc)
 
+    def _missing_problem(self):
+        """Translated reason, with its remedy, why the database file is not there any more.
+
+        Deleted or moved while the program runs (review R7-1): the connection
+        no longer recreates it empty, and «rinominalo» (rename it) would name
+        a file that is not there.
+        """
+        return tx("Database profili {path} non trovato: è stato spostato o cancellato mentre "
+                  "il programma era aperto. Rimettilo al suo posto, oppure riavvia KiCadGen "
+                  "per ripartire dai profili di fabbrica.", path=self.path)
+
     @contextmanager
-    def _connect(self):
+    def _connect(self, *, create=False):
         """A short-lived connection, committed on success.
 
-        Opening failures (file locked, damaged, not a database) become a
-        ProfileError naming the file and the remedy (review 2026-10-29, E4);
-        errors of the queries run inside keep their sqlite3 class, which
-        the callers already handle.
+        Opening failures (file locked, damaged, not a database, missing)
+        become a ProfileError naming the file and the remedy (review
+        2026-10-29, E4); errors of the queries run inside keep their sqlite3
+        class, which the callers already handle.
+
+        Only `create` True (the opening in `__init__`, which seeds the schema
+        and the factory profiles in the same transaction) may create the
+        file. Every later connection opens it read-write WITHOUT creating
+        it: a plain `sqlite3.connect` on a database deleted or moved while
+        the program runs made a new EMPTY file, whose missing tables then
+        raised from every lookup -- the translation one included, inside a
+        Qt slot, which closed the program (review R7-1).
+
+        The «without creating» is an existence check followed by the plain
+        connection, not an SQLite ``file:...?mode=rw`` URI: a URI made from a
+        UNC path (``\\\\server\\share\\...``, or a mapped drive that `resolve`
+        turns into one) is refused by SQLite's URI parser, and every lookup
+        failed with advice that set the user's profiles aside for nothing
+        (adversarial review of R7-1). Declared limit: a deletion in the
+        instant between the check and the connection still creates an empty
+        file, which the queries then report as an unusable database.
         """
+        if not create and not self.path.is_file():
+            raise ProfileError(self._missing_problem())
         try:
             connection = sqlite3.connect(self.path,timeout=5)
         except sqlite3.DatabaseError as exc:
@@ -293,10 +325,13 @@ class ProfileStore:
             connection.close()
 
     @contextmanager
-    def _writing(self):
-        """A connection for a write; the read cache is dropped after it, committed or not."""
+    def _writing(self, *, create=False):
+        """A connection for a write; the read cache is dropped after it, committed or not.
+
+        `create` as in `_connect`: only the opening in `__init__` creates the file.
+        """
         try:
-            with self._connect() as db:
+            with self._connect(create=create) as db:
                 yield db
         finally:
             self._invalidate_cache()
@@ -369,7 +404,10 @@ class ProfileStore:
         return value
 
     def _initialize(self,legacy,legacy_path):
-        with self._writing() as db:
+        # The one connection allowed to create the file: an absent database
+        # is created here and seeded with the schema and the factory
+        # profiles in the same transaction, never left empty.
+        with self._writing(create=True) as db:
             db.execute('BEGIN IMMEDIATE')
             version = db.execute('PRAGMA user_version').fetchone()[0]
             if version > SCHEMA_VERSION:
@@ -982,7 +1020,8 @@ class ProfileStore:
             profile manager, user request 2026-11-12: changes applied only
             on «Applica»).
         @param expected_signature `contents_signature()` taken when the copy
-            was made; None skips the check.
+            was made; None skips the check, and so does a database file that
+            no longer exists (it is recreated from `source`).
         @throws ProfileError When this database changed since
             `expected_signature` (another window or program wrote it: its
             changes would be lost), or when a file cannot be opened.
@@ -990,7 +1029,10 @@ class ProfileStore:
             own lock, so a reader never sees half of it; the read caches of
             every store of this process are dropped after it.
         """
-        if expected_signature is not None and self._database_signature() != expected_signature:
+        # A database that vanished meanwhile holds no one's changes: restoring
+        # puts it back instead of refusing (adversarial review of R7-1).
+        if (expected_signature is not None and self.path.exists()
+                and self._database_signature() != expected_signature):
             raise ProfileError(tx("Il database dei profili {path} è stato modificato da un'altra finestra o "
                                   "da un altro programma mentre la gestione era aperta: le modifiche non "
                                   "sono state salvate, per non cancellare le sue. Chiudi senza salvare "
@@ -1020,7 +1062,10 @@ class ProfileStore:
             # Declared limit (review finding 4): the signature is compared,
             # then the backup takes the lock; a write by another process in
             # those milliseconds would be overwritten.
-            with self._connect() as target:
+            # The one later connection allowed to create the file: restoring
+            # a complete, validated copy IS putting the database back, also
+            # when it vanished meanwhile (adversarial review of R7-1).
+            with self._connect(create=True) as target:
                 origin.backup(target)
         finally:
             origin.close()

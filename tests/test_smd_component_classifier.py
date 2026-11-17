@@ -12,8 +12,9 @@ def test_board_preparation_shares_the_full_frame_for_component_margins(monkeypat
     from kicadgen.services import photo_inventory, photo_refine
     photo = np.arange(50 * 80 * 3, dtype=np.uint8).reshape(50, 80, 3)
     monkeypatch.setattr(photo_inventory, "read_photo", lambda path: photo)
-    monkeypatch.setattr(photo_refine, "find_board", lambda *a: SimpleNamespace(
-        cx=40, cy=25, width_px=60, height_px=40))
+    # The search on the photo as taken is `locate_board` (review 2026-11-16, R8-3).
+    monkeypatch.setattr(photo_refine, "locate_board", lambda *a: photo_refine.BoardSearch(
+        SimpleNamespace(cx=40, cy=25, width_px=60, height_px=40), photo_refine.BOARD_FOUND))
     frames = []
     board = photo_inventory.prepare_photo(
         "unused.png", 60, 40, frame_callback=lambda frame, box: frames.append((frame, box)))
@@ -283,7 +284,8 @@ def _smd_inventory(monkeypatch, tmp_path, classify, cancel):
     from kicadgen.services import photo_inventory as inv, photo_yolo
     full = np.zeros((40, 60, 3), np.uint8)
 
-    def prepare(path, length, width, calibration, *, frame_callback):
+    def prepare(path, length, width, calibration, *, frame_callback, **_options):
+        # `cancel` arrives too when the run has a channel (review 2026-11-16, R8-2).
         frame_callback(full, (10, 10, 30, 30))
         return full[10:30, 10:30].copy()
     proposal = dict(_id=1, _box=[.2, .2, .6, .4], _yolo_class='resistor', x_mm=0., y_mm=0.,
@@ -310,11 +312,17 @@ def test_cancelling_the_network_stops_the_run_instead_of_degrading_to_a_failure(
     """
     from kicadgen.services.ai_diagnostics import CallCancelled
 
+    # The channel is set WHILE the network runs: set from the start, the
+    # local phases before the network would stop the run first (review
+    # 2026-11-16, R8-2) and the network path would not be exercised.
+    state = {'set': False}
+
     def classify(*args, **kwargs):
+        state['set'] = cancelled
         raise RuntimeError('Classificazione SMD annullata')
     expected = CallCancelled if cancelled else RuntimeError
     with pytest.raises(expected) as caught:
-        _smd_inventory(monkeypatch, tmp_path, classify, lambda: cancelled)
+        _smd_inventory(monkeypatch, tmp_path, classify, lambda: state['set'])
     assert isinstance(caught.value, CallCancelled) is cancelled
 
 

@@ -15,11 +15,20 @@ change the total, the call count or the entries.
     the caller gets ProjectCostsError and the file stays as it is, for a
     person to look at. Losing a history silently would be worse than not
     counting one call.
+@note One exception, structural and not a threshold: a file with NO content
+    at all (0 bytes, or only NUL bytes and blanks) is what a power cut leaves
+    after a write whose data never reached the disk. It holds no history to
+    lose, yet refusing it blocked every later cost for ever (review R7-2): it
+    is read as absent, and the next write sets it aside as
+    ``ai-costs.json.corrupt-<time>`` (never deleted) and starts afresh, with
+    a log line. Every write is flushed and fsynced before its atomic replace
+    (`_save`), so the program itself no longer leaves one.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import os
 import tempfile
 import threading
@@ -30,6 +39,9 @@ from pathlib import Path
 from typing import Any, Optional
 
 from ..core.validation import finite_number
+
+#: Logger of the cost file (a blank file set aside is reported here).
+_LOG = logging.getLogger(__name__)
 
 #: File name inside the project folder.
 COSTS_FILE = "ai-costs.json"
@@ -145,13 +157,45 @@ def _entry_cost(entry: dict) -> Optional[float]:
     return None if cost is None or cost < 0 else cost
 
 
+def _blank(raw: bytes) -> bool:
+    """True when the bytes hold no content at all: empty, or only NUL bytes and blanks.
+
+    The trace of a write interrupted by a power cut (the file's size was
+    recorded, its data never reached the disk), not of a damaged history:
+    there is nothing in it a person could recover (review R7-2).
+    """
+    return not raw.strip(b"\x00 \t\r\n")
+
+
+def _set_aside(path: Path) -> Path:
+    """Rename `path` to ``<name>.corrupt-<YYYYmmdd-HHMMSS>`` (a counter when taken); never deletes."""
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    aside = path.with_name(f"{path.name}.corrupt-{stamp}")
+    counter = 1
+    while aside.exists():
+        aside = path.with_name(f"{path.name}.corrupt-{stamp}-{counter}")
+        counter += 1
+    os.replace(path, aside)
+    return aside
+
+
 def _read(path: Path) -> Optional[dict]:
-    """Validated content of the file, or None when it does not exist."""
+    """Validated content of the file, or None when it does not exist or is blank.
+
+    Called under the lock by the writers: a blank file (`_blank`) is set
+    aside here, so the write that follows starts a fresh file.
+    """
     if not path.exists():
         return None
     # OSError (file busy for a moment) goes up as it is: it is not a damaged
     # file and must never be reported, or treated, as one.
-    return _parse(path, path.read_bytes())
+    raw = path.read_bytes()
+    if _blank(raw):
+        aside = _set_aside(path)
+        _LOG.warning("%s held no data (interrupted write?): set aside as %s, costs start afresh",
+                     path, aside.name)
+        return None
+    return _parse(path, raw)
 
 
 #: Totals of the cost files read by load_project_costs:
@@ -174,6 +218,10 @@ def _loaded_totals(path: Path, run: Optional[int]) -> Optional[ProjectCosts]:
     if not path.exists():
         return None
     raw = path.read_bytes()
+    if _blank(raw):
+        # Read as absent; the next write sets it aside (`_read`). A reader
+        # never renames: it does not hold the writers' lock.
+        return None
     key = str(path)
     with _LOADED_LOCK:
         cached = _LOADED.get(key)
@@ -592,13 +640,16 @@ def _remove_stale_lock(path: Path) -> bool:
 class _exclusive_lock:
     """Exclusive lock file created with O_CREAT | O_EXCL (atomic on local disks)."""
 
-    def __init__(self, folder: Path):
-        """@brief Prepare the lock for a project folder; nothing is created yet.
+    def __init__(self, folder: Path, name: str = LOCK_FILE):
+        """@brief Prepare the lock for a folder; nothing is created yet.
 
-        @param folder Project folder that holds the cost ledger; the lock file
-            is created there only on `__enter__`.
+        @param folder Folder that holds the guarded file (the project folder
+            for the cost ledger); the lock file is created there only on
+            `__enter__`.
+        @param name Lock file name; LOCK_FILE for the cost ledger. Other
+            read-modify-write files take their own (`exclusive_lock`).
         """
-        self.path = folder / LOCK_FILE
+        self.path = folder / name
         self.handle = None
 
     def __enter__(self):
@@ -628,7 +679,9 @@ class _exclusive_lock:
                 self.handle = handle
                 return self
             if time.monotonic() >= deadline:
-                raise TimeoutError(f"{COSTS_FILE}: locked by another writer")
+                guarded = self.path.name[:-len(".lock")] if self.path.name.endswith(".lock") \
+                    else self.path.name
+                raise TimeoutError(f"{guarded}: locked by another writer")
             time.sleep(LOCK_POLL_S)
 
     def __exit__(self, *exc_info):
@@ -640,6 +693,22 @@ class _exclusive_lock:
             except OSError:
                 pass
         return False
+
+
+def exclusive_lock(folder: Path, name: str):
+    """@brief The cost ledger's exclusive lock file, for another read-modify-write file.
+
+    @param folder Folder of the guarded file; created on entry if missing.
+    @param name Lock file name, e.g. ``<guarded file>.lock``.
+    @return A context manager: entering creates the lock with O_CREAT |
+        O_EXCL (polling up to LOCK_TIMEOUT_S, a stale lock older than
+        LOCK_STALE_S is removed), leaving removes it.
+    @throws TimeoutError On entry, when another writer keeps the lock.
+    @note Serialises writers of two threads and of two application
+        instances alike (review R7-11, the KiCad export history). Shared
+        here rather than copied, so the stale-lock rules cannot drift.
+    """
+    return _exclusive_lock(Path(folder), name)
 
 
 def _add_call_once(folder: Path, record: dict, now: Optional[datetime]) -> ProjectCosts:
@@ -672,12 +741,23 @@ def _add_call_once(folder: Path, record: dict, now: Optional[datetime]) -> Proje
 
 
 def _save(folder: Path, path: Path, data: dict) -> ProjectCosts:
-    """Write the cost file atomically and return its totals."""
+    """Write the cost file durably and atomically and return its totals.
+
+    Flushed and fsynced before the replace: without it a power cut right
+    after the rename could publish an empty file under the final name
+    (review R7-2). The replace is ONE `os.replace`, not
+    `fsutil.replace_file`: a busy file is retried by `_locked_update`, whose
+    short pauses keep the GUI thread's wait bounded (RETRY_FIRST_PAUSE_S);
+    nesting fsutil's own retries inside would multiply that wait.
+    """
     folder.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
     handle, temporary = tempfile.mkstemp(prefix=".ai-costs-", suffix=".json", dir=folder)
     try:
-        with os.fdopen(handle, "w", encoding="utf-8") as stream:
-            json.dump(data, stream, ensure_ascii=False, indent=2)
+        with os.fdopen(handle, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
         os.replace(temporary, path)
     except BaseException:
         try:

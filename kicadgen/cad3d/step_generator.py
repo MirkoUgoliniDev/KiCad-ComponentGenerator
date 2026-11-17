@@ -36,7 +36,7 @@ from .measurement_uncertainty import (
 from ..core.output_names import validate_output_name
 from .process_log import NO_WINDOW_FLAGS, ProcessCancelled, heartbeat_interval
 from ..services.messages import CHILD_WARNING, child_warning_text, tx
-from ..fsutil import replace_file
+from ..fsutil import replace_file, retry_transient
 from ..core.validation import is_finite_number, positive_number
 from ..kicad_versions import newest_version_first, parse_version
 from .lead_sides import local_lead_sides
@@ -719,7 +719,10 @@ def castellated_contact_payload(params: CastellatedModuleParams, pin_color_hex: 
             # golden pad, never longer than that part of the footprint land
             # (2026-11-03 second review, G9: a 0.6 mm floor drew gold where
             # the land has none). See CASTELLATED_PAD_MIN_INNER_MM.
-            inner_len = max(pad_len - params.pad_overhang, CASTELLATED_PAD_MIN_INNER_MM)
+            # The overhang the footprint really uses (an assumed one may be
+            # reduced to fit a declared land, review I 2026-11-16), so the 3D
+            # gold matches the copper of the written footprint.
+            inner_len = max(pad_len - params.effective_pad_overhang, CASTELLATED_PAD_MIN_INNER_MM)
             if placement.edge == "left":
                 centre = (-half_length + inset, placement.y)
                 label = (-half_length + inner_len + label_gap, placement.y)
@@ -1022,7 +1025,13 @@ def attach_library_models(components, height_notes, notes, report, *,
         (point 66c, user decision of 2026-09-26). If that import then fails,
         FreeCAD falls back to the capped shape, and the body is already
         flagged as a failed import.
+    @note All or nothing (2026-11-16 review, R10-7): `attach_models` edits the
+        payloads one by one, so an error half-way used to leave some bodies
+        with a model and the others without, while the message announced
+        approximate shapes for all. On an error every payload is put back as
+        it was before the call, which is what the message says.
     """
+    snapshot = _payload_snapshot(components)
     try:
         from .kicad_models import attach_models
         # The channel is passed ONLY when present, as for `run_logged`: a
@@ -1036,11 +1045,32 @@ def attach_library_models(components, height_notes, notes, report, *,
         # usable) and the construction of the solid would start anyway.
         raise Cad3DCancelled() from exc
     except Exception as exc:  # noqa: BLE001 - the library is an extra, never a requirement
+        _restore_payloads(components, snapshot)
         report(tx("Libreria 3D KiCad non utilizzabile ({exc}); si usano le forme "
                   "approssimate.",
                   exc=exc))
     notes.extend(note for rendered, note in height_notes
                  if not rendered.get("model_path"))
+
+
+def _payload_snapshot(components) -> list:
+    """Deep copies of the component payloads, to undo a half-done model attachment."""
+    import copy
+    snapshot = []
+    for component in components:
+        try:
+            snapshot.append(copy.deepcopy(component))
+        except Exception:  # noqa: BLE001 - an uncopiable value: fall back to the top level
+            snapshot.append(dict(component) if isinstance(component, dict) else component)
+    return snapshot
+
+
+def _restore_payloads(components, snapshot) -> None:
+    """Put every payload dict back in place to its snapshot (same objects, old content)."""
+    for component, before in zip(components, snapshot):
+        if isinstance(component, dict) and isinstance(before, dict):
+            component.clear()
+            component.update(before)
 
 
 def reused_height_notes(height_notes, reused) -> list:
@@ -1839,6 +1869,44 @@ def _published_outputs(step_path: Path, wrl_path: Path, mesh_path: Path,
     return {key: (final, staging_path(final)) for key, final in outputs}
 
 
+def _child_failure(output: str, marker: str) -> Optional[str]:
+    """Text the child printed after `marker` (e.g. ``KICADGEN_WRL_FAILED:``), or None."""
+    for line in str(output or "").splitlines():
+        line = line.strip()
+        if line.startswith(marker):
+            return line[len(marker):].strip() or None
+    return None
+
+
+def missing_output_warnings(output: str, returncode) -> list:
+    """@brief Warnings for the WRL and the preview a run with a good STEP did not produce.
+
+    @param output Whole output of the FreeCAD child.
+    @param returncode Exit code of the child (None or 0 when it ended cleanly).
+    @return One warning per missing output, with the reason the child gave
+        (``KICADGEN_WRL_FAILED:<text>``), else the exit code of a child that
+        died after the STEP, else a plain «no outcome». Empty when both
+        outputs carry their success marker: a non-zero exit code alone, with
+        every output present, is not reported.
+    """
+    def reason(failed):
+        """The child's own reason, else the exit code, else «no outcome»."""
+        text = _child_failure(output, failed)
+        if text is None and returncode not in (0, None):
+            text = tx("FreeCAD terminato con codice {code} dopo lo STEP", code=returncode)
+        return text if text is not None else tx("nessun esito da FreeCAD")
+
+    warnings = []
+    text = str(output or "")
+    if "KICADGEN_WRL_OK" not in text:
+        warnings.append(tx("Modello WRL non esportato ({reason}): la libreria avra' solo il "
+                           "modello STEP.", reason=reason("KICADGEN_WRL_FAILED:")))
+    if "KICADGEN_MESH_OK" not in text:
+        warnings.append(tx("Anteprima della geometria reale non esportata ({reason}).",
+                           reason=reason("KICADGEN_MESH_FAILED:")))
+    return warnings
+
+
 def _remove_output(path: Path, *, quiet: bool = False) -> None:
     """Delete one output file if present.
 
@@ -1847,7 +1915,10 @@ def _remove_output(path: Path, *, quiet: bool = False) -> None:
         FreeCAD anyway would leave the old file looking like the new result.
     """
     try:
-        path.unlink()
+        # A scanner or a preview holding the file for an instant refuses the
+        # delete with PermissionError: waited for briefly, as every other
+        # file operation of the program (2026-11-16 review, R10-6).
+        retry_transient(path.unlink)
     except FileNotFoundError:
         pass
     except OSError as exc:
@@ -1948,8 +2019,18 @@ def _run_freecad(
     the child writes each export under `staging_path` and renames it only
     once that export succeeded; if the run fails, times out or is cancelled,
     whatever it published is deleted again. A WRL or preview without its
-    success marker is deleted too. So a 3D file present after this call is
-    always a complete export of the latest run.
+    success marker is deleted too, and its absence becomes a warning that
+    says why (`missing_output_warnings`). So a 3D file present after this
+    call is always a complete export of the latest run.
+
+    Library models that kill the child (2026-11-16 review, R10-4): when the
+    child dies with a failing exit code while importing a library model
+    (`import_in_progress`), before the STEP, that model is remembered for
+    this FreeCAD build (`kicad_models.record_import_crash`) and the run is
+    repeated ONCE without importing it -- the body gets the approximate
+    shape and is flagged as a failed import. Later runs skip the remembered
+    model at once. Measuring (`Part.read`) and building (`Import.insert`)
+    use different readers, so a model the measure read may still crash here.
     """
     body.validate()
     if not is_finite_number(body_rotation_deg):
@@ -2039,6 +2120,297 @@ def _run_freecad(
     # KICADGEN_DATA_DIR already applied.
     from . import model_size_cache
     payload["cache_dirs"] = [str(folder) for folder in model_size_cache.user_cache_dirs()]
+
+    # The models whose import already killed THIS FreeCAD build are not
+    # imported again (2026-11-16 review, R10-4): the component gets the
+    # approximate shape at once, instead of every generation failing.
+    reader = model_size_cache.file_identity(Path(freecadcmd)) if freecadcmd else None
+    blocked = _remembered_import_crashes(payload, reader)
+    notices = [_import_crash_warning(_payload_model(payload, index)) for index in sorted(blocked)]
+    while True:
+        try:
+            result = _launch_freecad(payload, published, freecadcmd, output_dir, progress,
+                                     cancel, blocked)
+            break
+        except _ImportCrash as crash:
+            # Raised only for a model not blocked yet, and every pass blocks
+            # one more, so the loop ends: at worst every library model of the
+            # payload is blocked and the run uses approximate shapes only.
+            # A second crashing model is solo-checked like the first, and
+            # every notice is kept (2026-11-16 review E).
+            notices.append(_handle_import_crash(crash, payload, freecadcmd, reader, output_dir,
+                                                progress, cancel))
+            blocked = blocked | {crash.index}
+            if progress:
+                progress(notices[-1])
+    result["warnings"] = notices + result["warnings"]
+    return result
+
+
+def _user_cache_dirs() -> list:
+    """The user cache folders the child reads (KICADGEN_DATA_DIR applied); empty on a failure."""
+    try:
+        from . import model_size_cache
+        return list(model_size_cache.user_cache_dirs())
+    except (OSError, ValueError):
+        return []
+
+
+def _handle_import_crash(crash, payload, freecadcmd, reader, output_dir, progress,
+                         cancel) -> str:
+    """@brief Decide whether a crash inside an import is the model's fault; return the notice.
+
+    @note The child died inside this import, but that alone does not prove
+        the model guilty: memory used up by the earlier imports, a kill from
+        outside (antivirus, Task Manager), a shutdown end a child the same way
+        (2026-11-16 review). The model is imported ALONE in a fresh child;
+        only a second crash there is remembered. Either way the caller
+        repeats the run without it.
+    @throws Cad3DCancelled When the user cancels during the solo check.
+    """
+    component = (payload.get("components") or [])[crash.index]
+    outcome = _solo_import_check(freecadcmd, component, output_dir, progress, cancel)
+    if outcome == SOLO_CRASHED:
+        from .kicad_models import record_import_crash
+        record_import_crash(crash.model_path, reader, crash.exit_code, crash.stage)
+        if crash.stage == "analysis":
+            return tx("Il modello STEP della libreria {name} si legge, ma ha fatto terminare "
+                      "FreeCAD durante l'analisi che segue l'importazione: per quel "
+                      "componente si usa la forma approssimata.",
+                      name=Path(str(crash.model_path)).name)
+        return _import_crash_warning(crash.model_path)
+    if outcome == SOLO_UNKNOWN:
+        return tx("FreeCAD si e' chiuso mentre importava il modello STEP della libreria "
+                  "{name} e il controllo del modello da solo non e' arrivato "
+                  "all'importazione: in questa generazione si usa la forma approssimata, "
+                  "nella prossima si riprova.", name=Path(str(crash.model_path)).name)
+    return tx("FreeCAD si e' chiuso mentre importava il modello STEP della "
+              "libreria {name}, ma importato da solo il modello si legge: in "
+              "questa generazione si usa la forma approssimata, nella prossima "
+              "si riprova.", name=Path(str(crash.model_path)).name)
+
+
+#: Script of the solo import check: the blamed component, alone, through the
+#: SAME code the builder runs on it (`freecad_parts._library_model`: the read
+#: and the analysis that follows -- body section, landmark booleans), so a
+#: model that reads fine but kills the child in the analysis is caught too
+#: (2026-11-16 review H). A native crash ends the child without the closing
+#: marker. Everything travels in the parameter file, never as an argument:
+#: freecadcmd would open an extra ``.step`` argument itself.
+_SOLO_IMPORT_SCRIPT = """
+import json, sys
+with open(sys.argv[-1], encoding="utf-8") as handle:
+    data = json.load(handle)
+sys.path.insert(0, data["cad_dir"])
+import FreeCAD
+import freecad_parts
+freecad_parts.set_heartbeat_interval(data.get("heartbeat_interval_s"))
+freecad_parts.set_cache_dirs(data.get("cache_dirs"))
+component = data["component"]
+FreeCAD.newDocument("KiCadGenSolo")
+print("KICADGEN_SOLO_IMPORT_START", flush=True)
+try:
+    freecad_parts._library_model(component, 0.0, 0.0, 0.0,
+                                 component.get("color_hex") or "#303030")
+except Exception:
+    pass
+print("KICADGEN_SOLO_IMPORT_DONE", flush=True)
+"""
+
+
+#: Outcomes of `_solo_import_check`.
+SOLO_CRASHED, SOLO_READ, SOLO_UNKNOWN = "crashed", "read", "unknown"
+
+
+def _solo_import_check(freecadcmd, component, output_dir, progress, cancel) -> str:
+    """@brief Import one component's model ALONE in a fresh FreeCAD child and say what happened.
+
+    @param freecadcmd Executable of the build that died.
+    @param component The payload component whose import was open when it
+        died; the child runs the builder's own import and analysis on it.
+    @param output_dir Component folder; the check is logged in its freecad.log.
+    @param progress Optional listener of the child's lines.
+    @param cancel Optional cancellation channel.
+    @return SOLO_CRASHED only when the child reached the import
+        (``KICADGEN_SOLO_IMPORT_START``) and then exited with a failing code
+        without ``KICADGEN_SOLO_IMPORT_DONE``; SOLO_READ when it finished;
+        SOLO_UNKNOWN when the check never reached the import (an antivirus
+        on the temporary script, a full disk, an error before the import)
+        or could not run at all (launch failure, timeout): nothing proves
+        the model guilty then (2026-11-16 review G).
+    @throws Cad3DCancelled When the user cancels during the check.
+    """
+    from .process_log import ProcessCancelled, run_logged
+    script = params = None
+    try:
+        with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False,
+                                         encoding="utf-8") as handle:
+            script = handle.name
+            handle.write(_SOLO_IMPORT_SCRIPT)
+        with tempfile.NamedTemporaryFile("w", suffix=".kicadgen_params", delete=False,
+                                         encoding="utf-8") as handle:
+            params = handle.name
+            solo = {key: value for key, value in component.items()
+                    if key != "model_import_blocked"}
+            json.dump({"solo_import": str(component.get("model_path")),
+                       "component": solo,
+                       "cad_dir": str(Path(__file__).resolve().parent),
+                       "heartbeat_interval_s": heartbeat_interval(FREECAD_SILENCE_TIMEOUT_S),
+                       "cache_dirs": [str(folder) for folder in _user_cache_dirs()]}, handle)
+        result = run_logged([freecadcmd, script, params], Path(output_dir) / "freecad.log",
+                            progress=progress, timeout=FREECAD_SILENCE_TIMEOUT_S,
+                            creationflags=_CFLAGS,
+                            **({"cancel": cancel} if cancel is not None else {}))
+    except ProcessCancelled as exc:
+        raise Cad3DCancelled() from exc
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return SOLO_UNKNOWN
+    finally:
+        for leftover in (script, params):
+            if leftover:
+                try:
+                    os.unlink(leftover)
+                except OSError:
+                    pass
+    output = (result.stdout or "") + (result.stderr or "")
+    if "KICADGEN_SOLO_IMPORT_DONE" in output:
+        return SOLO_READ
+    if ("KICADGEN_SOLO_IMPORT_START" in output
+            and getattr(result, "returncode", 0) not in (0, None)):
+        return SOLO_CRASHED
+    return SOLO_UNKNOWN
+
+
+class _ImportCrash(Cad3DError):
+    """@brief The FreeCAD child died while importing one library model, before the STEP.
+
+    @note A `Cad3DError`: a caller that does not retry sees the failed run
+        it always saw. `index` is the payload position of the component whose
+        import stayed open (`import_in_progress`); `model_path` is THAT
+        component's own ``model_path`` from the payload, never the path the
+        child echoed, which the output decoding may have altered.
+    """
+
+    def __init__(self, message, index, model_path, exit_code, stage=None):
+        """@brief Carry the failure text, the component index and model, the exit code and the stage.
+
+        @param stage "analysis" when the child had printed
+            ``KICADGEN_IMPORT_LOADED`` for this import, else "reading".
+        """
+        super().__init__(message)
+        self.index = index
+        self.model_path = model_path
+        self.exit_code = exit_code
+        self.stage = stage or "reading"
+
+
+#: Markers that close the import of one library model in the child
+#: (`freecad_parts._library_model`): its success or its handled failure.
+_IMPORT_OUTCOMES = ("KICADGEN_IMPORT_OK:", "KICADGEN_IMPORT_FAILED:")
+
+
+def import_in_progress(output: str) -> Optional[int]:
+    """@brief Payload index of the component whose import was open when the child's output stopped.
+
+    @param output Whole output of the FreeCAD child.
+    @return The index carried by the last ``KICADGEN_IMPORT_START:<index>:<path>``
+        that no ``KICADGEN_IMPORT_OK``/``KICADGEN_IMPORT_FAILED`` follows, or
+        None: no import open (the child died elsewhere), or a START without
+        an index, which cannot be tied to a component.
+    @note The child imports one model at a time, so the next outcome marker
+        always closes the open import: no path is compared. The echoed path
+        is not trusted for identity (2026-11-16 review G): decoded with
+        ``errors="replace"`` a non-ASCII path no longer equals the payload's,
+        and a path may contain ``;`` or ``:`` itself.
+    """
+    return _open_import(output)[0]
+
+
+def import_crash_stage(output: str) -> Optional[str]:
+    """@brief Where the open import was when the child's output stopped.
+
+    @param output Whole output of the FreeCAD child.
+    @return "analysis" when ``KICADGEN_IMPORT_LOADED`` (the file was read)
+        follows the open START, "reading" when it does not, None when no
+        import is open.
+    """
+    index, loaded = _open_import(output)
+    if index is None:
+        return None
+    return "analysis" if loaded else "reading"
+
+
+def _open_import(output: str) -> tuple:
+    """(index of the open import or None, whether its LOADED marker was seen)."""
+    current, loaded = None, False
+    for line in str(output or "").splitlines():
+        line = line.strip()
+        if line.startswith("KICADGEN_IMPORT_START:"):
+            head = line[len("KICADGEN_IMPORT_START:"):].split(":", 1)[0].strip()
+            current, loaded = (int(head) if head.isdecimal() else None), False
+        elif line.startswith("KICADGEN_IMPORT_LOADED:"):
+            loaded = current is not None
+        elif line.startswith(_IMPORT_OUTCOMES):
+            current, loaded = None, False
+    return current, loaded
+
+
+def _payload_model(payload: dict, index) -> Optional[str]:
+    """The `model_path` of the payload component at `index`, or None."""
+    components = payload.get("components") or []
+    if type(index) is not int or not 0 <= index < len(components):
+        return None
+    component = components[index]
+    path = component.get("model_path") if isinstance(component, dict) else None
+    return str(path) if path else None
+
+
+def _remembered_import_crashes(payload: dict, reader: Optional[str]) -> frozenset:
+    """Payload indices of the components whose model's import already killed this FreeCAD build."""
+    indices = [index for index in range(len(payload.get("components") or []))
+               if _payload_model(payload, index)]
+    if not indices or not reader:
+        return frozenset()
+    from .kicad_models import import_crash_remembered, load_stalls
+    memo = load_stalls()
+    return frozenset(index for index in indices
+                     if import_crash_remembered(memo, _payload_model(payload, index), reader))
+
+
+def _import_crash_warning(path) -> str:
+    """The warning naming a library model that is not imported because it crashed FreeCAD."""
+    return tx("Il modello STEP della libreria {name} ha fatto terminare FreeCAD durante "
+              "l'importazione: per quel componente si usa la forma approssimata.",
+              name=Path(str(path)).name)
+
+
+def _payload_with_blocked_imports(payload: dict, blocked) -> dict:
+    """Copy of `payload` whose components at the `blocked` indices ask the child not to import.
+
+    The caller's component dicts are not touched: they are saved for reuse
+    and reported as chosen, and the child marks the body as a failed import.
+    """
+    if not blocked:
+        return payload
+    components = []
+    for index, component in enumerate(payload.get("components") or []):
+        if index in blocked and isinstance(component, dict):
+            component = dict(component, model_import_blocked=True)
+        components.append(component)
+    return dict(payload, components=components)
+
+
+def _launch_freecad(payload, published, freecadcmd, output_dir, progress, cancel, blocked):
+    """Run one FreeCAD child for `payload` and read its outcome (body of `_run_freecad`).
+
+    @throws _ImportCrash When the child died, with a failing exit code and
+        before the STEP, while a library model was being imported.
+    """
+    payload = _payload_with_blocked_imports(payload, blocked)
+    step_path = Path(published["step"][0])
+    wrl_path = Path(published["wrl"][0])
+    mesh_path = Path(published["mesh"][0])
+    fcstd_path = Path(published["fcstd"][0])
 
     # Suffix other than ".json": freecadcmd tries to open as a document every
     # extra argument with an extension it recognises as an importable format
@@ -2138,7 +2510,17 @@ def _run_freecad(
 
         if "KICADGEN_STEP_OK" not in output or not step_path.is_file():
             tail = "\n".join(output.strip().splitlines()[-15:]) or tx("(nessun output)")
-            raise Cad3DError(tx("Generazione STEP fallita.\n\nOutput freecadcmd:\n{tail}", tail=tail))
+            message = tx("Generazione STEP fallita.\n\nOutput freecadcmd:\n{tail}", tail=tail)
+            culprit = import_in_progress(output)
+            culprit_model = _payload_model(payload, culprit)
+            # Blamed only when the child DIED (a failing exit code) inside
+            # the import: a run that ended by itself elsewhere is not the
+            # model's fault, and a model already blocked is not imported.
+            if (culprit_model and culprit not in blocked
+                    and getattr(result, "returncode", 0) not in (0, None)):
+                raise _ImportCrash(message, culprit, culprit_model, result.returncode,
+                                   import_crash_stage(output))
+            raise Cad3DError(message)
         # The marker and the file are not enough (2026-10-29 review, H8): a
         # STEP cut short -- a full disk, a writer killed after the rename --
         # still exists. The ISO 10303-21 trailer is the last thing a writer
@@ -2191,6 +2573,10 @@ def _run_freecad(
                             ("fcstd", "KICADGEN_FCSTD_OK")):
             if marker not in output:
                 _remove_output(published[key][0], quiet=True)
+        # ... and its absence is said (2026-11-16 review, R10-3): a WRL or a
+        # preview lost to an export error or to a child that died after the
+        # STEP used to vanish without a word, the run looking clean.
+        warnings.extend(missing_output_warnings(output, getattr(result, "returncode", 0)))
 
         return {
             "step_path": step_path,

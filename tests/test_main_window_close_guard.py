@@ -44,15 +44,23 @@ def test_close_is_refused_while_a_worker_runs(window, monkeypatch, slot):  # noq
         setattr(window, slot, None)
 
 
-def test_terminal_worker_reports_in_the_3d_status_before_the_general_guard(window, monkeypatch):  # noqa: F811
-    """@brief Il worker terminali avvisa nella barra 3D e non apre la modale generale."""
+def test_terminal_worker_reports_in_the_3d_status_and_with_the_general_box(window, monkeypatch):  # noqa: F811
+    """@brief The terminal worker warns in the 3D bar AND with the box every worker shows.
+
+    @note Contract changed by review 2026-11-16, R1-6: the 3D status bar
+        alone is invisible from any other tab, so the close was refused
+        without a word there. The box names the terminal pass.
+    """
     shown = []
-    monkeypatch.setattr(QMessageBox, 'information', lambda *args: shown.append(args[1]))
+    # A pass that cannot stop (no `can_cancel`, as the lead refinement) gets
+    # the plain box; the stop offer has its own tests (test_review_1116_c10.py).
+    monkeypatch.setattr(QMessageBox, 'information', lambda *args: shown.append(args[1:3]))
     window._terminal_worker = _running()
     try:
         assert not _close(window)
         assert 'Attendi' in window.label_3d_status.text()
-        assert shown == [], 'nessuna modale: il messaggio sta nella barra di stato 3D'
+        assert [title for title, _text in shown] == ['Operazione in corso']
+        assert 'terminali' in shown[0][1]
     finally:
         window._terminal_worker = None
 

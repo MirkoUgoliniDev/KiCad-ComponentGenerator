@@ -669,10 +669,17 @@ def test_models_with_unknown_prices_are_listed_after_the_priced_ones(monkeypatch
         "v/cheap", "v/dear", "v/unknown"]
 
 
-@pytest.mark.parametrize("value, expected", [(True, True), (False, False), ("false", False),
-                                             ("true", False), (1, False), (None, False)])
+# CONTRACT CHANGED (review R7-8 and user decision 2026-11-16): a malformed
+# availability is now None (unknown), no longer False, which the log and the
+# run's refusal called «esaurito» (exhausted). By the user's decision of
+# 2026-11-16 an unknown availability is an unverifiable credit: the paid run
+# proceeds with a warning, as for OpenRouter; only a JSON false refuses it
+# (tests/test_review_1116_c8.py). A malformed value is still never read as
+# «available»: only a JSON true is True.
+@pytest.mark.parametrize("value, expected", [(True, True), (False, False), ("false", None),
+                                             ("true", None), (1, None), (None, None)])
 def test_the_deepseek_account_is_available_only_on_a_json_true(monkeypatch, value, expected):
-    """@brief S6: a malformed availability never unlocks a paid run."""
+    """@brief S6: only a JSON true is availability, only a JSON false is exhaustion."""
     monkeypatch.setattr(providers, "deepseek_request", lambda url, *a, **k: {
         "is_available": value, "balance_infos": []})
     assert providers.deepseek_balance().available is expected

@@ -28,8 +28,10 @@ _FALLBACK_ROOTS = (r"C:\Program Files", r"C:\Program Files (x86)")
 #: Registry subkey of the entries listed in Settings > Apps.
 _UNINSTALL_KEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall"
 
-#: Values read from each entry, in order of trust for the install folder.
-_ENTRY_VALUES = ("DisplayName", "InstallLocation", "DisplayIcon", "UninstallString")
+#: Values read from each entry: the name, the three sources of the install
+#: folder in order of trust, and the version the installer declares.
+_ENTRY_VALUES = ("DisplayName", "InstallLocation", "DisplayIcon", "UninstallString",
+                 "DisplayVersion")
 
 
 def program_roots() -> list[Path]:
@@ -175,18 +177,22 @@ def _uninstall_entries() -> list[dict[str, str | None]]:
     return entries
 
 
-def registered_install_dirs(display_name: str,
-                            entries: Iterable[Mapping[str, str | None]] | None = None) -> list[Path]:
-    """@brief Install folders of the programs whose registered name matches.
+def registered_installs(display_name: str,
+                        entries: Iterable[Mapping[str, str | None]] | None = None
+                        ) -> list[tuple[Path, str | None]]:
+    """@brief Install folders and declared versions of the programs whose registered name matches.
 
     @param display_name Regular expression matched (case-insensitive) at the
-        start of each entry's ``DisplayName``, e.g. ``r"FreeCAD\\b"``.
+        start of each entry's ``DisplayName``, e.g. ``r"KiCad\\b"``.
     @param entries Registry entries to search; None reads this machine's.
-    @return Declared folders, without duplicates, in registry order. They are
-        not checked for existence: callers check the executable they need.
+    @return (folder, ``DisplayVersion`` text or None) without duplicate
+        folders, in registry order; the first entry naming a folder wins.
+    @note The version is what the installer declares, so a program installed
+        in a folder whose name holds no version (``D:\\Tools\\KiCad``) can still
+        be ranked against the others (2026-11-16 review E).
     """
     pattern = re.compile(display_name, re.IGNORECASE)
-    folders: list[Path] = []
+    found: list[tuple[Path, str | None]] = []
     seen: set[str] = set()
     for entry in _uninstall_entries() if entries is None else entries:
         if not pattern.match((entry.get("DisplayName") or "").strip()):
@@ -197,8 +203,23 @@ def registered_install_dirs(display_name: str,
         key = os.path.normcase(os.path.normpath(str(folder)))
         if key not in seen:
             seen.add(key)
-            folders.append(folder)
-    return folders
+            version = (entry.get("DisplayVersion") or "").strip() or None
+            found.append((folder, version))
+    return found
+
+
+def registered_install_dirs(display_name: str,
+                            entries: Iterable[Mapping[str, str | None]] | None = None) -> list[Path]:
+    """@brief Install folders of the programs whose registered name matches.
+
+    @param display_name Regular expression matched (case-insensitive) at the
+        start of each entry's ``DisplayName``, e.g. ``r"FreeCAD\\b"``.
+    @param entries Registry entries to search; None reads this machine's.
+    @return Declared folders, without duplicates, in registry order. They are
+        not checked for existence: callers check the executable they need.
+    @note The folders of `registered_installs`, without their versions.
+    """
+    return [folder for folder, _ in registered_installs(display_name, entries)]
 
 
 def executables_in(folders: Iterable[Path], filename: str) -> list[str]:

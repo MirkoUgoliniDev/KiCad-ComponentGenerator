@@ -249,7 +249,10 @@ def test_without_the_window_the_colour_choice_still_reaches_the_disk(qapp, monke
     from kicadgen.gui import app_config, model_candidates_dialog as mcd
     disk_writes = []
     monkeypatch.setattr(app_config, "save_config", lambda config: disk_writes.append(dict(config)))
-    monkeypatch.setattr(app_config, "load_config", lambda: {mcd.PREVIEW_COLORS_KEY: True})
+    # Since review H (2026-11-16) the direct path reads with `require_file=True`
+    # (never the defaults over a locked file): the stand-in is a file read.
+    monkeypatch.setattr(app_config, "load_config",
+                        lambda report=None, require_file=False: {mcd.PREVIEW_COLORS_KEY: True})
     plain_parent = QWidget()
     dialog = _candidates_dialog(plain_parent)
     try:

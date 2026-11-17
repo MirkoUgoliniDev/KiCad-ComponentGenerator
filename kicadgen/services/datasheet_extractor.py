@@ -29,6 +29,7 @@ from typing import Callable, Mapping, Optional, Sequence
 
 from ..cad3d.annotations import EDGE_NAMES
 from ..core.footprint import KICAD_COORD_LIMIT_MM
+from ..core.pad_limits import validate_grid_counts
 from ..core.package_geometry import PAD_SHAPES, PinSpec, package_doubts, package_from_mapping
 # The one rule for holes and pads not printed in the drawing, and its three
 # constants (formerly copied here): one definition with the footprint checks.
@@ -2605,7 +2606,8 @@ def read_pad_positions(documents, *, model, call, prompt=None, progress=None,
         and empty "pads".
     @throws ExtractionCancelled When the user cancels during the call; every
         other failure (call, unreadable drawing) is returned as "failed", and
-        an answer without a declared drawing unit as "discarded".
+        an answer without a declared drawing unit, or whose `chains` or
+        `midpoints` is present but not a list, as "discarded".
     @note Best-effort: a failure never loses the main answer. The model
         transcribes the chains; the program converts the declared unit and
         adds them up (pads_from_chains). The origin is arbitrary and is never
@@ -2653,6 +2655,17 @@ def read_pad_positions(documents, *, model, call, prompt=None, progress=None,
         # The switch roles of a drawn symbol do not depend on the unit (M7).
         return {"view": view, "pads": {}, "notes": "", "discarded": reason,
                 "functions": printed_functions(data.get("terminal_functions"))}
+    malformed = _non_list_fields(data, ("chains", "midpoints"))
+    if malformed:
+        # Review R6-1 (2026-11-16): `chains: 5` or `midpoints: inf` broke the
+        # schema's shape; copying them as lists raised TypeError, which the
+        # main validation turned into «invalid answer» and lost the paid main
+        # answer. The reading is discarded with its reason instead.
+        reason = tx("campi che non sono elenchi: {fields}", fields=", ".join(malformed))
+        if progress:
+            progress(tx("Lettura dedicata delle posizioni dei pad scartata ({exc}).", exc=reason))
+        return {"view": view, "pads": {}, "notes": "", "discarded": reason,
+                "functions": printed_functions(data.get("terminal_functions"))}
     solved = pads_from_chains(data.get("chains"), factor, data.get("midpoints"), pad_sizes)
     notes = data.get("notes")
     return dict(solved, view=view, notes=notes if isinstance(notes, str) else "",
@@ -2665,6 +2678,17 @@ def read_pad_positions(documents, *, model, call, prompt=None, progress=None,
                 raw_chains=list(data.get("chains") or ()),
                 raw_midpoints=list(data.get("midpoints") or ()),
                 raw_factor=factor, pad_sizes=pad_sizes)
+
+
+def _non_list_fields(data: dict, fields) -> list:
+    """The names of `fields` whose value in a tool answer is present but not a list.
+
+    A missing or null field is an empty transcription, which the schema
+    allows; any other non-list value (a number, a string, an object) breaks
+    the schema's shape and makes the answer unusable as a whole (review R6-1).
+    """
+    return [field for field in fields
+            if data.get(field) is not None and not isinstance(data.get(field), list)]
 
 
 def without_private_keys(answer):
@@ -3598,12 +3622,47 @@ def _side_numbering_choice(sides, pinout, value, payload) -> dict:
     return {"ok": False, "reason": tx("risposta sconosciuta")}
 
 
-def _write_side_choice(data: dict, outcome: dict, progress=None) -> None:
-    """Write an accepted side or convention choice into the answer: first pin and direction by edge, pinout, note."""
-    by_edge = {side["edge"]: side for side in outcome["sides"]}
-    for entry in data.get("castellated_sides") or ():
-        target = by_edge.get(_side_edge(entry)) if isinstance(entry, dict) else None
-        if target is not None:
+def _side_runs_by_edge(sides) -> dict:
+    """{edge: [side, ...]} of castellated sides, the runs of one edge in their listing order."""
+    runs: dict = {}
+    for side in sides or ():
+        edge = _side_edge(side)
+        if edge:
+            runs.setdefault(edge, []).append(side)
+    return runs
+
+
+def _unpaired_choice_edges(data: dict, outcome: dict) -> list:
+    """The edges whose runs differ in number between the answer and a side choice; empty when all pair.
+
+    Two castellated runs may share an edge (`CastellatedSide.side_of`); a
+    choice is paired with the answer's runs by their order on that edge,
+    which is sound only when both list as many runs there. Otherwise the
+    pairing would be a guess (review 2026-11-16, R2-1, same rule as the
+    window's `_sides_paired_with_answer`).
+    """
+    raw = _side_runs_by_edge(data.get("castellated_sides"))
+    chosen = _side_runs_by_edge(outcome["sides"])
+    return [edge for edge, runs in chosen.items() if len(raw.get(edge, ())) != len(runs)]
+
+
+def _write_side_choice(data: dict, outcome: dict, progress=None) -> bool:
+    """Write an accepted side or convention choice into the answer: first pin and direction per run, pinout, note.
+
+    The runs of one edge are paired by their order on it: a dictionary keyed
+    by edge kept only the LAST run when two share an edge, so both got its
+    first pin -- pads numbered twice, others gone (review 2026-11-16, R2-1,
+    the extractor's twin of the window's defect). When an edge holds a
+    different number of runs in the answer and in the choice nothing is
+    written and False is returned: the caller keeps the question open.
+
+    @return True when the choice was written.
+    """
+    if _unpaired_choice_edges(data, outcome):
+        return False
+    chosen = _side_runs_by_edge(outcome["sides"])
+    for edge, entries in _side_runs_by_edge(data.get("castellated_sides")).items():
+        for entry, target in zip(entries, chosen.get(edge, ())):
             entry["first_pin"] = target["first_pin"]
             entry["reverse"] = target["reverse"]
     if outcome.get("pinout") is not None:
@@ -3611,6 +3670,14 @@ def _write_side_choice(data: dict, outcome: dict, progress=None) -> None:
     data["notes"] = (str(data.get("notes") or "") + "\n" + outcome["note"]).strip()
     if progress:
         progress(outcome["note"])
+    return True
+
+
+def _unpaired_choice_reason(data: dict, outcome: dict) -> str:
+    """Why a side choice could not be written: the edges whose runs do not pair (translated)."""
+    return tx("tratti di contatti in numero diverso sullo stesso lato ({edges})",
+              edges=", ".join(EDGE_LABELS.get(edge, edge)
+                              for edge in _unpaired_choice_edges(data, outcome)))
 
 
 def _note_label_differences(data: dict, report: dict, progress=None) -> None:
@@ -3749,6 +3816,25 @@ def _ask_side_numbering(data: dict, progress=None) -> None:
         # Not applied after all: it must not be reported as settled.
         (data.get("_answered") or {}).pop(question_key("side_numbering", key_values), None)
         return
+    if _unpaired_choice_edges(data, outcome):
+        # The saved choice cannot be paired run by run with this answer
+        # (R2-1): not applied, not reported as settled, and the question is
+        # asked again with the reason (never «last run wins»).
+        reason = _unpaired_choice_reason(data, outcome)
+        key = question_key("side_numbering", key_values)
+        (data.get("_answered") or {}).pop(key, None)
+        saved = data.get("_answers")
+        data["_answers"] = {k: v for k, v in (saved or {}).items() if k != key}
+        try:
+            _ask(data, "side_numbering", text, options, _question_evidence(data),
+                 candidates=candidates, key_values=key_values)
+        finally:
+            data["_answers"] = saved
+        line = tx("Numerazione dei contatti scelta non applicabile: {exc}", exc=reason)
+        data["notes"] = (str(data.get("notes") or "") + "\n" + line).strip()
+        if progress:
+            progress(line)
+        return
     _write_side_choice(data, outcome, progress)
 
 
@@ -3777,8 +3863,16 @@ def _apply_numbering_convention(data: dict, progress=None, note: Optional[str] =
         "costruttore."))
     if outcome is None:
         return
+    if not _write_side_choice(data, outcome, progress):
+        # Runs of one edge that do not pair (R2-1): the answer's own
+        # numbering stays, and the note says the convention was not applied.
+        line = tx("Numerazione convenzionale non applicata: {exc}",
+                  exc=_unpaired_choice_reason(data, outcome))
+        data["notes"] = (str(data.get("notes") or "") + "\n" + line).strip()
+        if progress:
+            progress(line)
+        return
     data["_label_conflicts"] = outcome["label_conflicts"]
-    _write_side_choice(data, outcome, progress)
 
 
 def _convention_outcome(sides, pinout, note: str) -> Optional[dict]:
@@ -6725,6 +6819,16 @@ def read_axis_chain(documents, axis: str, problem: str, *, model, call, prompt=N
     factor = _declared_unit_factor(data)
     if factor is None:
         return None
+    malformed = _non_list_fields(data, ("chains", "midpoints"))
+    if malformed:
+        # A shape the schema forbids (`chains: 5`) is an unusable answer,
+        # never a TypeError out of the analysis (review R6-1).
+        if progress:
+            progress(tx("Rilettura dell'asse {axis} non riuscita ({exc}).",
+                        axis="/".join(axis.upper()),
+                        exc=tx("campi che non sono elenchi: {fields}",
+                               fields=", ".join(malformed))))
+        return None
     chains = [chain for chain in data.get("chains") or ()
               if isinstance(chain, dict) and str(chain.get("axis")).lower() in axis]
     midpoints = [point for point in data.get("midpoints") or ()
@@ -8544,7 +8648,9 @@ def _hold_holeless_pads(result, target: dict, payload: dict, dropped, notes: lis
     block = tx("Foro dei pad {pads} non stampato e terminale non dichiarato: nessun footprint "
                "finché il foro non è letto dal disegno o scelto nella domanda sui pad senza "
                "foro.", pads=", ".join(holeless))
-    result.pin_map_conflict = block
+    # Every pad is placed now; the block is that of the holes only, of its own
+    # cause, which the pad-hole question settles (follow-up E2 of review R6-3).
+    _lift_causes(result, LAYOUT_ANSWER_CAUSES, add={HELD_PAD_HOLES: block})
     _drop_pinout_pads(result, dropped, renumbered=bool(payload.get("convention")))
     notes.extend(str(line) for line in payload.get("notes") or ())
     notes.append(tx("Posizioni dei pad scelte dall'utente fra le letture ({source}); "
@@ -9891,6 +9997,13 @@ def _grid_as_pads(grid: dict, answer: dict) -> tuple:
     remarks = []
     positions = []
     mapped = None
+    too_large = _grid_count_problem(rows, cols)
+    if too_large:
+        # Review R6-5 (2026-11-16): `rows: 1e30` enumerated positions without
+        # end and Cancel could not stop it. A grid beyond the declared bound
+        # describes no part: a broken shape, which earns the corrective retry
+        # with the printed numbers as fallback.
+        raise _GridContradiction(too_large)
     if rows and cols:
         try:
             mapped = _pin_map_seen_from_top(grid.get("pin_map"), cols, "top", rows)
@@ -10177,9 +10290,9 @@ def apply_answers(params: ExtractedParams, answers: dict) -> ExtractedParams:
                 line = tx("Posizioni dei pad lasciate bloccate per scelta dell'utente: "
                           "inserirle a mano in «Piazzole del componente THT».")
                 notes.append(line)
-                if line not in (result.pin_map_conflict or ""):
-                    result.pin_map_conflict = (line if not result.pin_map_conflict
-                                               else result.pin_map_conflict + "\n" + line)
+                # The user's choice is a block of its own cause: an answer to
+                # the pad-hole question never lifts it (review G, 2026-11-16).
+                _add_to_cause(result, HELD_LAYOUT_KEPT, line)
                 candidates.pop(key, None)
                 # The side of the provisional pads, deferred with the layout:
                 # pending again, as before the deferral (M4).
@@ -10225,10 +10338,9 @@ def apply_answers(params: ExtractedParams, answers: dict) -> ExtractedParams:
                 line = tx("Disposizione dei pad scelta non applicabile: {exc}", exc="; ".join(reasons))
                 notes.append(line)
                 # The block stays, and now tells the truth about this
-                # choice too: positions alone do not settle these pads.
-                if line not in (result.pin_map_conflict or ""):
-                    result.pin_map_conflict = (line if not result.pin_map_conflict
-                                               else result.pin_map_conflict + "\n" + line)
+                # choice too: positions alone do not settle these pads. Kept
+                # under the cause of the question answered (review G).
+                _add_to_cause(result, HELD_PAD_HOLES if hole_kind else HELD_PAD_LAYOUT, line)
 
             # Pads a whole-layout candidate removes or adds (`_offer_pad_set_change`),
             # or a hole chosen for pads that had none (`_ask_pad_holes`):
@@ -10344,7 +10456,12 @@ def apply_answers(params: ExtractedParams, answers: dict) -> ExtractedParams:
                 result.package_geometry = geometry = target
             if exchange:
                 _exchange_result_body(result, exchange, notes)
-            result.pin_map_conflict = None
+            # The answer lifts the causes it settles: a layout answer every
+            # pad cause, the readings' disagreement and a «keep blocked»
+            # choice; a hole answer only the holes (with the positions and
+            # fit it re-checked). Blocks of other causes stay (`held_blocks`,
+            # follow-ups D1, E2 and G of review R6-3).
+            _lift_causes(result, HOLE_ANSWER_CAUSES if hole_kind else LAYOUT_ANSWER_CAUSES)
             # The removed pads leave the pinout, hence the symbol, too.
             _drop_pinout_pads(result, dropped, renumbered=bool(payload.get("convention")))
             if not hole_kind:
@@ -10379,8 +10496,10 @@ def apply_answers(params: ExtractedParams, answers: dict) -> ExtractedParams:
                 continue
             result.castellated_sides = outcome["sides"]
             if outcome.get("unblock"):
-                # The numbering-conflict block goes with the answer (H1).
-                result.pin_map_conflict = None
+                # The numbering-conflict block goes with the answer (H1);
+                # blocks of other causes stay, e.g. side counts a failed
+                # recount left contradicted (follow-up D1 of review R6-3).
+                _lift_causes(result, SIDE_NUMBERING_ANSWER_CAUSES)
             if outcome["pinout"] is not None:
                 result.pinout = outcome["pinout"] or None
             # The numbering changed: the label conflicts are those of the new
@@ -10888,6 +11007,17 @@ def merge_reread(settled: Optional[ExtractedParams], reread: ExtractedParams) ->
             return result
     for name in scope["attributes"]:
         setattr(result, name, copy.deepcopy(getattr(reread, name)))
+    if "pin_map_conflict" in scope["attributes"]:
+        # The re-read confronts its scope only: the held causes of that scope
+        # (PAD_LAYOUT_CAUSES) are the re-read's, every other held cause of
+        # the settled result stays, and the merged causes travel with the
+        # text so a later answer cannot lift one of them (follow-ups D1 and
+        # E1 of review R6-3).
+        # A pad re-read is a new reading of the whole layout: it settles the
+        # same causes as a layout answer, «keep blocked» included (review G).
+        merged = {**_result_held(reread),
+                  **_without_causes(_result_held(settled), LAYOUT_ANSWER_CAUSES)}
+        _set_held(result, merged)
     sources = dict(result.value_sources or {})
     for key in scope["sources"]:
         sources.pop(key, None)
@@ -11152,6 +11282,12 @@ class ExtractedParams:
     #: one is in pin_map); None when confirmed or not checked. The GUI blocks
     #: the automatic generation on it.
     pin_map_conflict: Optional[str] = None
+    #: Blocks that only their own remedy lifts, {cause: translated text}
+    #: (HELD_BLOCK_CAUSES), None when there is none. Their texts are always
+    #: part of `pin_map_conflict`: an answer to a question of another cause
+    #: (pad layout, side numbering) lifts its own block and leaves these
+    #: (follow-up D1 of review R6-3, 2026-11-16).
+    held_blocks: Optional[dict] = None
     #: Why no body height could be settled (two printed candidates), None
     #: otherwise; the GUI names it when the STEP model is deferred.
     body_conflict: Optional[str] = None
@@ -11355,6 +11491,16 @@ class AnswerShapeError(ExtractionError):
             self.raw = repr(raw)
 
 
+class _MalformedAnswerError(ExtractionError):
+    """A paid main answer whose shape broke a step no validation rule anticipated (review R6-2).
+
+    Raised by `extract_pin_header_params`'s main call instead of the raw
+    TypeError/KeyError; the answer is already in the AI log. Not an
+    AnswerShapeError: it earns no paid retry, but a failed retry of that
+    kind keeps the first answer's usable part (`AnswerShapeError.fallback`).
+    """
+
+
 class _GridContradiction(ExtractionError):
     """A declared grid of `report_single_component` that contradicts itself (`_grid_as_pads`)."""
 
@@ -11491,10 +11637,17 @@ def _log_rejected_response(data, exc: ExtractionError, progress) -> None:
     if not progress:
         return
     import json
+    from .ai_diagnostics import _redacted_result
     try:
-        text = json.dumps(data, ensure_ascii=False, sort_keys=True, default=repr)
-    except (TypeError, ValueError):
-        text = repr(data)
+        # The same redaction as the AI_CALL_RESULT line of the same answer
+        # (review R6-6, 2026-11-16): credentials removed, payload keys and
+        # long strings replaced by their digest, then the personal data of
+        # paths masked (`crash_report.scrub`).
+        text = json.dumps(_redacted_result(data), ensure_ascii=False, sort_keys=True,
+                          default=repr)
+    except (TypeError, ValueError, RecursionError):
+        text = repr(type(data).__name__)
+    text = _scrubbed_log_text(text)
     if len(text) > _REJECTED_RESPONSE_MAX_CHARS:
         text = text[:_REJECTED_RESPONSE_MAX_CHARS] + " …[truncated]"
     try:
@@ -11519,12 +11672,49 @@ def _log_unreadable_arguments(exc, progress, attempt: int) -> None:
     if not progress:
         return
     raw = exc.raw if isinstance(exc.raw, str) else repr(exc.raw)
+    # The text is kept whole to explain why it did not parse, so it is not
+    # digested like a result; credentials and the personal data of paths are
+    # masked all the same (review R6-6, 2026-11-16).
+    raw = _scrubbed_log_text(raw)
     if len(raw) > _REJECTED_RESPONSE_MAX_CHARS:
         raw = raw[:_REJECTED_RESPONSE_MAX_CHARS] + " …[truncated]"
     try:
         progress(f"AI_RESPONSE_UNREADABLE attempt={attempt} {raw}")
     except Exception:  # noqa: BLE001 - the log must not hide the real error
         pass
+
+
+def _log_shape_traceback(progress) -> None:
+    """Write the traceback being handled to the AI log as one machine line (AI_SHAPE_TRACEBACK ...).
+
+    For an unexpected exception while the paid answer is brought to the main
+    shape: the frames say whether the program's code or the answer's shape
+    failed. Scrubbed like the rejected answer (`_scrubbed_log_text`), on one
+    line («⏎» between the original lines), bounded like it.
+    """
+    if not progress:
+        return
+    import traceback
+    text = _scrubbed_log_text(traceback.format_exc()).strip().replace("\n", " ⏎ ")
+    if len(text) > _REJECTED_RESPONSE_MAX_CHARS:
+        text = text[:_REJECTED_RESPONSE_MAX_CHARS] + " …[truncated]"
+    try:
+        progress("AI_SHAPE_TRACEBACK " + text)
+    except Exception:  # noqa: BLE001 - the log must not hide the real error
+        pass
+
+
+def _scrubbed_log_text(text: str) -> str:
+    """A model's text made safe for the AI log: credentials and personal data of paths masked.
+
+    `ai_diagnostics._redact_secret_text` (bearer tokens, «api_key=...», «sk-»
+    keys) and then `crash_report.scrub` (the keys the program knows by value,
+    the home folder, user names in paths), the guards the AI_CALL_RESULT
+    line and the crash reports already apply (review R6-6).
+    """
+    from ..crash_report import scrub
+    from .ai_diagnostics import _redact_secret_text
+    return scrub(_redact_secret_text(text))
 
 
 def _guess_media_type(path: Path) -> str:
@@ -12547,6 +12737,51 @@ def _mirror_castellated_sides(sides) -> None:
             side["first_contact_from_edge_mm"], side["last_contact_from_edge_mm"] = last, first
 
 
+def _grid_count_problem(rows, cols) -> Optional[str]:
+    """Why a rows x cols grid of an answer is beyond `core.pad_limits.MAX_PAD_POSITIONS`, or None.
+
+    Review R6-5 (2026-11-16): every step that enumerates a grid's positions
+    (`_grid_as_pads`, `_mirrored_column_order`, `_numbering_conventions`,
+    `_pin_field_positions`) is bounded by the one limit the generators
+    apply. `rows` and `cols` are the validated counts (`_optional_number`
+    with integer=True) or None; a missing one counts as 1, so a single
+    absurd axis is refused too. The extent of the grid needs no bound here:
+    `core.footprint.require_kicad_reach` refuses coordinates KiCad cannot
+    represent when the footprint is built.
+    """
+    if not rows and not cols:
+        return None
+    try:
+        validate_grid_counts(rows or 1, cols or 1)
+    except ValueError as exc:
+        return str(exc)
+    return None
+
+
+def _drop_oversized_grid(data: dict) -> Optional[str]:
+    """Drop the rows and cols of an answer beyond `core.pad_limits.MAX_PAD_POSITIONS`; the note, or None.
+
+    Follow-up B#6 of review R6-5: the rest of the paid answer is kept (body,
+    pinout, pitch...). When the grid IS the footprint (a matrix answer
+    without explicit pads), the footprint is blocked by its own cause
+    (HELD_GRID_SIZE), which no answer to a question lifts; otherwise the
+    counts were informative only and the note says so.
+    """
+    reason = _grid_count_problem(_optional_number(data.get("rows"), positive=True, integer=True),
+                                 _optional_number(data.get("cols"), positive=True, integer=True))
+    if not reason:
+        return None
+    data["rows"] = None
+    data["cols"] = None
+    if (data.get("layout") or "matrix") == "matrix" and not _has_explicit_pads(data):
+        message = tx("{reason} Righe e colonne scartate: footprint bloccato finché la griglia non "
+                     "è letta di nuovo.", reason=reason)
+        _hold_block(data, HELD_GRID_SIZE, message)
+        return message
+    return tx("{reason} Righe e colonne scartate: non definiscono il footprint di questo "
+              "componente.", reason=reason)
+
+
 def _mirrored_column_order(rows: int, cols: int) -> list:
     """Column-order numbering (pin_header.pin_positions) read on a bottom view, seen from top."""
     return [{"pin": col * rows + row + 1, "row": row, "col": cols - 1 - col}
@@ -13226,7 +13461,10 @@ def extract_pin_header_params(
              verification_model or model or DEFAULT_MODEL,
              # Blank = the photo model above; an empty entry is skipped.
              (crop_model or '').strip()],
-            progress, openrouter_check=openrouter_ready)
+            progress, openrouter_check=openrouter_ready,
+            # A Cancel pressed during the free credit requests closes them at
+            # once instead of after their timeouts (review R7-5, 2026-11-16).
+            cancel=check_cancel if cancelled is not None else None)
     except OpenRouterError as exc:
         raise ExtractionError(str(exc)) from exc
 
@@ -13412,12 +13650,32 @@ def extract_pin_header_params(
                 max_tokens=16384,
                 has_pdf=has_pdf,
             )
+        try:
+            return main_shape(answer)
+        except (KeyError, TypeError, ValueError, AttributeError, OverflowError) as exc:
+            # Review R6-2 (2026-11-16): a shape no rule anticipated
+            # (`pinout: true`) escaped as a raw TypeError outside every
+            # handler. It becomes the same application error as one found by
+            # the validation, with the paid answer kept in the AI log.
+            error = _MalformedAnswerError(tx("Risposta AI non valida: {exc}", exc=exc))
+            _log_rejected_response(answer, error, progress)
+            # The same exception may be a defect of the program's own
+            # conversion (`single_answer_to_data`), not of the answer: the
+            # traceback goes to the AI log, scrubbed, so the two can be told
+            # apart (follow-up S6 of review R6-2).
+            _log_shape_traceback(progress)
+            raise error from exc
+
+    def main_shape(answer):
+        """The paid answer brought to the main shape (see `main_call`)."""
         # Keys beginning with «_» are the program's working state; the
         # model must not be able to set them (review V3-5).
         answer = without_private_keys(answer)
         # The label-name mark is the program's (`pinout_coherence.LABEL_NAME_KEY`):
         # a model cannot set it on its own pinout entries (final audit L7).
-        for entry in answer.get("pinout") or () if isinstance(answer, dict) else ():
+        # Only a list is a pinout (R6-2: `pinout: true` is not iterable).
+        pinout = answer.get("pinout") if isinstance(answer, dict) else None
+        for entry in pinout if isinstance(pinout, list) else ():
             if isinstance(entry, dict):
                 entry.pop(pinout_coherence.LABEL_NAME_KEY, None)
         if single_part:
@@ -13462,24 +13720,35 @@ def extract_pin_header_params(
                 # the error's own rule when it carries one (side numbering).
                 data = main_call((exc.correction or _SHAPE_CORRECTION)
                                  if isinstance(exc, AnswerShapeError) else None)
-            except (ToolArgumentsError, OpenRouterError) as second:
-                if not side_numbering:
+            except (OpenRouterError, _MalformedAnswerError) as second:
+                if isinstance(second, CallCancelled):
+                    # A cancelled retry never falls back to the first answer.
+                    raise
+                if isinstance(second, ToolArgumentsError):
+                    _log_unreadable_arguments(second, progress, 2)
+                # The usable part of the first answer (its whole content when
+                # only the side numbering was in doubt; the printed pad
+                # numbers of a self-contradicting grid). Review R6-4
+                # (2026-11-16): a retry failed at transport level (HTTP 502,
+                # credit) or unreadable must not lose it either.
+                kept = (exc.fallback if isinstance(exc, AnswerShapeError)
+                        and isinstance(exc.fallback, dict) else None)
+                if kept is None:
                     if not isinstance(second, ToolArgumentsError):
                         raise
-                    _log_unreadable_arguments(second, progress, 2)
                     raise ExtractionError(
                         tx("Anche il nuovo tentativo ha restituito argomenti illeggibili; il testo "
                            "delle due risposte è nel log AI (righe AI_RESPONSE_UNREADABLE). {exc}",
                            exc=second)) from second
-                # The first answer was complete and readable, only its
-                # numbering in doubt: a failed retry never loses it.
-                if isinstance(second, ToolArgumentsError):
-                    _log_unreadable_arguments(second, progress, 2)
-                data = exc.fallback
+                data = kept
                 if progress:
                     progress(tx("Analisi dei documenti: il nuovo tentativo non è riuscito ({exc}); "
                                 "si tiene la prima risposta, la numerazione dei lati verrà "
-                                "chiesta.", exc=second))
+                                "chiesta.", exc=second)
+                             if side_numbering else
+                             tx("Analisi dei documenti: il nuovo tentativo non è riuscito ({exc}); "
+                                "si tiene la parte utilizzabile della prima risposta ({why}).",
+                                exc=second, why=exc))
             except SidePinoutContradiction as second:
                 _log_unreadable_arguments(second, progress, 2)
                 # Two contradictory answers: the newer one is kept whole, the
@@ -13515,6 +13784,10 @@ def extract_pin_header_params(
                              tx("Analisi dei documenti: il nuovo tentativo è leggibile; si usa "
                                 "quello."))
     except OpenRouterError as exc:
+        if isinstance(exc, CallCancelled):
+            # A request aborted by the user stays a cancellation for the
+            # caller, which recognises it by type (ExtractionCancelled).
+            raise ExtractionCancelled(str(exc)) from exc
         raise ExtractionError(str(exc)) from exc
 
     if not isinstance(data, dict):
@@ -13604,7 +13877,10 @@ def extract_pin_header_params(
             tx("Analisi principale completata: layout={get}, componenti "
                "iniziali={n_items}.",
                get=data.get('layout', 'matrix'),
-               n_items=len(data.get('components_3d') or []))
+               # Only a list counts (R6-2: `components_3d: true` has no
+               # length); `_components_3d` drops any other value later.
+               n_items=len(data['components_3d'])
+               if isinstance(data.get('components_3d'), (list, tuple)) else 0)
         )
     return _extract_photo_stage(
         data, doc_paths, progress=progress, announce=announce, check_cancel=check_cancel,
@@ -13680,7 +13956,6 @@ def _recheck_missing_contact_styles(data, content_blocks, diagnostic_call, model
     if not _needs_contact_style_recheck(data, content_blocks, has_pdf):
         return
     missing = _sides_missing_style(data)
-    message = "Ricontrollo AI del tipo di contatto sui lati non riconosciuti: " + ", ".join(missing)
     if progress:
         progress(tx("Ricontrollo AI del tipo di contatto sui lati non riconosciuti: {sides}",
                     sides=", ".join(missing)))
@@ -13712,7 +13987,10 @@ def _recheck_missing_contact_styles(data, content_blocks, diagnostic_call, model
             reply = diagnostic_call(model=model or DEFAULT_MODEL, system_prompt=prompt,
                                     content_blocks=blocks, tool=tool, max_tokens=1800,
                                     has_pdf=has_pdf)
-    except OpenRouterError:
+    except OpenRouterError as error:
+        if isinstance(error, CallCancelled):
+            # An aborted request is the user's stop, not a failed check.
+            raise ExtractionCancelled(str(error)) from error
         if progress:
             progress(tx("Ricontrollo tipo di contatto non riuscito: resta la scelta manuale."))
         return
@@ -13737,7 +14015,8 @@ def _recheck_missing_contact_styles(data, content_blocks, diagnostic_call, model
         style = "half_and_through" if half and through else "half_hole" if half else "through_hole"
         side["contact_style"] = style
         side["_contact_style_evidence"] = evidence.strip()
-        note = f"Tipo di contatto ricontrollato: {edge} = {style}. {evidence.strip()}"
+        note = tx("Tipo di contatto ricontrollato: {edge} = {style}. {evidence}", edge=edge,
+                  style=style, evidence=evidence.strip())
         data["notes"] = (str(data.get("notes") or "") + "\n" + note).strip()
         if progress:
             progress(note)
@@ -13899,7 +14178,7 @@ def _recount_sides_from_photo(data, disagreements, content_blocks, diagnostic_ca
                                       model, system_prompt, has_pdf, say)
     except CallCancelled:
         raise
-    except Exception as exc:  # contenuto: vedi la @note sopra
+    except Exception as exc:  # contained: see the @note above
         detail = str(exc) if isinstance(exc, OpenRouterError) else f"{type(exc).__name__}: {exc}"
         say(tx("Ricontrollo dei contatti non riuscito ({exc}): restano quelli dell'analisi.",
                exc=detail))
@@ -14321,7 +14600,10 @@ def _recount_contradictory_sides(data, content_blocks, diagnostic_call, model, s
     documents, its exact numbers and the edge lengths; the recounted sides
     replace the old ones, provenance included. Whatever is still wrong is
     handled as before: contacts that do not fit are an error, names of the
-    wrong length are dropped with a note. At most one extra call.
+    wrong length are dropped with a note. At most one extra call. A recount
+    that fails (call error, unusable answer) keeps the first answer with the
+    footprint blocked and the cause said (`_keep_contradicted_sides`, review
+    R6-3); an aborted request is a cancellation (ExtractionCancelled).
 
     Only the CONTRADICTED edges are replaced. The recount returns every side,
     and a side that was coherent is not made more reliable by being answered
@@ -14367,15 +14649,24 @@ def _recount_contradictory_sides(data, content_blocks, diagnostic_call, model, s
                                    content_blocks=repair_blocks, tool=_openai_tool(),
                                    max_tokens=16384, has_pdf=has_pdf)
     except OpenRouterError as error:
-        raise ExtractionError(tx("Ricontrollo dei contatti non riuscito; analisi foto non "
-                                 "avviata.")) from error
+        if isinstance(error, CallCancelled):
+            raise ExtractionCancelled(str(error)) from error
+        # Review R6-3 (2026-11-16): a failed recount (HTTP 502, credit, a
+        # truncated answer) no longer throws the paid main answer away: the
+        # first answer is kept with its contradicted sides blocked, and the
+        # cause is said.
+        _keep_contradicted_sides(data, tx("Ricontrollo dei contatti non riuscito ({exc})",
+                                          exc=str(error).rstrip(".")),
+                                 log_summary, dims, progress)
+        return
     sides = repaired.get("castellated_sides") if isinstance(repaired, dict) else None
     repaired_unit = repaired.get("drawing_unit") if isinstance(repaired, dict) else None
     if not isinstance(sides, list) or not sides or repaired_unit not in (None, unit):
         # Sides missing or in another unit: not comparable with the body and
         # pitch of the main answer, which stay as they are.
-        raise ExtractionError(tx("Il ricontrollo dei contatti non ha restituito lati "
-                                 "utilizzabili; analisi foto non avviata."))
+        _keep_contradicted_sides(data, tx("Il ricontrollo dei contatti non ha restituito lati "
+                                          "utilizzabili"), log_summary, dims, progress)
+        return
     recounted_edges = [_side_edge(entry) for entry in sides if _side_edge(entry)]
     recounted = {_side_edge(entry): entry for entry in sides if _side_edge(entry)}
     previous = data.get("castellated_sides")
@@ -14422,6 +14713,178 @@ def _recount_contradictory_sides(data, content_blocks, diagnostic_call, model, s
     data["notes"] = (str(data.get("notes") or "") + "\n" + warning).strip()
     if progress:
         progress(warning)
+
+
+def _keep_contradicted_sides(data: dict, failure: str, summary: str, dims: dict,
+                             progress) -> None:
+    """Keep the first castellated answer after a failed recount, its contradicted sides blocked.
+
+    Review R6-3 (2026-11-16): the recount is one optional repair; when it
+    fails (call error, unusable answer) the paid main answer is kept as the
+    numbering repair keeps it (`_settle_numbering_conflict` with `failure`):
+    nothing is guessed, the footprint is blocked (`_pin_map_conflict`) with
+    the contradiction, the cause and the remedy «repeat the analysis». The
+    sides go on to the usual validation, which drops names of the wrong
+    length with a note. When the kept sides cannot be drawn at all
+    (contacts longer than their edge) the analysis stops, and the error
+    names the recount's cause as well as the kept answer's fault.
+
+    @param data The main answer, changed in place.
+    @param failure Translated text of why the recount failed, cause included.
+    @param summary The contradictions in the log's wording (`_edge_problems`).
+    @param dims Body length and width of the answer (`body_length`, `body_width`).
+    @param progress Optional log callback.
+    @throws ExtractionError When the kept sides are unusable.
+    """
+    try:
+        _castellated_sides(data.get("castellated_sides"), **dims)
+    except _PinNumberConflict:
+        # A numbering conflict between sides has its own repair and question
+        # right after this step (`_validate_main_response`).
+        pass
+    except ExtractionError as unusable:
+        raise ExtractionError(tx("{failure}; la prima risposta non è utilizzabile ({exc}): "
+                                 "analisi foto non avviata.", failure=failure,
+                                 exc=str(unusable).rstrip("."))) from unusable
+    message = tx("{failure}: si tiene la prima risposta, con i contatti incoerenti ({summary}). "
+                 "Footprint bloccato finché conteggi e nomi non sono verificati: ripeti l'analisi "
+                 "per ritentare il ricontrollo.", failure=failure, summary=summary)
+    # A block of its own cause: an answer to the side-numbering question
+    # (a different cause, which replaces or clears `_pin_map_conflict`)
+    # must never lift it (follow-up D1 of review R6-3).
+    _hold_block(data, HELD_SIDE_COUNTS, message)
+    data["notes"] = (str(data.get("notes") or "") + "\n" + message).strip()
+    if progress:
+        progress(message)
+
+
+#: Causes of a block that only its own remedy lifts (`ExtractedParams.held_blocks`),
+#: follow-ups D1 and E2 of review R6-3 (2026-11-16):
+#: - castellated side counts left contradicted by a failed recount, and a
+#:   matrix grid beyond `core.pad_limits.MAX_PAD_POSITIONS`: no question of
+#:   the analysis settles them (the remedy is a new analysis), so no answer
+#:   lifts them;
+#: - a partial pin map no convention completes (`_resolve_pin_numbering`):
+#:   corrected by hand, no answer lifts it either;
+#: - pads without a printed hole, pads without positions, pads whose values
+#:   cannot all be true: PAD_LAYOUT_CAUSES, lifted only by an applied answer
+#:   to the pad-layout question (which places every pad, gives every hole and
+#:   re-checks the fit) or replaced by a pad re-read (`merge_reread`).
+#: The block of the analysis' own readings and questions stays in
+#: `_pin_map_conflict` (the "own" text), lifted by the answer that settles it.
+#: Review G (2026-11-16): the block of the analysis' own readings is held
+#: too, under the cause of what it is about (`_own_block_cause`), and so is
+#: the user's «keep blocked» choice of a layout question:
+#: - HELD_PAD_LAYOUT: pad readings that disagree or are unconfirmed (explicit
+#:   pads), lifted by an applied pad-layout answer or a pad re-read;
+#: - HELD_LAYOUT_KEPT: «keep blocked» chosen for the pad layout, lifted only
+#:   by an applied pad-layout answer, a pad re-read or a new analysis;
+#: - HELD_SIDE_NUMBERING: a castellated numbering conflict, lifted by the
+#:   side-numbering answer that settles it;
+#: - HELD_PIN_NUMBERING: a grid numbering in disagreement, corrected by hand;
+#: - HELD_UNCLASSIFIED: a block text of a result built without causes (an
+#:   older result, or one built by the window): lifted by any applied
+#:   pad-layout or side-numbering answer, as every block was before.
+HELD_SIDE_COUNTS = "side_counts"
+HELD_GRID_SIZE = "grid_size"
+HELD_PIN_MAP_COMPLETION = "pin_map_completion"
+HELD_PAD_HOLES = "pad_holes"
+HELD_PAD_POSITIONS = "pad_positions"
+HELD_PAD_FIT = "pad_fit"
+HELD_PAD_LAYOUT = "pad_layout"
+HELD_LAYOUT_KEPT = "layout_kept"
+HELD_SIDE_NUMBERING = "side_numbering"
+HELD_PIN_NUMBERING = "pin_numbering"
+HELD_UNCLASSIFIED = "unclassified"
+PAD_LAYOUT_CAUSES = (HELD_PAD_HOLES, HELD_PAD_POSITIONS, HELD_PAD_FIT)
+#: What an applied answer settles: a layout answer places every pad, gives
+#: every hole, re-checks the fit and decides between the readings; a hole
+#: answer gives the holes (and, on dropped pads, needs every position and
+#: re-checks the fit) but decides nothing between disagreeing readings.
+LAYOUT_ANSWER_CAUSES = (HELD_PAD_LAYOUT, HELD_LAYOUT_KEPT, *PAD_LAYOUT_CAUSES, HELD_UNCLASSIFIED)
+HOLE_ANSWER_CAUSES = PAD_LAYOUT_CAUSES
+SIDE_NUMBERING_ANSWER_CAUSES = (HELD_SIDE_NUMBERING, HELD_UNCLASSIFIED)
+HELD_BLOCK_CAUSES = (HELD_PAD_LAYOUT, HELD_SIDE_NUMBERING, HELD_PIN_NUMBERING,
+                     HELD_PIN_MAP_COMPLETION, *PAD_LAYOUT_CAUSES, HELD_LAYOUT_KEPT,
+                     HELD_SIDE_COUNTS, HELD_GRID_SIZE, HELD_UNCLASSIFIED)
+
+
+def _without_causes(held: Optional[dict], causes) -> dict:
+    """A copy of held blocks without the given causes (the ones an answer or re-read settles)."""
+    return {cause: text for cause, text in (held or {}).items() if cause not in causes}
+
+
+def _own_block_cause(layout: str, explicit_pads: bool) -> str:
+    """The cause of the analysis' own block (`_pin_map_conflict`), by what the footprint is made of.
+
+    A castellated module: its side numbering; explicit pads (read or
+    dropped): their layout readings; a grid footprint: its numbering. A
+    structural attribute of the answer, never a reading of the text.
+    """
+    if layout == "castellated":
+        return HELD_SIDE_NUMBERING
+    return HELD_PAD_LAYOUT if explicit_pads else HELD_PIN_NUMBERING
+
+
+def _result_held(result) -> dict:
+    """The held blocks of a result, a block text without causes kept as HELD_UNCLASSIFIED."""
+    if isinstance(result.held_blocks, dict):
+        return dict(result.held_blocks)
+    text = result.pin_map_conflict
+    return {HELD_UNCLASSIFIED: text} if isinstance(text, str) and text.strip() else {}
+
+
+def _set_held(result, held: dict) -> None:
+    """Write held blocks into a result, with the block text the window reads rebuilt from them."""
+    result.held_blocks = held or None
+    result.pin_map_conflict = _blocks_text(None, held)
+
+
+def _lift_causes(result, causes, add: Optional[dict] = None) -> None:
+    """Lift the blocks an applied answer settles (`causes`), keep every other, then add `add`."""
+    held = _without_causes(_result_held(result), causes)
+    held.update(add or {})
+    _set_held(result, held)
+
+
+def _add_to_cause(result, cause: str, line: str) -> None:
+    """Add one line to the block of `cause` (created when absent), never twice."""
+    held = _result_held(result)
+    if any(line in text for text in held.values()):
+        return
+    held[cause] = held[cause] + "\n" + line if held.get(cause) else line
+    _set_held(result, held)
+
+
+def _hold_block(data: dict, cause: str, message: str) -> None:
+    """Record a block of `cause` (HELD_BLOCK_CAUSES) in the answer; one text per cause."""
+    held = data.get("_held_blocks")
+    held = dict(held) if isinstance(held, dict) else {}
+    held[cause] = message
+    data["_held_blocks"] = held
+
+
+def _held_blocks(data: dict) -> dict:
+    """The held blocks of an answer, {cause: text}, only the declared causes with a text."""
+    held = data.get("_held_blocks")
+    return {cause: text for cause, text in (held.items() if isinstance(held, dict) else ())
+            if cause in HELD_BLOCK_CAUSES and isinstance(text, str) and text.strip()}
+
+
+def _blocks_text(own: Optional[str], held: Optional[dict]) -> Optional[str]:
+    """The block text the window reads: `own` (the lifted-by-answers block) and every held block.
+
+    @param own The block of the analysis' questions and readings, or None.
+    @param held {cause: text} of `ExtractedParams.held_blocks`, or None.
+    @return The texts one per line, a held text already inside `own` not
+        repeated; None when there is none, so the footprint is unblocked
+        only when every cause is settled.
+    """
+    parts = [own] if isinstance(own, str) and own.strip() else []
+    for text in (held or {}).values():
+        if isinstance(text, str) and text.strip() and not any(text in part for part in parts):
+            parts.append(text)
+    return "\n".join(parts) or None
 
 
 def _cancel_predicate(cancel):
@@ -14559,8 +15022,13 @@ def pin_role_conflicts(entries) -> list:
     @param entries A pinout (list of {"pin", "name", "function"}).
     @return `contact_roles.role_conflicts` with the pins as text: the
         self-check after every answer and derivation (night4 real run), the
-        same rule the component check applies.
+        same rule the component check applies. Any value that is not a list
+        (a model's `pinout: true`) is no pinout: no conflict, never a
+        TypeError after the paid call (review R6-2); `_validated_pinout`
+        notes the dropped value.
     """
+    if not isinstance(entries, (list, tuple)):
+        return []
     return [dict(conflict, pin=_pad_number_text(conflict["pin"]))
             for conflict in role_conflicts(entries)]
 
@@ -14818,6 +15286,16 @@ def _validate_main_response(data, content_blocks, diagnostic_call, model, system
         data["_question_documents"] = [p.name for p in numbering.get("documents") or ()]
         if isinstance(numbering.get("answers"), dict):
             data["_answers"] = dict(numbering["answers"])
+    if (data.get("layout") or "matrix") == "matrix":
+        # Before any step enumerates the grid (numbering conventions, the
+        # dedicated numbering, the canonical mirror): a grid beyond the
+        # declared bound is dropped at once, the rest of the paid answer
+        # kept (review R6-5 and its follow-up B#6).
+        warning = _drop_oversized_grid(data)
+        if warning:
+            data["notes"] = (str(data.get("notes") or "") + "\n" + warning).strip()
+            if progress:
+                progress(warning)
     # Validate geometry before it can be used to calibrate a photograph.
     _sanitise_printed_quotes(data, progress)
     for key in ("body_length_mm", "body_width_mm", "body_height_mm"):
@@ -15180,8 +15658,10 @@ def _extract_photo_stage(data, doc_paths, *, progress, announce, check_cancel, d
                     'recount_contacts': recount_contacts, 'crop_prompt': crop_prompt,
                     'crop_model': crop_model}
                    if photo_detector in ('yolo', 'vlm', 'yolo_smd') else {}),
-                **({'cancel': cancelled} if photo_detector == 'yolo_smd' and cancelled is not None
-                   else {}),
+                # Every detector: the local phases (board search, YOLO views,
+                # edge measures) check it too, not only the SMD network
+                # (review R8-2, 2026-11-16).
+                **({'cancel': cancelled} if cancelled is not None else {}),
                 **({'smd_model_path': smd_model_path}
                    if photo_detector == 'yolo_smd' and smd_model_path is not None else {}),
                 **({'prompts': prompts} if prompts is not None else {}),
@@ -15190,7 +15670,9 @@ def _extract_photo_stage(data, doc_paths, *, progress, announce, check_cancel, d
         except ReviewCancelled as exc:
             # A cancellation is not an inventory failure: continuing here
             # would mean paying the reconciliation on the rejected proposals.
-            raise ExtractionError(str(exc)) from exc
+            # The documented cancellation type (review R6-7, 2026-11-16): the
+            # caller tells a user's stop from a failure by type.
+            raise ExtractionCancelled(str(exc)) from exc
         except ExtractionCancelled:
             raise
         except CallCancelled as exc:
@@ -15295,6 +15777,13 @@ def _pin_field_positions(params) -> list:
     drawn. Empty when the grid is not usable.
     """
     from ..generators.pin_header import PinHeaderParams, pin_positions
+    try:
+        # `pin_positions` does not validate: a grid beyond the declared bound
+        # (a project file, a typed count) would be enumerated without end
+        # (review R6-5). Such a grid is not usable.
+        validate_grid_counts(int(params.rows), int(params.cols))
+    except (TypeError, ValueError, OverflowError):
+        return []
     if int(params.rows) > 1 and not params.row_spacing_mm:
         # Without a declared row spacing the rows would sit one pitch apart:
         # a guess, and `fit_body_to_pin_field` must not correct the body from
@@ -16744,7 +17233,12 @@ def _informative_matrix(data: dict, notes: list) -> dict:
     Used for a castellated module and for a part whose explicit pads
     (package_geometry) are the footprint. A drill of 0 is not an error here:
     it is how a pad without hole (SMD) is written, so it becomes None silently.
+    Counts beyond `core.pad_limits.MAX_PAD_POSITIONS` are dropped with a note
+    (`_drop_oversized_grid`), so nothing downstream enumerates them.
     """
+    warning = _drop_oversized_grid(data)
+    if warning:
+        notes.append(warning)
     matrix = {}
     for key in _MATRIX_INT_FIELDS:
         raw = data.get(key)
@@ -16775,6 +17269,14 @@ def _footprint_matrix(data: dict, notes: list) -> dict:
         generator draws only drilled pads, and a pad without hole needs its
         own shape, which only package_geometry describes.
     """
+    warning = _drop_oversized_grid(data)
+    if warning:
+        notes.append(warning)
+    if HELD_GRID_SIZE in _held_blocks(data):
+        # The grid was beyond the declared bound (review R6-5, follow-up
+        # B#6): its counts are dropped and the footprint blocked by that
+        # cause; the other matrix fields stay informative.
+        return _informative_matrix(data, notes)
     matrix = {key: _required_matrix_value(data, key) for key in _MATRIX_INT_FIELDS}
     for key, count in (("pitch_mm", matrix["cols"]), ("row_spacing_mm", matrix["rows"])):
         if count > 1:
@@ -17037,13 +17539,18 @@ def _params_from_tool_arguments(data: dict, *, trusted_components: bool = False)
     max_pin = rows * cols if layout == "matrix" and rows and cols else None
     pin_map_conflict = (data.get("_pin_map_conflict")
                         if isinstance(data.get("_pin_map_conflict"), str) else None)
+    # The blocks below are each of their own cause (HELD_BLOCK_CAUSES): an
+    # answer to another question never lifts them (follow-up E2 of review
+    # R6-3). In the order they were always listed, before the held blocks
+    # of the earlier steps.
+    cause_blocks: dict = {}
     pin_map, populated, completion = _resolve_pin_numbering(
         pin_map, data.get("populated_pins"), rows, cols, max_pin,
         dedicated=bool(data.get("_dedicated_map")), notes=notes)
     if completion:
         # A partial map that no single convention completes: the GUI blocks
         # the automatic generation with this text, the user checks.
-        pin_map_conflict = completion if not pin_map_conflict else pin_map_conflict + "\n" + completion
+        cause_blocks[HELD_PIN_MAP_COMPLETION] = completion
     # A castellated module's footprint is its edge sides (validated above):
     # its optional explicit pads, dropped, block nothing (L2). Otherwise the
     # dropped pads WERE the footprint and the generation must wait.
@@ -17067,12 +17574,13 @@ def _params_from_tool_arguments(data: dict, *, trusted_components: bool = False)
         if data.get("_terminal_reread") == "nothing":
             # Said only when the re-read was actually made and found nothing.
             hole_block += " " + tx("Riletto: nessuna quota di terminale o foro trovata.")
-        pin_map_conflict = hole_block if not pin_map_conflict else pin_map_conflict + "\n" + hole_block
-    if pads_footprint_dropped and unread_positions and not pin_map_conflict:
+        cause_blocks[HELD_PAD_HOLES] = hole_block
+    if (pads_footprint_dropped and unread_positions and not pin_map_conflict
+            and not cause_blocks):
         # The dedicated pad reading normally blocks unconfirmed positions
         # already (apply_dedicated_pads); this covers every path that did not
         # run it, so dropped pads never leave the generation unblocked.
-        pin_map_conflict = (tx(
+        cause_blocks[HELD_PAD_POSITIONS] = (tx(
             "Griglia dei pad senza {fields}: posizioni dei pad {pads} non calcolabili, nessun "
             "footprint finché le posizioni non sono confermate.",
             fields=", ".join(grid_missing), pads=", ".join(unread_positions))
@@ -17085,8 +17593,18 @@ def _params_from_tool_arguments(data: dict, *, trusted_components: bool = False)
         # of the positions alone settles a land that cannot hold its hole.
         # Added after the block of the positions, so that one never hides
         # the other.
-        fit_block = _fit_block(unfit_reasons)
-        pin_map_conflict = fit_block if not pin_map_conflict else pin_map_conflict + "\n" + fit_block
+        cause_blocks[HELD_PAD_FIT] = _fit_block(unfit_reasons)
+
+    # Every block of its own cause, carried in `held_blocks` so an answer to
+    # another question never lifts it, and listed after the own block in the
+    # text the window reads (follow-ups D1 and E2 of review R6-3).
+    # The own block (the readings' and questions' of the analysis) is held
+    # too, under the cause of what it is about (review G): an answer to the
+    # pad-hole question no longer lifts the disagreement of the positions.
+    own = ({_own_block_cause(layout, package_geometry is not None or bool(unread)):
+            pin_map_conflict} if pin_map_conflict else {})
+    held_blocks = {**own, **cause_blocks, **_held_blocks(data)}
+    pin_map_conflict = _blocks_text(None, held_blocks)
 
     body_length = _opt_float("body_length_mm")
     lead_diameter = _opt_float("lead_diameter_mm")
@@ -17152,6 +17670,7 @@ def _params_from_tool_arguments(data: dict, *, trusted_components: bool = False)
         lead_diameter_mm=lead_diameter,
         lead_exit=_validated_lead_exit(data.get("lead_exit"), notes),
         pin_map_conflict=pin_map_conflict,
+        held_blocks=held_blocks or None,
         body_conflict=data.get("_body_conflict") if isinstance(data.get("_body_conflict"), str) else None,
         geometry_doubts=geometry_doubts,
         questions=[dict(question) for question in data.get("_questions") or ()

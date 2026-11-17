@@ -299,9 +299,12 @@ def test_terminal_worker_run_uses_snapshot_and_emits_result_or_error(
         assert not errors
 
 
-def test_close_event_waits_for_terminal_worker_then_accepts(window):
+def test_close_event_waits_for_terminal_worker_then_accepts(window, monkeypatch):
     from PyQt6.QtGui import QCloseEvent
 
+    # Since review 2026-11-16 (R1-6) the refused close asks whether to stop the
+    # pass; «Attendi» here, the stop has its own test (test_review_1116_c10.py).
+    monkeypatch.setattr(window, "_ask_stop_terminal_pass", lambda: False)
     state = SimpleNamespace(running=True)
     worker = SimpleNamespace(isRunning=lambda: state.running)
     window._terminal_worker = worker

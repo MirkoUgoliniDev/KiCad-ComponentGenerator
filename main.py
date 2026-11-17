@@ -128,7 +128,23 @@ def install_crash_reports(exit_process=os._exit):
     report = sys.excepthook
 
     def report_and_stop(exc_type, exc_value, exc_tb):
+        """Write the report, drop the native log this crash does not need, flush and exit."""
+        if late_worker_exception():
+            # The user already closed the program: a worker thread left behind
+            # by the bounded exit wait (gui/quit_wait.py) failing during the
+            # interpreter shutdown is not a crash of the session. It is
+            # printed, never reported, and the exit status stays the user's
+            # (review 2026-11-16, follow-up 4).
+            try:
+                import traceback
+                traceback.print_exception(exc_type, exc_value, exc_tb, file=sys.stderr)
+            except Exception:  # noqa: BLE001 - no stderr in the windowed executable
+                pass
+            return
         report(exc_type, exc_value, exc_tb)
+        # The Python report explains this exit: a native log left behind
+        # would become a second, misleading report at the next start.
+        crash_report.discard_native_log()
         for stream in (sys.stdout, sys.stderr):
             try:
                 stream.flush()
@@ -138,6 +154,196 @@ def install_crash_reports(exit_process=os._exit):
 
     sys.excepthook = report_and_stop
     return report_and_stop
+
+
+#: Module that knows whether the application has begun to quit (fixer C9).
+QUIT_STATE_MODULE = "kicadgen.gui.quit_wait"
+
+
+def late_worker_exception():
+    """@brief Tell whether the exception being handled is a worker's, raised after the quit began.
+
+    @return True only when the current thread is not the main thread AND the
+        GUI's `quit_wait.is_quitting()` says the exit has begun. False in
+        every other case: on the main thread, before the quit, and when the
+        module or its function is missing or fails (the report is then
+        written, as before).
+    @note The module is looked up in ``sys.modules`` only, never imported:
+        this runs inside the crash hook, possibly during the interpreter
+        shutdown, and a GUI that never loaded it has not begun to quit
+        through it.
+    """
+    import threading
+    if threading.current_thread() is threading.main_thread():
+        return False
+    module = sys.modules.get(QUIT_STATE_MODULE)
+    is_quitting = getattr(module, "is_quitting", None)
+    try:
+        return bool(is_quitting()) if callable(is_quitting) else False
+    except Exception:  # noqa: BLE001 - in doubt, report
+        return False
+
+
+#: Reference to the Qt message handler installed by `install_native_crash_log`:
+#: Qt keeps only a C pointer, the Python callable must stay alive here.
+_QT_MESSAGE_HANDLER = None
+
+
+def install_native_crash_log(register_exit=None):
+    """@brief Keep a trace of native crashes, which the Python hooks never see.
+
+    @param register_exit Function registering a callable for a normal exit;
+        default `atexit.register` (replaceable in tests).
+    @return The path of this process's native log, or None when it could not
+        be opened (the program starts anyway).
+    @note Review 2026-11-16, R12-5. Three steps: (1) the native logs left by
+        earlier processes that died are turned into crash reports
+        (`crash_report.adopt_native_logs`), so «Segnala un problema…»
+        (Report a problem) names them; (2) this process opens its own log,
+        with faulthandler bound to it; (3) Qt's critical and fatal messages
+        go to that log too (`install_qt_message_log`): a fatal one is
+        followed by an abort, and in the windowed executable stderr goes
+        nowhere. A normal exit deletes the log; the Python crash hook deletes
+        it too, since its own report already explains the exit.
+    """
+    import atexit
+    from kicadgen import crash_report
+    register_exit = register_exit or atexit.register
+    crash_report.adopt_native_logs()
+    path = crash_report.open_native_log()
+    if path is not None:
+        register_exit(crash_report.discard_native_log)
+        install_qt_message_log(register_exit=register_exit)
+    return path
+
+
+def watch_existing_application():
+    """@brief Connect the native log's orderly-end marks to the QApplication, when one exists.
+
+    @return True when an application was found and connected.
+    @note The in-process splash creates the application here; with the
+        animated splash process it is created later by the window module,
+        which then has to call `crash_report.watch_application(app)` itself
+        (idempotent). Without either, the continuation watch thread still
+        marks what the process survived.
+    """
+    try:
+        from PyQt6.QtCore import QCoreApplication
+    except (ImportError, OSError):
+        return False
+    from kicadgen import crash_report
+    app = QCoreApplication.instance()
+    return app is not None and crash_report.watch_application(app)
+
+
+def qt_message_line(kind_name, message):
+    """@brief The native-log line for one Qt message, or None when it is not kept.
+
+    @param kind_name Name of the Qt message type (``QtCriticalMsg``, ...).
+    @param message The message text.
+    @return ``"Qt critical: <message>"`` / ``"Qt fatal: <message>"`` for the
+        two kinds that announce a failure; None for debug, info and warning
+        messages, which are frequent and harmless and would bury the reason.
+    """
+    labels = {"QtCriticalMsg": "critical", "QtFatalMsg": "fatal"}
+    label = labels.get(str(kind_name).rsplit(".", 1)[-1])
+    return None if label is None else f"Qt {label}: {message}"
+
+
+def install_qt_message_log(register_exit=None):
+    """@brief Route Qt's messages to stderr as before and its failures to the native log.
+
+    @param register_exit Function registering a callable for a normal exit;
+        default `atexit.register`.
+    @return True when the handler was installed, False without PyQt6.
+    @note A Python handler installed before this one receives every message
+        as before (it is chained); without one, every message is printed on
+        stderr when there is one, so a source run in a terminal still sees
+        Qt's warnings. At a normal exit the previous handler comes back,
+        before the interpreter is torn down, unless someone replaced this
+        one meanwhile.
+    """
+    global _QT_MESSAGE_HANDLER
+    import atexit
+    try:
+        from PyQt6.QtCore import qInstallMessageHandler
+    except (ImportError, OSError):
+        return False
+    from kicadgen import crash_report
+    previous = None
+
+    def handler(kind, context, message):
+        """Qt message handler: the native log for failures, then the previous handler or stderr."""
+        try:
+            line = qt_message_line(getattr(kind, "name", kind), message)
+            if line is not None:
+                crash_report.log_native_line(line)
+            if previous is not None:
+                previous(kind, context, message)
+            elif sys.stderr is not None:
+                print(message, file=sys.stderr, flush=True)
+        except Exception:  # noqa: BLE001 - a message handler must never raise into Qt
+            pass
+
+    def restore():
+        """Give Qt back the previous handler, unless ours was already replaced."""
+        current = qInstallMessageHandler(previous)
+        if current is not handler:
+            qInstallMessageHandler(current)
+
+    _QT_MESSAGE_HANDLER = handler
+    previous = qInstallMessageHandler(handler)
+    (register_exit or atexit.register)(restore)
+    return True
+
+
+def load_env_files(files=None, load=None, warn=None):
+    """@brief Load the ``.env`` files into the process environment, skipping unusable ones.
+
+    @param files Files in priority order; default `kicadgen.app_paths.env_files()`.
+    @param load Function receiving one decoded text (``dotenv.load_dotenv``
+        with a stream, which keeps the first value set); default python-dotenv's.
+    @param warn Function receiving one English line per skipped file;
+        default a print on stderr.
+    @return The (path, kind, detail) of every file skipped, as
+        `app_paths.unreadable_env_files` reports them.
+    @note Review 2026-11-16, R12-1: ``load_dotenv(path)`` decodes as UTF-8
+        only, and a UTF-16 or ANSI file raised UnicodeDecodeError before the
+        window and the crash hooks existed, so the program never started.
+        Each file is now decoded by `app_paths.read_env_text` (byte-order
+        mark, else UTF-8); a file that cannot be read or decoded is skipped
+        and named, and the start-up goes on.
+    """
+    import io
+    from kicadgen.app_paths import EnvFileEncodingError, env_files, read_env_text
+    if load is None:
+        from dotenv import load_dotenv
+
+        def load(text):
+            """Load one decoded text without overriding values already set."""
+            load_dotenv(stream=io.StringIO(text))
+    if warn is None:
+        def warn(line):
+            """Print one skipped-file line on stderr, when there is one."""
+            if sys.stderr is not None:
+                print(line, file=sys.stderr)
+    skipped = []
+    for path in env_files() if files is None else files:
+        path = Path(path)
+        try:
+            if not path.is_file():
+                continue
+            text = read_env_text(path)
+        except EnvFileEncodingError as exc:
+            skipped.append((path, "encoding", str(exc)))
+            warn(f"KiCadGen: .env file skipped, not text in a supported encoding: {exc}")
+            continue
+        except OSError as exc:
+            skipped.append((path, "io", str(exc)))
+            warn(f"KiCadGen: .env file skipped, unreadable: {exc}")
+            continue
+        load(text)
+    return skipped
 
 
 def _qt_library_paths():
@@ -225,17 +431,23 @@ def check_runtime(resource_path=None, modules=RUNTIME_MODULES, resources=None,
         try:
             importlib.import_module(name)
             say(f"{name}: OK")
-        except (ImportError, OSError) as exc:
+        # Exception, not only ImportError/OSError: a module that raises while
+        # it is imported (a RuntimeError of a native library, a SyntaxError,
+        # an AttributeError at module level) used to escape the check with a
+        # traceback the windowed executable never shows and no report file
+        # (review 2026-11-16, R12-3). It is a failed import like the others.
+        except Exception as exc:  # noqa: BLE001 - see above
+            reason = str(exc) if isinstance(exc, (ImportError, OSError)) else f"{type(exc).__name__}: {exc}"
             if optional:
-                say(f"{name}: not installed (optional from the sources: {exc})")
+                say(f"{name}: not installed (optional from the sources: {reason})")
             else:
-                say(f"{name}: {exc}")
+                say(f"{name}: {reason}")
                 failed_modules.append(name)
     if resource_path is None:
         try:
             from kicadgen.app_paths import resource_path
-        except ImportError as exc:
-            say(f"kicadgen.app_paths: {exc}", error=True)
+        except Exception as exc:  # noqa: BLE001 - same reason as the module imports above
+            say(f"kicadgen.app_paths: {type(exc).__name__}: {exc}", error=True)
             return finish(1)
     if resources is None:
         resources = RUNTIME_RESOURCES + (PACKAGE_RESOURCES if frozen else ())
@@ -395,15 +607,22 @@ def main():
     if sys.argv[1:2] == [SPLASH_FLAG]:
         # The splash process: paints until the parent closes the pipe.
         return run_splash(sys.argv[2] if len(sys.argv) > 2 else "en")
+    # Before the .env files and the GUI import, so that a failure in either
+    # leaves a report (review 2026-11-16, R12-1: a .env decoding error used
+    # to stop the program before any hook existed).
+    install_crash_reports()
     try:
-        from dotenv import load_dotenv
-        from kicadgen.app_paths import env_files
+        install_native_crash_log()
+    except Exception as exc:  # noqa: BLE001 - a missing native log never blocks the start-up
+        print(f"KiCadGen: native crash log not opened: {exc}", file=sys.stderr)
+    try:
         # From source, the repository's .env; installed, the one in the user's
         # data folder (Program Files is read-only).
         key_names = ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY")
         preset = {name for name in key_names if name in os.environ}
-        for env_file in env_files():
-            load_dotenv(env_file)
+        # A file that cannot be read or decoded is skipped and named on
+        # stderr; app_paths.unreadable_env_files() tells the window which.
+        load_env_files()
         # The provider keys of a .env file must not stay in the process
         # environment: there they would outrank the keys saved with «Account
         # AI…» in the Windows Credential Manager. openrouter.api_key() and
@@ -415,8 +634,6 @@ def main():
                 os.environ.pop(name, None)
     except ImportError:
         pass
-    # Before the GUI import, so that a failing import is reported too.
-    install_crash_reports()
     # The splash goes up before the window module is imported: that import is
     # the slow part of the start-up, and the click must answer at once.
     try:
@@ -424,6 +641,7 @@ def main():
     except Exception as exc:  # noqa: BLE001 - a splash is a courtesy, never a blocker
         print(f"KiCadGen: splash non mostrato: {exc}", file=sys.stderr)
         splash = None
+    watch_existing_application()
     from kicadgen.gui.main_window import main as run_gui
     return run_gui(splash)
 

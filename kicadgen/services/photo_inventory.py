@@ -744,22 +744,24 @@ def read_photo(path):
     @note The EXIF orientation matters: phones store the pixels one way and
         the right way in the tag. The document preview applies it too
         (`guided_documents.document_pixmap`), so both show the same photo.
+        It is read and applied as the AI request does
+        (`photo_orientation.decode_upright`, review 2026-11-16 R8-1), not
+        left to whichever OpenCV decoder understands the tag.
     """
-    import cv2
     import numpy as np
+    from .photo_orientation import decode_upright
     if Path(path).suffix.lower() == '.gif':
         # GIF is accepted by the document importer; consistently use its
         # first frame, including on OpenCV builds without a GIF decoder.
-        from PIL import Image
+        from PIL import Image, ImageOps
         with Image.open(path) as image:
-            return np.asarray(image.convert('RGB'))[:, :, ::-1].copy()
-    # imdecode also supports Unicode paths on Windows; IMREAD_COLOR applies
-    # the orientation tag.
+            return np.asarray(ImageOps.exif_transpose(image).convert('RGB'))[:, :, ::-1].copy()
+    # Decoded from memory: Unicode paths work on Windows.
     encoded = np.fromfile(str(path), dtype=np.uint8)
-    return cv2.imdecode(encoded, cv2.IMREAD_COLOR)
+    return decode_upright(encoded)
 
 
-def prepare_photo(path, length, width, metadata=None, *, frame_callback=None):
+def prepare_photo(path, length, width, metadata=None, *, frame_callback=None, cancel=None):
     """@brief Read a photo, locate the board (deskewing if needed) and return the calibrated crop.
 
     @param path Photo file.
@@ -772,39 +774,54 @@ def prepare_photo(path, length, width, metadata=None, *, frame_callback=None):
     @param frame_callback Optional callback(full_bgr, box_px) receiving the
         complete, possibly deskewed frame and its board ROI. A crop classifier
         can retain component margins beyond the board edge in that frame.
+    @param cancel Optional cancellation channel (event, predicate or None),
+        checked between the steps: reading, board search, straightening,
+        edge profiles (review 2026-11-16, R8-2: a 48 MP photo took 22 s here).
     @return BGR crop of the board, or None when the photo cannot be read or calibrated.
+    @throws CallCancelled When `cancel` is set between two steps.
+    @throws MemoryError When the photo does not fit in memory; the caller
+        reports it (extract_inventory turns it into a warning).
     """
+    from .photo_cancel import raise_if_cancelled
     from .photo_refine import find_board, locate_board
+    raise_if_cancelled(cancel)
     image = read_photo(path)
     if image is None:
         return None
+    raise_if_cancelled(cancel)
 
-    def not_found(original):
+    # The search on the photo as taken, done ONCE: its reason is the one the
+    # user reads when the board is not found, also after a failed
+    # straightening (before, `not_found` searched the whole photo again).
+    search = locate_board(image, length, width)
+
+    def not_found():
         # The reason (board rotated by 90 degrees relative to the dimensions,
         # or no region distinct from the background) reaches the log instead
         # of the generic «nessuna vista calibrabile» (no calibratable view)
         # (26/09).
         if metadata is not None:
-            metadata["board_failure"] = locate_board(original, length, width).message(length, width)
+            metadata["board_failure"] = search.message(length, width)
         return None
 
-    original = image
-    frame = find_board(image, length, width)
+    frame = search.frame
     # Rotation applied to the photo before the crop, in degrees: None when
     # the crop box refers to the original pixels.
     deskew_deg = None
     if frame is None:
+        raise_if_cancelled(cancel)
         # A freehand photo is almost always skewed by a few degrees, and
         # find_board tolerates less than one. It is straightened and retried:
         # it is a rigid rotation, the scale stays the true one.
         from .photo_refine import deskew_board_report
         straight = deskew_board_report(image, length, width)
         if straight is None:
-            return not_found(original)
+            return not_found()
+        raise_if_cancelled(cancel)
         image, deskew_deg = straight
         frame = find_board(image, length, width)
         if frame is None:
-            return not_found(original)
+            return not_found()
     # find_board does not correct perspective nor swap axes: the declared
     # length runs along X (horizontal in the photo). A board declared with
     # length < width is expected vertical (26/09); a board photographed
@@ -812,7 +829,15 @@ def prepare_photo(path, length, width, metadata=None, *, frame_callback=None):
     x0, y0 = round(frame.cx-frame.width_px/2), round(frame.cy-frame.height_px/2)
     x1, y1 = round(frame.cx+frame.width_px/2), round(frame.cy+frame.height_px/2)
     if x0 < 0 or y0 < 0 or x1 > image.shape[1] or y1 > image.shape[0]:
+        # The board was found but its box leaves the picture: a crop would
+        # be cut, so there is no calibration -- with its own reason, not the
+        # generic «no calibratable view» (review 2026-11-16, R8-9).
+        if metadata is not None:
+            metadata["board_failure"] = tx(
+                "La scheda trovata esce dai bordi della foto: inquadrarla per intero, con "
+                "un po' di sfondo su ogni lato.")
         return None
+    raise_if_cancelled(cancel)
     if metadata is not None:
         from .photo_refine import MAX_BOARD_ASPECT_ERROR, _aspect_error, aspect_deformation
         if _aspect_error(frame.width_px, frame.height_px, length, width) > MAX_BOARD_ASPECT_ERROR:
@@ -1528,6 +1553,11 @@ def classify_smd_rows(rows, photo, frame_px, mm_per_pixel, log, cancel, announce
     predictions = [_outside_prediction() for _ in rows]
     for index, prediction in zip(inside, found):
         predictions[index] = prediction
+    # Provenance = the network file actually loaded (`network`, the path
+    # classify_photo_boxes received), not a fixed «smd_classifier.pt v3»
+    # that was false for the ONNX export or any other checkpoint (review
+    # 2026-11-16, R8-7). The file name is a code, never translated.
+    source = network.name
     for row, prediction in zip(rows, predictions):
         row['_smd_prediction'] = prediction
         row['_source'] = 'YOLO + SMD local'
@@ -1544,40 +1574,41 @@ def classify_smd_rows(rows, photo, frame_px, mm_per_pixel, log, cancel, announce
         # In words as in every other path: the network is a single uncalibrated
         # model, so never 'high'; the probability stays in _smd_prediction.
         row['class_confidence'] = 'medium' if prediction['accepted'] else 'low'
-        row['_category_source'] = 'smd_classifier.pt v3'
+        row['_category_source'] = source
         row['_category_status'] = 'proposed' if prediction['accepted'] else 'undetermined'
         row['kind'] = prediction['kind'] if prediction['accepted'] else 'generic'
         row['class'] = row['kind']
         row['_detected_kind'] = row['kind']
         row['package'] = prediction['package'] if prediction['accepted'] else ''
-        row['package_source'] = 'smd_classifier.pt v3'
+        row['package_source'] = source
         row['name'] = f"{prediction['class'] if prediction['accepted'] else 'generic'} {row['_id']}"
         row['model_match'] = prediction['model_match']
         row['footprint'] = prediction['footprint']
         row['footprint_candidates'] = prediction['footprint_candidates']
         # Keep the measured body's angle: KiCad pose is separate evidence.
         row['_orientation_verified'] = False
-        network = ('Tipo e orientamento proposti dalla rete locale; '
-                   'altezza stimata e abbinamento KiCad da verificare.' if prediction['accepted']
-                   else 'Rete locale: tipo non riconosciuto o confidenza insufficiente.')
+        # In the interface language, as every other review reason
+        # (photo_crop_reading._add_review_reason; review 2026-11-16, R8-8).
+        verdict = (tx("Tipo e orientamento proposti dalla rete locale; altezza stimata e "
+                      "abbinamento KiCad da verificare.") if prediction['accepted']
+                   else tx("Rete locale: tipo non riconosciuto o confidenza insufficiente."))
         # Appended, never overwritten: a doubt the detector raised (an overlap
         # within its edge uncertainty) must survive the classification
         # (second review 2026-11-03).
         previous = row.get('_review_reason')
-        row['_review_reason'] = f'{previous} | {network}' if previous else network
+        row['_review_reason'] = f'{previous} | {verdict}' if previous else verdict
     log(tx("Rete SMD locale: {n} corpi classificati; {accepted} sopra soglia.",
            n=len(rows), accepted=sum(p['accepted'] for p in predictions)))
     return predictions
 
 
 def _cancel_requested(cancel):
-    """Whether the cancellation channel of extract_inventory (event, predicate or None) is set."""
-    if cancel is None:
-        return False
-    try:
-        return bool(cancel.is_set() if hasattr(cancel, 'is_set') else cancel())
-    except Exception:  # noqa: BLE001 - a broken channel is not a cancellation request
-        return False
+    """Whether the cancellation channel of extract_inventory (event, predicate or None) is set.
+
+    One rule for every local phase: photo_cancel.cancel_requested.
+    """
+    from .photo_cancel import cancel_requested
+    return cancel_requested(cancel)
 
 
 def recheck_unresolved_smd_rows(photo, report, rows, length, width, model, call, log,
@@ -2031,15 +2062,19 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
     @param grounding_prompt Optional replacement of the grounding instructions.
     @param verification_prompt Optional replacement of the verification instructions.
     @param top_photo_source Who chose the top view (for the log), 'AI' by default.
-    @param cancel Cancellation channel (event, predicate or None) checked by the
-        local SMD network, which makes no paid call.
+    @param cancel Cancellation channel (event, predicate or None) checked by
+        every local phase -- board search and calibration, edge measurements,
+        the local detector view by view, the SMD network -- and once more
+        before the review window opens and after it closes (review
+        2026-11-16, R8-2: «Interrompi» was ignored there). None: nothing is
+        checked, as before.
     @return InventoryResult with components, warnings, calibrated photo, overlay
         and calibration details.
     @throws ValueError When `detector` is not supported, or the full photo is
         missing for the SMD crops.
     @throws ReviewCancelled When `review_proposals` returns None.
-    @throws CallCancelled (or subclass) when the user cancels a paid call or the
-        SMD classification.
+    @throws CallCancelled (or subclass) when the user cancels a paid call, a
+        local phase or the SMD classification.
 
     @param crop_prompt Instructions of the per-body crop reading (profile
         field 'crop_prompt'), forwarded to photo_crop_reading.read_bodies as
@@ -2126,6 +2161,12 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
     """
     log = progress or (lambda message: None)
     announce = _phase_announcer(phase, log)
+    from .photo_cancel import raise_if_cancelled
+
+    def check_cancel():
+        # Between two local phases: «Interrompi» (Stop) ends the run here,
+        # never inside a half-written result.
+        raise_if_cancelled(cancel)
     if detector not in PHOTO_DETECTORS:
         raise ValueError(tx("Rilevatore fotografico non supportato."))
     if detector == 'yolo_smd' and yolo_model_path is None:
@@ -2159,22 +2200,33 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
         # OpenCV works here, locally: it looks for the board in the photo and calibrates it.
         announce('opencv', tx("ricerca e calibrazione della scheda"))
     try:
-        candidates = []
+        # Only the most detailed calibrated view is kept while the others are
+        # tried (review 2026-11-16, R8-3): every crop -- and with the SMD
+        # network every full frame -- used to stay in memory until the end.
+        # Ties keep the first view, as max() did.
+        best = None
         failures = []
         for i,path in photos:
+            check_cancel()
             calibration = {}
             frames = []
             photo = prepare_photo(path,length,width,calibration,
                 **({'frame_callback': lambda full, roi: frames.append((full, roi))}
-                   if detector == 'yolo_smd' else {}))
+                   if detector == 'yolo_smd' else {}),
+                # Passed only when there is a channel: the fakes of the tests
+                # and older replacements keep their signature.
+                **({'cancel': cancel} if cancel is not None else {}))
             if photo is not None:
-                candidates.append((photo.shape[0]*photo.shape[1],path,photo,calibration,
-                                   frames[0] if frames else None))
+                area = photo.shape[0]*photo.shape[1]
+                if best is None or area > best[0]:
+                    best = (area,path,photo,calibration,frames[0] if frames else None)
             elif calibration.get("board_failure"):
                 failures.append(f"{Path(path).name}: {calibration['board_failure']}")
+            del photo, frames
+        check_cancel()
         for failure in failures:
             warn(failure)
-        if not candidates:
+        if best is None:
             if photos:
                 # No tool works on the photo any more: the modal must not stay
                 # on the failed calibration.
@@ -2190,7 +2242,16 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
     except (OSError, ValueError) as exc:
         warn(tx("Foto non leggibile: {exc}", exc=exc))
         return report
-    _, path, photo, report.calibration, source_frame = max(candidates, key=lambda c:c[0])
+    except MemoryError:
+        # A very large photo (48 MP and beyond) on a machine without the
+        # memory to calibrate it: said in words, and the main inventory
+        # stays, instead of an unexplained failure (review 2026-11-16, R8-3).
+        best = None
+        announce('', '')
+        warn(tx("Foto troppo grande per la memoria disponibile: ridurne la risoluzione "
+                "e ripetere l'analisi; resta l'inventario principale."))
+        return report
+    _, path, photo, report.calibration, source_frame = best
     report.photo = path.name
     height_px, width_px = photo.shape[:2]
     log(tx("OpenCV (locale): scheda trovata in {name}, {w} x {h} px; scala X {sx:.2f} px/mm, "
@@ -2211,6 +2272,7 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
         # side is counted, confirmed and its lands measured like any other.
         # Edges whose outline shows notches as deep as a half-hole at the
         # declared contacts: an independent photo witness of an edge opening.
+        check_cancel()
         notched_edges = set()
         for item in notched_full_hole_sides(edge_profiles, photo.shape, length, width,
                                             declared.get("castellated_sides")):
@@ -2244,6 +2306,7 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
             sides = normalized_sides(declared.get("castellated_sides"))
             pitches = {edge: side.get("pitch_mm") for edge, side in sides.items()}
             for item in disagreements:
+                check_cancel()
                 if item.no_notch:
                     # The copper is read AT the declared contact positions too
                     # (second review 2026-11-03): presence and absence are
@@ -2264,6 +2327,7 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
                     log(tx("Rame sul bordo {edge}: {found} elementi in fila al passo dichiarato{reason}.",
                            edge=item.edge, found=copper.found if copper.found is not None else "?",
                            reason=f" ({copper.reason})" if copper.reason else ""))
+        check_cancel()
         if disagreements and recount_contacts is not None:
             # AI recheck of the disagreeing sides only (user, 28/09, point
             # 137); then the comparison is repeated on the sides in force,
@@ -2286,6 +2350,7 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
         rows = confirmed_rows(edge_profiles, photo.shape, length, width,
                               declared.get("castellated_sides"))
         measured_lands = {}
+        check_cancel()
         if rows:
             lands = measure_lands(photo, length, width, rows, edge_profiles)
             measured_lands = lands
@@ -2316,6 +2381,7 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
             # a declared inner through-hole survived with no photo evidence).
             # The land measured inwards (`measure_lands`) sets how deep the
             # holes are read, so «no closed hole» covers the whole land.
+            check_cancel()
             located = (rows or {}).get(edge, {}).get("centres_mm")
             land = measured_lands.get(edge)
             reading = measure_edge_holes(photo, edge, side.get("pitch_mm"), length, width,
@@ -2370,6 +2436,7 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
                top_photo_source=top_photo_source,
                name=path.name))
     _warn_if_too_coarse(photo.shape[1], length, warn, crop_py=photo.shape[0], body_width=width)
+    check_cancel()
     import cv2
     ok, encoded = cv2.imencode(".png", photo)
     report.photo_png = encoded.tobytes() if ok else None
@@ -2393,7 +2460,9 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
                    "riquadri tenuti nella revisione saranno il risultato."))
             proposals = detect_yolo_components(photo, length, width, model_path=yolo_model_path,
                                               log=log, audit_dir=audit, include_review_candidates=True,
-                                              confidence=yolo_confidence, settings=yolo_settings)
+                                              confidence=yolo_confidence, settings=yolo_settings,
+                                              **({'cancel': cancel} if cancel is not None else {}))
+            check_cancel()
             report.calibration['detector_proposal_count'] = len(proposals)
             if not proposals and detector == 'yolo':
                 # The detector HAS run and found nothing: the paid enumeration
@@ -2450,9 +2519,11 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
             # gradient, which needs no training. It is done here, before the
             # preview and the review, because it is the geometry the user must
             # be able to contest by looking at it.
+            check_cancel()
             announce('opencv', tx("misura dei bordi dei corpi proposti"))
             proposals = measure_proposal_edges(photo, proposals, positions,
                                                length, width, log)
+            check_cancel()
             # The preview of what the detector proposed, before the
             # reconciliation: it is the only way to understand whether the
             # contact filter removed the lands or something good.
@@ -2465,9 +2536,14 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
             # and receiving it cleaner costs less and gives it less noise to
             # get rid of. Cancelling means not proceeding: nobody must pay for
             # a call on proposals that have not been approved.
+            # «Interrompi» (Stop) pressed during the local phases must not
+            # open the review window (review 2026-11-16, R8-2), and pressed
+            # while it was open it must not let the paid calls start.
+            check_cancel()
             kept = review_proposals(report.photo_png, proposals, length, width)
             if kept is None:
                 raise ReviewCancelled(tx("Revisione dei corpi rilevati annullata."))
+            check_cancel()
             log(tx("Revisione dei corpi: {n_kept} proposte tenute su {n_proposals}.",
                    n_kept=len(kept),
                    n_proposals=len(proposals)))

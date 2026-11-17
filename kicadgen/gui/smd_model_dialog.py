@@ -28,7 +28,7 @@ from ..services import yolo_models
 from ..services.messages import tx
 from .theme import SUBTEXT, YELLOW
 from .yolo_model_dialog import (_NOT_GIVEN, _breakable, _identity, _JobResults,
-                                _size_text)
+                                _keep_job_result, _size_text)
 
 
 class _Signals(QObject):
@@ -54,10 +54,12 @@ class _Job(QRunnable):
         self.examined = None
 
     def run(self):
-        """@brief QRunnable override: compute and emit (kind, path, result).
+        """@brief QRunnable override: compute, keep for the session, emit (kind, path, result).
 
         @note The file identity is taken before reading it, so the result is
             remembered for the content examined even if the file changes meanwhile.
+        @note Kept for the session by the job itself, as in
+            `yolo_model_dialog._Job.run`: a window closed meanwhile loses nothing.
         """
         self.examined = _identity(self.path)
         try:
@@ -71,6 +73,7 @@ class _Job(QRunnable):
         except BaseException as exc:  # noqa: BLE001 - nothing may leave a QRunnable
             result = ({"ok": False, "error": type(exc).__name__} if self.kind == "smd_check"
                       else None)
+        _keep_job_result(self.kind, self.examined, result, "smd_check")
         self.signals.ready.emit(self.kind, self.path, result)
 
 
@@ -354,6 +357,7 @@ class SmdModelDialog(QDialog):
 
         @note Same reason as YoloModelDialog.shutdown (HANDOFF 131): a window
             destroyed later by the garbage collector must not start a job.
+            The jobs already running keep their results for the session.
         """
         self._closed = True
         self.model_list.blockSignals(True)

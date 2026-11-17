@@ -154,10 +154,33 @@ class GestureController(QObject):
     def move(self, point) -> bool
     def release(self, point) -> bool            # self.move(point); then _finish(commit=True)
     def cancel(self) -> bool                    # idle → False; else _finish(commit=False); never touches items
+    def lost_release(self, buttons) -> bool     # a move without the left button: cancel (review 2026-11-16, R5-1)
     def rebind_live_items(self, items) -> None  # redraw mid-drag: new items + re-apply the last delta
     def forget_items(self) -> None              # before scene.clear(): drop every item reference
 
 class CancelOnEscapeAndHide(QObject):          # event filter: Escape while a drag runs, and Hide, call controller.cancel()
+    # band=, camera=: FocusOut (not MenuBarFocusReason) and WindowDeactivate also cancel the band and the pan
+```
+
+**Lost release (review 2026-11-16, R5-1; canvas-parity review L1), both tabs.**
+A drag, a rubber band or a pan whose button release can no longer reach the
+view is CANCELLED, as Escape and Hide cancel it (never committed: the drop the
+user did not make is not invented; the drag goes back where it began, the band
+selects nothing, the pan leaves the picture where the last move put it):
+
+- a move without the button that started it: `GestureController.lost_release`
+  and `RubberBand.lost_release` (left), `Camera.pan_lost_release` (the pan's
+  own button, left or middle), called by both views' `mouseMoveEvent`;
+- the view's FocusOut and WindowDeactivate (`LOST_RELEASE_EVENTS`: a modal
+  dialog, Alt+Tab), through `CancelOnEscapeAndHide`, which the views build
+  with their band and camera;
+- EXCEPT a FocusOut with `MenuBarFocusReason` (Alt pressed and released
+  alone puts the menu bar in keyboard mode; the mouse grab still gives the
+  release to the view, so the drag goes on).
+
+Tests: `tests/test_review_1116_c5.py`.
+
+```python
 
 class HoverGroups:
     def __init__(self, view, margin_px=HOVER_MARGIN_PX)

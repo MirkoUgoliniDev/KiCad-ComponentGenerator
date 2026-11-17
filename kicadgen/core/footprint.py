@@ -2198,11 +2198,70 @@ def _clean_typed_dimension(record: dict, dtype: str) -> Optional[dict]:
     return clean
 
 
-def drawing_graphics(records) -> list:
+def drawing_is_degenerate(record: dict) -> bool:
+    """@brief Whether a shape record draws nothing once its points are taken at the stored resolution.
+
+    @param record A drawing record in the shape `validate_footprint_drawings`
+        returns, possibly edited after its validation (a vertex dragged onto
+        its neighbour, a dimension end moved onto the other).
+    @return True when, comparing points by `vertex_edit.stored_key`: a
+        ``line`` keeps fewer than two distinct vertices; a ``polygon`` or
+        ``zone`` fewer than three, or encloses no area; a ``dimension`` or
+        ``circle`` has its two points equal (an orthogonal dimension: equal
+        along its axis); a ``rectangle`` or ``textbox`` corners that do not
+        differ on both axes; a ``curve`` all four points equal; an ``arc``
+        fewer than three distinct points or no centre KiCad can hold
+        (`arc_centre_representable`). False for every other record, texts
+        included.
+    @note The rules are the ones `validate_footprint_drawings` applies when a
+        project is loaded, so an edit that collapses a shape gives the same
+        verdict as reloading the project would.
+    """
+    kind = record.get("kind")
+    points = [tuple(p) for p in record.get("points", ())]
+    keys = [stored_key(p) for p in points]
+    if kind in ("line", "polygon", "zone"):
+        collapsed = collapse_repeated_points(points, closed=kind != "line")
+        if len(collapsed) < USER_DRAW_MIN_POINTS[kind]:
+            return True
+        return kind != "line" and not _polygon_has_area(collapsed)
+    if kind in ("dimension", "circle"):
+        if len(keys) < 2 or keys[0] == keys[1]:
+            return True
+        # An orthogonal dimension measures along its axis: equal coordinates
+        # there measure nothing (the validator's rule).
+        axis = record.get("axis", "") if kind == "dimension" else ""
+        return axis in ("x", "y") and keys[0][0 if axis == "x" else 1] == keys[1][0 if axis == "x" else 1]
+    if kind in ("rectangle", "textbox"):
+        return len(keys) < 2 or keys[0][0] == keys[1][0] or keys[0][1] == keys[1][1]
+    if kind == "curve":
+        return len(set(keys)) <= 1
+    if kind == "arc":
+        return len(set(keys)) < 3 or not arc_centre_representable(*points)
+    return False
+
+
+def skipped_drawings_note(count: int) -> str:
+    """@brief The user-facing line that reports drawings left out of a footprint because they collapsed.
+
+    @param count Number of records `drawing_graphics` left out (its `skipped`).
+    @return The localized sentence, or "" when nothing was left out.
+    """
+    if count <= 0:
+        return ""
+    return tx("{count} disegni del footprint ridotti a un punto o a una linea senza area non sono "
+              "stati scritti nel file: correggili o eliminali nell'anteprima del footprint.",
+              count=count)
+
+
+def drawing_graphics(records, skipped: Optional[list] = None) -> list:
     """@brief Convert validated user drawing records into footprint graphics.
 
     @param records Records in the shape `validate_footprint_drawings` returns
         (the caller validates; a malformed record here is a programming error).
+    @param skipped Optional list that receives the index (in `records`) of
+        every record left out because it collapsed (`drawing_is_degenerate`);
+        the caller tells the user with `skipped_drawings_note`.
     @return Graphic items (FpLine/FpPoly/FpRect/FpCircle/FpArc/FpText/
         FpDimension/FpCurve/FpTextBox/FpZone) ready for
         `Footprint.add_graphic`, in record order; a line record yields one
@@ -2211,6 +2270,12 @@ def drawing_graphics(records) -> list:
         except that consecutive repeated vertices of a line, polygon or zone
         are collapsed (`collapse_repeated_points`): no zero-length fp_line or
         side is ever written.
+    @note CONTRACT CHANGED 2026-11-16 (review R11-8): a record that collapsed
+        after its validation (a polygon edited down to two vertices, a
+        dimension whose ends meet) is LEFT OUT instead of reaching a writer
+        that raises: one degenerate user drawing used to block the whole
+        footprint write. It draws nothing, so nothing of the footprint is
+        lost; the index goes to `skipped` so the omission is never silent.
     @note A text, a text box or a dimension on a back layer is written
         mirrored by its own writer (`mirrored_justify`).
     @note A text anchored at `USER_TEXT_ANCHOR` is written with
@@ -2220,7 +2285,11 @@ def drawing_graphics(records) -> list:
         a text without it, or with 0, is written exactly as before.
     """
     items = []
-    for record in records:
+    for index, record in enumerate(records):
+        if drawing_is_degenerate(record):
+            if skipped is not None:
+                skipped.append(index)
+            continue
         # A zone has copper `layers`, not a drawing `layer`.
         kind, layer = record["kind"], record.get("layer")
         width = record.get("width", USER_DRAW_WIDTH_MM)
@@ -2917,8 +2986,11 @@ class Footprint:
 
         @param path Destination .kicad_mod path; its file name must be
             ``<name>.kicad_mod``.
-        @throws ValueError When the file name is not ``<name>.kicad_mod``
-            (nothing is written).
+        @throws ValueError When the file name is not ``<name>.kicad_mod``, or
+            the name holds a character KiCad mis-handles in a footprint name
+            (`output_names.KICAD_UNSAFE_NAME_CHARACTERS`, «%»: kicad-cli 10
+            crashes on every read of it; review 2026-11-16, R11-7); nothing
+            is written.
         @throws OSError When the folder cannot be created or the file cannot
             be written or replaced; the previous file, if any, is left intact.
         @note The text is written to a temporary sibling and moved onto
@@ -2935,6 +3007,16 @@ class Footprint:
 
         from ..fsutil import replace_file
 
+        from .output_names import kicad_unsafe_characters
+
+        unsafe = kicad_unsafe_characters(self.name)
+        if unsafe:
+            # The same refusal and words as `output_names.validate_output_name`:
+            # every generator validates its parameters with it, this guard
+            # covers a Footprint built by hand and saved directly.
+            raise ValueError(tx("Il nome del componente non può contenere «{characters}»: KiCad legge "
+                                "questo carattere nei nomi di footprint e simboli come un codice di "
+                                "formato e si chiude.", characters=" ".join(unsafe)))
         expected = footprint_file_name(self.name)
         if os.path.basename(path) != expected:
             raise ValueError(

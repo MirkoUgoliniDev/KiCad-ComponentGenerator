@@ -23,6 +23,7 @@ before the program starts.
 
 from __future__ import annotations
 
+import codecs
 import os
 import shutil
 import sqlite3
@@ -206,13 +207,23 @@ SQLITE_HEADER = b"SQLite format 3\x00"
 _SQLITE_COMPANIONS = ("-journal", "-wal", "-shm")
 
 
-def _has_sqlite_header(path: Path) -> bool:
-    """True when the file starts with the SQLite 3 magic header."""
+def _sqlite_header_state(path: Path) -> bool | None:
+    """Whether the file starts with the SQLite 3 magic header; None when it cannot be read.
+
+    None is not an answer about the content: a file held open by a backup or
+    an antivirus scanner, or a permission problem, says nothing about what the
+    file holds (review 2026-11-16, R12-2).
+    """
     try:
         with path.open("rb") as handle:
             return handle.read(len(SQLITE_HEADER)) == SQLITE_HEADER
     except OSError:
-        return False
+        return None
+
+
+def _has_sqlite_header(path: Path) -> bool:
+    """True when the file is readable and starts with the SQLite 3 magic header."""
+    return _sqlite_header_state(path) is True
 
 
 def is_damaged_sqlite(path: Path) -> bool:
@@ -224,8 +235,14 @@ def is_damaged_sqlite(path: Path) -> bool:
         False for a sound database and for any doubtful case.
     @note A locked or busy database, or an I/O error, is NOT damage: those
         answers are transient, and a False positive would set user data aside.
+        This holds for the header read too: a file that cannot be opened for
+        reading (sharing violation, permission) is a doubtful case, never a
+        wrong header (review 2026-11-16, R12-2).
     """
-    if not _has_sqlite_header(path):
+    header = _sqlite_header_state(path)
+    if header is None:
+        return False
+    if not header:
         return True
     try:
         connection = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=1)
@@ -239,19 +256,42 @@ def is_damaged_sqlite(path: Path) -> bool:
 
 
 def _set_aside(target: Path) -> Path:
-    """Rename a damaged file (and its SQLite companions) to ``.corrupt-<time>``."""
+    """Rename a damaged file and its SQLite companions to ``.corrupt-<time>``, all or nothing.
+
+    The companions (``-journal``, ``-wal``, ``-shm``) move together with the
+    database: a stale journal left next to the fresh seed would be replayed
+    onto it by SQLite. When any rename fails, the ones already done are
+    undone in reverse order and the OSError propagates, so the caller never
+    copies a seed beside an orphan journal and the user's files stay where
+    they were (review 2026-11-16, R12-9: the database used to move first and
+    a failing companion rename left the journal behind).
+    """
     stamp = time.strftime("%Y%m%d-%H%M%S")
     aside = target.with_name(f"{target.name}.corrupt-{stamp}")
     counter = 1
-    while aside.exists():
+    while aside.exists() or any(aside.with_name(aside.name + suffix).exists()
+                                for suffix in _SQLITE_COMPANIONS):
         aside = target.with_name(f"{target.name}.corrupt-{stamp}-{counter}")
         counter += 1
-    os.replace(target, aside)
+    moves = [(target, aside)]
     for suffix in _SQLITE_COMPANIONS:
         companion = target.with_name(target.name + suffix)
         if companion.exists():
-            # A stale journal must never be replayed onto the fresh seed.
-            os.replace(companion, aside.with_name(aside.name + suffix))
+            moves.append((companion, aside.with_name(aside.name + suffix)))
+    done: list[tuple[Path, Path]] = []
+    try:
+        for source, destination in moves:
+            os.replace(source, destination)
+            done.append((source, destination))
+    except OSError:
+        for source, destination in reversed(done):
+            try:
+                os.replace(destination, source)
+            except OSError:
+                # Best effort: the file keeps its .corrupt- name, which is
+                # still never deleted and still never replayed.
+                pass
+        raise
     return aside
 
 
@@ -318,3 +358,87 @@ def env_files() -> list[Path]:
     if root not in files:
         files.append(root)
     return files
+
+
+#: Byte-order marks a text editor may put at the start of a ``.env`` file,
+#: with the codec that decodes the file (mark included). UTF-32 LE comes
+#: before UTF-16 LE because its mark starts with the UTF-16 LE one.
+_ENV_BOMS = (
+    (codecs.BOM_UTF32_LE, "utf-32"),
+    (codecs.BOM_UTF32_BE, "utf-32"),
+    (codecs.BOM_UTF8, "utf-8-sig"),
+    (codecs.BOM_UTF16_LE, "utf-16"),
+    (codecs.BOM_UTF16_BE, "utf-16"),
+)
+
+
+class EnvFileEncodingError(ValueError):
+    """@brief A ``.env`` file whose bytes are not text in a supported encoding.
+
+    @note A ValueError, like the UnicodeDecodeError it replaces, so callers
+        that already skip a file on ValueError keep doing so.
+    """
+
+
+def read_env_text(path) -> str:
+    """@brief The text of a ``.env`` file, decoded by its byte-order mark or as UTF-8.
+
+    @param path The file.
+    @return The decoded text, without the byte-order mark.
+    @throws OSError When the file cannot be read.
+    @throws EnvFileEncodingError When it has no mark and is not valid UTF-8,
+        or when the decoded text holds a NUL character, which no ``.env``
+        text contains: that is the shape of a UTF-16 file saved without a
+        mark, whose ASCII would otherwise decode into keys full of NULs.
+    @note python-dotenv reads files as UTF-8 only, and a UnicodeDecodeError
+        raised while the launcher loaded ``.env`` stopped the program before
+        its window and its crash hooks (review 2026-11-16, R12-1). Windows
+        tools write other encodings: PowerShell 5.1's ``>`` writes UTF-16 LE
+        with a mark, Notepad can save «Unicode». A file with a mark says
+        what it is, so it is decoded; a file without one is UTF-8 or
+        refused. The ANSI code page is never guessed: a key decoded with the
+        wrong code page would be a wrong key, used silently.
+    """
+    raw = Path(path).read_bytes()
+    for bom, codec in _ENV_BOMS:
+        if raw.startswith(bom):
+            try:
+                text = raw.decode(codec)
+            except UnicodeDecodeError as exc:
+                raise EnvFileEncodingError(f"{path}: not valid {codec} text ({exc.reason})") from exc
+            break
+    else:
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise EnvFileEncodingError(
+                f"{path}: neither UTF-8 nor marked UTF-16/UTF-32 text ({exc.reason})") from exc
+    text = text.lstrip("﻿")
+    if "\x00" in text:
+        raise EnvFileEncodingError(f"{path}: holds NUL characters (UTF-16 saved without a mark?)")
+    return text
+
+
+def unreadable_env_files(files=None) -> list[tuple[Path, str, str]]:
+    """@brief The ``.env`` files that exist but cannot be used, and why.
+
+    @param files Files to check; default `env_files()`.
+    @return One (path, kind, detail) per existing file that `read_env_text`
+        refuses: kind is "encoding" (`EnvFileEncodingError`) or "io" (an
+        OSError: locked, permission denied); detail is the error text, in
+        English. A missing file is not listed: having no ``.env`` is normal.
+    @note Stateless, so the window can ask at start-up which files the
+        launcher skipped without the launcher keeping a list for it.
+    """
+    problems: list[tuple[Path, str, str]] = []
+    for path in env_files() if files is None else files:
+        path = Path(path)
+        try:
+            if not path.is_file():
+                continue
+            read_env_text(path)
+        except EnvFileEncodingError as exc:
+            problems.append((path, "encoding", str(exc)))
+        except OSError as exc:
+            problems.append((path, "io", str(exc)))
+    return problems

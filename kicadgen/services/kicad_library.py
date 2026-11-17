@@ -8,7 +8,12 @@ discarding unrelated entries.
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass, field
+import functools
+import hashlib
+import inspect
+import logging
 import math
 import os
 from pathlib import Path
@@ -225,6 +230,13 @@ class LibraryInstallResult:
     #: Same as `table_changed` for the symbol table (`symbol_table_path`);
     #: False when no symbol was installed.
     symbol_table_changed: bool = False
+    #: Rollback folders an EARLIER install left in the library root without
+    #: the disposable marker (review 2026-11-16, R9-7): an install killed
+    #: half-way (crash, power loss) or one that ended ``rollback_incomplete``.
+    #: They hold the copies of the files as they were before that install
+    #: and a journal naming each original (`ROLLBACK_JOURNAL`); they are never
+    #: removed automatically, so the window can tell the user where they are.
+    earlier_rollbacks: tuple[Path, ...] = ()
 
     @property
     def symbol_library_bom_removed(self) -> bool:
@@ -2190,13 +2202,17 @@ def _retry_pause(seconds: float) -> None:
     time.sleep(seconds)
 
 
-def _publish_scratch(scratch: Path, target: Path) -> None:
+def _publish_scratch(scratch: Path, target: Path, *, on_in_place=None) -> None:
     """@brief Make `target` hold the complete, fsynced bytes of `scratch`.
 
     @param scratch Sibling scratch file of `target`, fully written and
         flushed; consumed (renamed or removed) on success.
     @param target Real file to publish (links already resolved by
         `_write_target`), existing or not.
+    @param on_in_place Callable taking `target`, called right BEFORE an
+        in-place overwrite starts (never for the atomic rename); the install
+        registers the target for its rollback there (review 2026-11-16,
+        R9-1), because a failed in-place write leaves the file truncated.
     @throws OSError From `replace_file` or `_write_in_place`; `scratch` is
         then left for the caller's cleanup.
     @note The ONE place that chooses between the atomic rename (plain or
@@ -2206,6 +2222,8 @@ def _publish_scratch(scratch: Path, target: Path) -> None:
         installed footprint and models, the preview files and the rollback.
     """
     if _hard_linked(target):
+        if on_in_place is not None:
+            on_in_place(target)
         _write_in_place(scratch, target)
         _unlink_quietly(scratch)
         return
@@ -2246,6 +2264,66 @@ def _atomic_copy(source: Path, target: Path) -> None:
         _publish_scratch(temporary, target)
     finally:
         _unlink_quietly(temporary)
+
+
+def _run_contained(command: list[str], *, timeout: float, cwd: str | None = None,
+                   capture_output: bool = True, text: bool = True, errors: str = "replace",
+                   creationflags: int = 0, on_start=None) -> subprocess.CompletedProcess:
+    """@brief Run a kicad-cli command like ``subprocess.run``, but end its whole process tree.
+
+    @param on_start Callable taking the started, contained process, called
+        before the wait (the preview render worker registers it there so its
+        `stop` can kill the tree). An exception it raises (a stop already
+        asked) kills the tree, reaps it and goes on to the caller; the
+        Job Object and the bounded reap stay this function's.
+
+    @param command The command line (list).
+    @param timeout Seconds before the tree is killed and TimeoutExpired raised.
+    @param cwd Working folder of the command.
+    @param capture_output Accepted for ``subprocess.run`` compatibility:
+        stdout and stderr are always captured.
+    @param text Accepted for compatibility: the output is always text.
+    @param errors Decoding error policy of the captured text.
+    @param creationflags Accepted for compatibility: the window is always
+        suppressed (``CREATE_NO_WINDOW`` on Windows).
+    @return The completed process with its text output.
+    @throws subprocess.TimeoutExpired When `timeout` elapsed (the tree is
+        already killed and the child reaped within a bounded grace).
+    @throws OSError When the command cannot be started.
+    @note Review 2026-11-16, R9-5: ``subprocess.run`` kills only the direct
+        child on a timeout and then waits WITHOUT a bound for the pipes to
+        close, so a descendant kicad-cli started (or one hung on exit) kept
+        the caller -- the preview render, the version probe of a global
+        install on the GUI thread -- blocked for ever. Here the child runs
+        in a Job Object (`process_log.contain_process`), any exception out of
+        the wait kills the tree (`kill_process_tree`), the reap is bounded
+        (`reap_killed_child`) and the job handle is always released, the
+        same shape as `component_check._run_cli`.
+    """
+    del capture_output, text, creationflags  # always captured, text, no window
+    from ..cad3d.process_log import (contain_process, kill_process_tree, reap_killed_child,
+                                     release_process)
+    process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, text=True, errors=errors, cwd=cwd,
+                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    contain_process(process)
+    try:
+        try:
+            if on_start is not None:
+                on_start(process)
+            stdout, stderr = process.communicate(timeout=timeout)
+        except BaseException:
+            # Nothing may outlive the command: a timeout, an interrupt or a
+            # refusal of `on_start` ends the tree before the exception goes on.
+            try:
+                kill_process_tree(process)
+            except OSError:
+                pass  # already gone
+            reap_killed_child(process)
+            raise
+    finally:
+        release_process(process)
+    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
 
 
 def launch_preview(pcbnew_path: str | os.PathLike[str], board_path: Path) -> None:
@@ -2493,7 +2571,8 @@ def render_preview_image(preview: PreviewProject, kicad_cli: str | os.PathLike[s
     if not kicad_cli or not Path(kicad_cli).is_file():
         return PreviewRender(None, "kicad_cli_missing")
     scratch = image.with_name(f".{image.stem}.{uuid.uuid4().hex[:8]}.png")
-    run = runner or subprocess.run
+    # The whole process tree ends on a timeout, the wait is bounded (R9-5).
+    run = runner or _run_contained
     try:
         try:
             proc = run(
@@ -3355,6 +3434,10 @@ def _rollback_install(
 
     @param installed Targets this install really changed, in order: replaced
         by a staged file, or (WRL) deleted. Targets never reached are absent.
+        A hard-linked target is listed BEFORE its in-place write starts
+        (review 2026-11-16, R9-1): that write is not atomic, so a failure
+        half-way leaves it truncated; one still holding its backup's bytes
+        is skipped (`_same_content`).
     @param backups Rollback copy of every target that existed before.
     @param table Library table of the install.
     @param table_backup Rollback copy of the table, None when it did not exist.
@@ -3386,6 +3469,12 @@ def _rollback_install(
     failures: list[str] = []
     for target in installed:
         if target in backups:
+            if _same_content(target, backups[target]):
+                # Registered BEFORE an in-place write (R9-1) whose open was
+                # refused: the file was never touched, nothing to put back,
+                # and a restore onto the same refused file would only report
+                # a false ``rollback_incomplete``.
+                continue
             try:
                 _restore_file(backups[target], target)
             except (OSError, KiCadLibraryError) as error:
@@ -3461,6 +3550,102 @@ ROLLBACK_DIR_PREFIX = ".kicadgen-rollback-"
 #: the only copies of the user's files and has no marker.
 ROLLBACK_DISPOSABLE_MARKER = "kicadgen-rollback-disposable"
 _ROLLBACK_DIR_NAME = re.compile(re.escape(ROLLBACK_DIR_PREFIX) + r"[0-9a-f]{32}\Z")
+#: Text file an install writes into its rollback folder before its first
+#: change (review 2026-11-16, R9-7): one line per rollback copy with the
+#: file it stands for, and one per file the install creates. An install
+#: killed half-way leaves the folder with this journal, so the user (told by
+#: the next install, `LibraryInstallResult.earlier_rollbacks`) can see which
+#: copy belongs where.
+ROLLBACK_JOURNAL = "kicadgen-rollback-journal.txt"
+
+
+def _write_rollback_journal(rollback_dir: Path, aliases: dict[Path, Path],
+                            created: list[Path]) -> None:
+    """@brief Write `ROLLBACK_JOURNAL` into the rollback folder, durably.
+
+    @param rollback_dir This install's rollback folder.
+    @param aliases Internal path -> the user's file it stands for; the
+        entries inside `rollback_dir` are the rollback copies.
+    @param created Targets this install creates (no previous file to keep).
+    @throws OSError When the journal cannot be written: raised before the
+        first change, so the install fails cleanly and rolls back nothing.
+    @note Plain tab-separated text, English header, the paths as the file
+        system spells them: meant to be read by a person restoring by hand,
+        not parsed by the program.
+    """
+    lines = ["KiCadGen installation in progress. If this folder is still here, the "
+             "installation did not finish: each copy below is a file as it was "
+             "before; put it back over the file named next to it.",
+             "copy\toriginal file"]
+    for internal, original in aliases.items():
+        if internal.parent == rollback_dir:
+            lines.append(f"{internal.name}\t{original}")
+    lines.append("")
+    lines.append("created by the installation (did not exist before)")
+    lines.extend(str(path) for path in created)
+    # `_write_durably` creates the file when missing ("wb").
+    _write_durably(rollback_dir / ROLLBACK_JOURNAL, ("\n".join(lines) + "\n").encode("utf-8"))
+
+
+def acknowledge_rollback_dir(folder: str | os.PathLike[str]) -> bool:
+    """@brief Mark an earlier rollback folder as seen by the user, so it is no longer reported.
+
+    @param folder One of `LibraryInstallResult.earlier_rollbacks`, or the
+        ``rollback_dir`` of a ``rollback_incomplete`` error.
+    @return True when the folder now holds `ROLLBACK_DISPOSABLE_MARKER`;
+        False when it is not one of ours (name, real folder) or the marker
+        cannot be written.
+    @note Review of R9-7, follow-up 4: without it the same folders were
+        reported at every install. Marking is the user's decision (the window
+        offers it after naming the folder and its journal): the folder is
+        then swept like any disposable one once older than
+        `STALE_SCRATCH_AGE_S` (`_sweep_stale_rollback_dirs`), so the copies
+        stay available for that time. A link or a folder not named like ours
+        is never marked.
+    """
+    path = Path(folder)
+    if not _ROLLBACK_DIR_NAME.match(path.name):
+        return False
+    try:
+        if _is_directory_link(path) or not path.is_dir():
+            return False
+        (path / ROLLBACK_DISPOSABLE_MARKER).write_bytes(b"")
+    except OSError:
+        return False
+    return True
+
+
+def _earlier_rollback_dirs(root: Path) -> tuple[Path, ...]:
+    """@brief Rollback folders an earlier install left in `root` WITHOUT the disposable marker.
+
+    @param root Library root that receives ``<library>.pretty``.
+    @return Those folders, sorted by name; () when there are none or the
+        root cannot be listed.
+    @note Review 2026-11-16, R9-7: such a folder is either an install killed
+        half-way (crash, power loss, the process ended) or one that ended
+        ``rollback_incomplete``; both hold the only copies of files as they
+        were, so they are reported, never removed (`_sweep_stale_rollback_dirs`
+        removes marked folders only). Called under the install locks
+        (`_holding_install_locks`), so no other install of this user on this
+        computer is writing its own folder there at the same time.
+    """
+    found: list[Path] = []
+    try:
+        entries = list(os.scandir(root))
+    except OSError:
+        return ()
+    for entry in entries:
+        if not _ROLLBACK_DIR_NAME.match(entry.name):
+            continue
+        try:
+            if _is_reparse_point(entry) or not entry.is_dir(follow_symlinks=False):
+                continue
+            if (Path(entry.path) / ROLLBACK_DISPOSABLE_MARKER).exists():
+                continue
+        except OSError:
+            continue
+        found.append(Path(entry.path))
+    return tuple(sorted(found))
 
 
 def _dispose_rollback_dir(rollback_dir: Path) -> Path | None:
@@ -3970,6 +4155,183 @@ def _destination_row_already_there(
             and _same_place(entry.uri, library_uri, project_dir))
 
 
+#: Seconds an install waits for another install holding the same library
+#: root or library table (review 2026-11-16, R9-2). ZERO by design (review of
+#: the fix, follow-up 2): the window runs the install on its GUI thread, so
+#: any wait freezes it («Not responding»); a busy library is refused at once
+#: with ``install_busy`` and the user retries. Callers off the GUI thread may
+#: pass `wait_s` to `_install_locks`.
+INSTALL_LOCK_WAIT_S = 0.0
+#: Pause between two attempts to take a held install lock.
+_INSTALL_LOCK_POLL_S = 0.1
+
+
+def _install_lock_dir() -> Path:
+    """Folder of the install lock files: the user's temporary folder (module-level so tests can redirect it)."""
+    return Path(tempfile.gettempdir()) / "kicadgen-install-locks"
+
+
+def _lock_pause(seconds: float) -> None:
+    """Pause between two attempts to take an install lock (looked up at call time so tests can replace it)."""
+    time.sleep(seconds)
+
+
+def _install_lock_key(path: str | os.PathLike[str]) -> str:
+    """@brief Identity of a library root or table for the install locks.
+
+    @param path Folder or file as the caller names it (may not exist yet).
+    @return The absolute path with links followed and the case folded where
+        the file system ignores it: two spellings of one place (a symbolic
+        link to a dotfiles table, a different letter case on Windows) take
+        the same lock.
+    """
+    return os.path.normcase(os.path.realpath(os.path.abspath(os.path.expanduser(os.fspath(path)))))
+
+
+def _open_lock_file(key: str) -> int | None:
+    """@brief Open (creating it) the lock file of one lock key.
+
+    @param key `_install_lock_key` of the place to lock.
+    @return The open descriptor, or None when the lock folder cannot be used
+        (an unwritable temporary folder): the install then goes on without
+        that lock, as before this lock existed, and says so in the log.
+    @note The file is never deleted: removing a lock file while another
+        process waits on it would let a third one lock a NEW file of the
+        same name, and both would hold «the» lock.
+    """
+    folder = _install_lock_dir()
+    name = hashlib.sha256(key.encode("utf-8")).hexdigest()[:32] + ".lock"
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        return os.open(folder / name, os.O_RDWR | os.O_CREAT, 0o600)
+    except OSError as exc:
+        logging.getLogger(__name__).warning(
+            "install lock for %s not available (%s); installing without it", key, exc)
+        return None
+
+
+def _try_lock(descriptor: int) -> bool:
+    """@brief Take the operating-system lock of an open lock file without waiting.
+
+    @param descriptor Descriptor from `_open_lock_file`.
+    @return True when taken; False when another holder (another process, or
+        another open of the same file in this process) has it.
+    @note An OS lock, not a «file exists» flag: the system releases it when
+        its holder ends, even by a crash, so a stale lock never needs to be
+        detected and broken by guesswork (pid reuse, ages). Windows locks one
+        byte (``msvcrt.locking``), POSIX the whole file (``flock``, which
+        conflicts between two opens in one process as well).
+    """
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return False
+    return True
+
+
+def _release_lock(descriptor: int) -> None:
+    """Release and close one lock taken by `_try_lock` (errors ignored: closing releases it too)."""
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+    except OSError:
+        pass
+    finally:
+        os.close(descriptor)
+
+
+@contextlib.contextmanager
+def _install_locks(paths, *, wait_s: float | None = None):
+    """@brief Hold the install locks of library roots and tables for the duration of a block.
+
+    @param paths Folders and files the block writes (library root, tables).
+    @param wait_s Seconds to wait for a held lock; None for `INSTALL_LOCK_WAIT_S`.
+    @throws KiCadLibraryError ``install_busy`` (context ``path``: the place
+        another install holds) when a lock is still held after the wait;
+        nothing was written then.
+    @note Review 2026-11-16, R9-2: two installs into the same library at
+        once (two windows of the program) each merged the symbol library and
+        the tables they had read, the last writer won and a symbol vanished
+        while both reported success. The locks are taken in a fixed order
+        (sorted keys), so two installs never wait for each other in a cycle.
+    @note Scope: the lock files live in the user's temporary folder, so they
+        exclude installs of the same user on this computer -- the case of
+        two program windows. Two users or two computers writing one shared
+        network library are not excluded.
+    """
+    deadline = time.monotonic() + (INSTALL_LOCK_WAIT_S if wait_s is None else wait_s)
+    held: list[int] = []
+    try:
+        for key, path in sorted({_install_lock_key(path): path for path in paths}.items()):
+            descriptor = _open_lock_file(key)
+            if descriptor is None:
+                continue
+            while not _try_lock(descriptor):
+                if time.monotonic() >= deadline:
+                    os.close(descriptor)
+                    raise KiCadLibraryError(
+                        f"Another installation is writing to {path}. Wait for it to finish, "
+                        "then retry. No file was changed.",
+                        code="install_busy", path=Path(path))
+                _lock_pause(_INSTALL_LOCK_POLL_S)
+            held.append(descriptor)
+        yield
+    finally:
+        for descriptor in reversed(held):
+            _release_lock(descriptor)
+
+
+def _install_lock_paths(destination_root, table_path=None, symbol_table_path=None) -> list[Path]:
+    """@brief The places an install writes, as `plan_component_install` derives them.
+
+    @param destination_root Folder receiving the libraries.
+    @param table_path Footprint table given to the install, or None.
+    @param symbol_table_path Symbol table given to the install, or None.
+    @return The library root, the footprint table and the symbol table.
+    """
+    root = Path(os.path.abspath(Path(destination_root).expanduser()))
+    table = Path(table_path) if table_path else root / "fp-lib-table"
+    symbols = (Path(symbol_table_path) if symbol_table_path
+               else Path(table_path).with_name("sym-lib-table") if table_path
+               else root / "sym-lib-table")
+    return [root, table, symbols]
+
+
+def _holding_install_locks(function):
+    """@brief Run an install while holding `_install_locks` on its root and its tables.
+
+    @param function `install_component_library`.
+    @return The wrapped function, same signature and docstring.
+    @note The plan, the merge of the shared symbol library and every write
+        happen inside the locks, so what an install read is still what it
+        overwrites.
+    """
+    signature = inspect.signature(function)
+
+    @functools.wraps(function)
+    def wrapper(*args, **kwargs):
+        """Bind the arguments, take the locks, run the install."""
+        bound = signature.bind(*args, **kwargs)
+        bound.apply_defaults()
+        values = bound.arguments
+        with _install_locks(_install_lock_paths(values["destination_root"], values["table_path"],
+                                               values["symbol_table_path"])):
+            return function(*args, **kwargs)
+    return wrapper
+
+
+@_holding_install_locks
 def install_component_library(
         artifacts: ComponentArtifacts, destination_root: str | os.PathLike[str],
         *, library_name: str = "KiCadGen", project_library: bool = True,
@@ -4071,6 +4433,13 @@ def install_component_library(
         sweeps the disposable ones older than `STALE_SCRATCH_AGE_S`
         (`_sweep_stale_rollback_dirs`). The folder kept by
         ``rollback_incomplete`` holds the only copies and is never swept.
+    @note Review 2026-11-16: the whole install runs under `_install_locks`
+        on its root and both tables (R9-2; ``install_busy`` when another
+        install keeps them past `INSTALL_LOCK_WAIT_S`); a hard-linked target
+        joins the rollback before its in-place write (R9-1); the rollback
+        folder holds `ROLLBACK_JOURNAL` before the first change, and the
+        unmarked rollback folders of earlier installs are reported in
+        `LibraryInstallResult.earlier_rollbacks` (R9-7).
     """
     plan = plan_component_install(
         artifacts, destination_root, library_name=library_name,
@@ -4188,6 +4557,8 @@ def install_component_library(
     # removes exactly the scratch files created so far.
     staged: list[tuple[Path, Path]] = []
     _sweep_stale_rollback_dirs(root)
+    # Listed before this install's own folder exists (R9-7).
+    earlier_rollbacks = _earlier_rollback_dirs(root)
     rollback_dir = root / f"{ROLLBACK_DIR_PREFIX}{uuid.uuid4().hex}"
     # Internal path -> the user's file it stands for, so an error never names
     # a scratch file or the rollback folder (review 2026-10-15, L5).
@@ -4281,14 +4652,34 @@ def install_component_library(
                                     (symbol_table, symbol_table_changes)):
             if changes:
                 histories[each_table] = _snapshot_table_history(each_table, rollback_dir, aliases)
+        # Written last before the first change (R9-7): an install killed
+        # from here on leaves a rollback folder that names every original.
+        if rollback_dir.is_dir():
+            # Created files: the staged targets with no previous copy, and a
+            # table this install creates (project install, `create_missing`;
+            # follow-up 4 of the review of R9-7).
+            created_tables = [each for each, existed, changes in (
+                (destination_table, table_existed, fp_table_changes),
+                (symbol_table, symbol_table_existed, with_symbol and symbol_table_changes))
+                if changes and not existed]
+            _write_rollback_journal(rollback_dir, aliases,
+                                    [target for _temporary, target in staged
+                                     if target not in backups] + created_tables)
         for temporary, target in staged:
             # Retried like every other atomic write: an antivirus or KiCad's
             # file watcher holding the target for an instant must not undo
             # the whole installation (review 2026-10-15, M5). A hard-linked
             # target is overwritten in place: its rollback copy was taken
             # just above (`_publish_scratch`).
-            _publish_scratch(temporary, target)
-            installed.append(target)
+            # SAFETY BOUNDARY (review 2026-11-16, R9-1): the in-place write
+            # of a hard-linked target truncates first and is not atomic, so
+            # a failure half-way (a full disk) leaves the shared file cut
+            # short under every name. It joins the rollback BEFORE that
+            # write (`on_in_place`), or the rollback would skip it and then
+            # dispose of the only copy of the user's library.
+            _publish_scratch(temporary, target, on_in_place=installed.append)
+            if target not in installed:
+                installed.append(target)
         if not with_model and real_step.is_file():
             # No model shipped (USER DECISION 2026-11-12): the STEP of an
             # earlier install no longer matches the footprint, which does
@@ -4365,6 +4756,7 @@ def install_component_library(
         bom_removed=plan.bom_to_remove,
         table_changed=fp_table_row_changed,
         symbol_table_changed=with_symbol and symbol_table_row_changed,
+        earlier_rollbacks=earlier_rollbacks,
     )
 
 
@@ -4403,10 +4795,9 @@ def _run_kicad_cli_version(executable: Path) -> str | None:
     if key in _KICAD_CLI_VERSION_CACHE:
         return _KICAD_CLI_VERSION_CACHE[key]
     try:
-        proc = subprocess.run(
-            [str(executable), "version"], capture_output=True, text=True,
-            errors="replace", timeout=KICAD_CLI_VERSION_TIMEOUT_S,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        # Tree killed on a timeout, bounded reap (review 2026-11-16, R9-5).
+        proc = _run_contained(
+            [str(executable), "version"], timeout=KICAD_CLI_VERSION_TIMEOUT_S)
     except (OSError, subprocess.SubprocessError):
         output = None
     else:

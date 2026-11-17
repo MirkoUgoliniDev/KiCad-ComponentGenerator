@@ -206,7 +206,12 @@ def test_a_download_longer_than_the_manifest_size_is_stopped_early(tool, tmp_pat
 def test_a_truncated_download_is_refused_by_its_size(tool, tmp_path):
     """@brief Negative counterpart: a shorter stream is refused as truncated, not taken for the file."""
     entry = _entry("a.onnx", b"complete file")
-    with pytest.raises(ValueError, match="truncated"):
+    # CONTRACT CHANGED 2026-11-16 (review R12-6): a stream that ends early
+    # with no announced size is a cut transfer, refused as before but as a
+    # TRANSIENT error (an OSError, exit 1, retried by the release workflow),
+    # no longer as a permanent ValueError. A complete shorter file announced
+    # as such stays permanent: tests/test_review_1116_c1.py.
+    with pytest.raises(tool.TruncatedDownloadError, match="truncated"):
         tool.fetch(entry, tmp_path, opener=lambda url: _Response(b"complete"), log=lambda line: None)
     assert not list((tmp_path / "yolo").iterdir())
 
